@@ -8,3 +8,4 @@ weaviate-client
 tqdm
 python-dateutil
 python-dotenv
+tiktoken
