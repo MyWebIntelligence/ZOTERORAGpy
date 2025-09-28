@@ -62,7 +62,7 @@ Transformer un export Zotero (`.json` + arborescence `files/`) en CSV enrichi av
 
 ### Variables d'environnement clés
 - `MISTRAL_API_KEY` (obligatoire pour la voie OCR Mistral).
-- `MISTRAL_OCR_MODEL`, `MISTRAL_API_BASE_URL`, `MISTRAL_OCR_PROMPT` (optionnels pour ajuster le provider).
+- `MISTRAL_OCR_MODEL` et `MISTRAL_API_BASE_URL` (optionnels selon l'endpoint OCR choisi).
 - `OPENAI_API_KEY` et `OPENAI_OCR_MODEL` pour le fallback vision.
 - `OPENAI_OCR_MAX_PAGES`, `OPENAI_OCR_MAX_TOKENS`, `OPENAI_OCR_RENDER_SCALE` pour contrôler les appels de secours.
 
@@ -79,7 +79,7 @@ python scripts/rad_dataframe.py \
 
 ### Comportement remarqué
 - En cas de PDF introuvable, tente une recherche fuzzy (normalisation accent, Levenshtein ≤ 2) dans le dossier visé.
-- `extract_text_with_ocr` tente d'abord un rendu complet Markdown via Mistral, puis bascule sur un fallback OpenAI vision, avant de revenir au flux PyMuPDF historique si aucun service distant n'est disponible.
+- `extract_text_with_ocr` commence par envoyer les PDF à l'endpoint `v1/ocr` de Mistral (upload + document_id), puis bascule sur un fallback OpenAI vision, avant de revenir au flux PyMuPDF historique si aucun service distant n'est disponible.
 - Les métadonnées extraites incluent désormais `texteocr_provider` pour tracer l'origine (`mistral`, `openai`, `legacy`).
 - Le CSV est encodé en `utf-8-sig` pour compatibilité Excel.
 

@@ -94,12 +94,7 @@ def _env_float(name: str, default: float) -> float:
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 MISTRAL_API_BASE_URL = os.getenv("MISTRAL_API_BASE_URL", "https://api.mistral.ai")
-MISTRAL_OCR_MODEL = os.getenv("MISTRAL_OCR_MODEL", "pixtral-large-latest")
-MISTRAL_OCR_PROMPT = os.getenv(
-    "MISTRAL_OCR_PROMPT",
-    "Tu es un moteur d'OCR. Transcris le document PDF fourni en Markdown fidèle, "
-    "conserve les titres, listes, tableaux et texte sans résumer ni inventer."
-)
+MISTRAL_OCR_MODEL = os.getenv("MISTRAL_OCR_MODEL", "mistral-ocr-latest")
 MISTRAL_OCR_TIMEOUT = _env_int("MISTRAL_OCR_TIMEOUT", 300)
 MISTRAL_DELETE_UPLOADED_FILE = _truthy_env(os.getenv("MISTRAL_DELETE_UPLOADED_FILE"), True)
 
@@ -150,10 +145,6 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
     if not MISTRAL_API_KEY:
         raise OCRExtractionError("MISTRAL_API_KEY manquante.")
 
-    instructions = MISTRAL_OCR_PROMPT
-    if max_pages:
-        instructions += f"\nNe traite que les {max_pages} premières pages du document."
-
     base_url = MISTRAL_API_BASE_URL.rstrip("/")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}"}
 
@@ -185,53 +176,55 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
 
         payload = {
             "model": MISTRAL_OCR_MODEL,
-            "response_format": {"type": "markdown"},
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": instructions},
-                        {"type": "input_file", "file_id": file_id},
-                    ],
-                }
-            ],
+            "document": {
+                "type": "document_id",
+                "document_id": file_id,
+            },
+            "include_image_base64": False,
         }
+        if max_pages:
+            payload["page_ranges"] = [
+                {
+                    "start": 1,
+                    "end": max_pages,
+                }
+            ]
 
         response = session.post(
-            f"{base_url}/v1/responses",
+            f"{base_url}/v1/ocr",
             headers={**headers, "Content-Type": "application/json"},
             json=payload,
             timeout=MISTRAL_OCR_TIMEOUT,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError:
+            logger.warning(
+                "Appel Mistral OCR échoué (%s) pour %s: %s",
+                response.status_code,
+                pdf_path,
+                response.text,
+            )
+            raise
+
         response_payload = response.json()
 
         text_fragments: List[str] = []
         if isinstance(response_payload, dict):
-            output_blocks = response_payload.get("output")
-            if isinstance(output_blocks, list):
-                for block in output_blocks:
-                    if isinstance(block, dict) and block.get("type") in {"output_text", "text"}:
-                        fragment = block.get("text") or block.get("content") or ""
-                        if fragment:
-                            text_fragments.append(fragment)
+            full_text = response_payload.get("text")
+            if isinstance(full_text, str) and full_text.strip():
+                text_fragments.append(full_text.strip())
 
-            if not text_fragments:
-                choices = response_payload.get("choices")
-                if isinstance(choices, list):
-                    for choice in choices:
-                        message = choice.get("message", {})
-                        content = message.get("content")
-                        if isinstance(content, str):
-                            text_fragments.append(content)
-                        elif isinstance(content, list):
-                            for part in content:
-                                if isinstance(part, dict) and part.get("type") in {"text", "output_text"}:
-                                    fragment = part.get("text") or ""
-                                    if fragment:
-                                        text_fragments.append(fragment)
+            pages = response_payload.get("pages")
+            if isinstance(pages, list):
+                for page in pages:
+                    if isinstance(page, dict):
+                        page_text = page.get("text")
+                        if isinstance(page_text, str) and page_text.strip():
+                            text_fragments.append(page_text.strip())
 
-        markdown_text = "\n".join(fragment.strip() for fragment in text_fragments if fragment).strip()
+        markdown_text = "\n\n".join(dict.fromkeys(text_fragments))
+        markdown_text = markdown_text.strip()
         if not markdown_text:
             raise OCRExtractionError("La réponse Mistral est vide.")
 

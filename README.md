@@ -65,6 +65,8 @@ Contenu minimal de `.env` (à adapter):
 ```env
 OPENAI_API_KEY=sk-...                # Obligatoire (embeddings + recodage GPT)
 MISTRAL_API_KEY=mist-...             # Recommandé pour l'OCR Markdown
+MISTRAL_OCR_MODEL=mistral-ocr-latest # (optionnel) Override du modèle OCR
+MISTRAL_API_BASE_URL=https://api.mistral.ai  # (optionnel) Endpoint OCR
 PINECONE_API_KEY=pcsk-...            # Optionnel si Pinecone
 WEAVIATE_URL=https://...             # Optionnel si Weaviate
 WEAVIATE_API_KEY=...                 # Optionnel si Weaviate
@@ -118,7 +120,7 @@ Sorties attendues dans `sources/MaBiblio/`:
 - `output_chunks_with_embeddings.json`
 - `output_chunks_with_embeddings_sparse.json`
 
-Le CSV intermédiaire contient un champ `texteocr_provider` indiquant si l'OCR provient de Mistral, d'un fallback OpenAI ou du mode local historique; la phase de chunking saute automatiquement le recodage GPT lorsque la source est Mistral.
+Le CSV intermédiaire contient un champ `texteocr_provider` indiquant si l'OCR provient de Mistral (endpoint `v1/ocr`), d'un fallback OpenAI ou du mode local historique; la phase de chunking saute automatiquement le recodage GPT lorsque la source est Mistral.
 
 3) Chargement en base vectorielle (optionnel, programmatique)
 
