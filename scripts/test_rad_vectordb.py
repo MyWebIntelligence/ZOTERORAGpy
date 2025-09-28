@@ -37,7 +37,7 @@ class TestRadVectorDB(unittest.TestCase):
             "doc_id": "doc1",
             "chunk_index": 0,
             "total_chunks": 1,
-            "chunk_text": "This is a test chunk."
+            "text": "This is a test chunk."
         }
         self.sample_chunk_with_sparse = {
             "id": "doc1_chunk2",
@@ -51,21 +51,21 @@ class TestRadVectorDB(unittest.TestCase):
             "doc_id": "doc1",
             "chunk_index": 1,
             "total_chunks": 2,
-            "chunk_text": "This is a test chunk with sparse data."
+            "text": "This is a test chunk with sparse data."
         }
         self.sample_chunk_no_embedding = {
             "id": "doc1_chunk3",
             "embedding": None, # Missing dense embedding
             "title": "Test Title No Embedding",
             "doc_id": "doc1",
-            "chunk_text": "This chunk has no dense embedding."
+            "text": "This chunk has no dense embedding."
         }
         self.sample_chunk_bad_sparse = {
             "id": "doc1_chunk4",
             "embedding": [0.3] * 10,
             "sparse_embedding": {"indices": ["a", "b"], "values": ["c", "d"]}, # Invalid sparse
             "doc_id": "doc1",
-            "chunk_text": "This chunk has bad sparse data."
+            "text": "This chunk has bad sparse data."
         }
 
     # Test generate_uuid

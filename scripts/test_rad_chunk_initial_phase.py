@@ -124,9 +124,9 @@ class TestRadChunkInitialPhase(unittest.TestCase):
         self.assertIn("doc_id", first_chunk)
         self.assertIn("chunk_index", first_chunk)
         self.assertIn("total_chunks", first_chunk)
-        self.assertIn("chunk_text", first_chunk)
-        self.assertTrue(first_chunk["chunk_text"].startswith("Recodage simulé de:"), 
-                        f"Le texte du chunk ne correspond pas au mock: {first_chunk['chunk_text'][:100]}...")
+        self.assertIn("text", first_chunk)
+        self.assertTrue(first_chunk["text"].startswith("Recodage simulé de:"), 
+                        f"Le texte du chunk ne correspond pas au mock: {first_chunk['text'][:100]}...")
 
         # Vérifier que l'API OpenAI a été appelée
         # Le nombre d'appels dépendra du nombre de chunks et de DEFAULT_BATCH_SIZE_GPT

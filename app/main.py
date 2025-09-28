@@ -567,7 +567,7 @@ async def get_first_chunk(path: str = Query(...), filetype: str = Query(...)): #
             return emb
 
         result = {
-            "chunk_text": first_chunk.get("chunk_text", "")[:500],  # Truncate for safety
+            "text": (first_chunk.get("text") or first_chunk.get("chunk_text", ""))[:500],  # Truncate for safety
             "embedding": None,
             "sparse_embedding": None
         }

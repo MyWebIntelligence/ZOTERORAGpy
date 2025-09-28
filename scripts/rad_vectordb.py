@@ -91,7 +91,7 @@ def prepare_vectors_for_pinecone(chunks):
                     "doc_id": chunk.get("doc_id", ""),
                     "chunk_index": chunk.get("chunk_index", 0),
                     "total_chunks": chunk.get("total_chunks", 0),
-                    "chunk_text": chunk.get("chunk_text", "")
+                    "text": chunk.get("text") or chunk.get("chunk_text", "")
                 }
             }
             
@@ -332,11 +332,11 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
     #   {
     #     "id": "doc1_chunk1", "embedding": [0.1]*128, 
     #     "sparse_embedding": {"indices": [10, 25], "values": [0.5, 0.8]},
-    #     "doc_id": "doc1", "chunk_text": "Texte du chunk 1."
+    #     "doc_id": "doc1", "text": "Texte du chunk 1."
     #   },
     #   {
     #     "id": "doc1_chunk2", "embedding": [0.2]*128, 
-    #     "doc_id": "doc1", "chunk_text": "Texte du chunk 2."
+    #     "doc_id": "doc1", "text": "Texte du chunk 2."
     #   }
     # ]
     # with open(embeddings_json_file_with_sparse, 'w', encoding='utf-8') as f:
@@ -547,7 +547,7 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
                         "doc_id": chunk.get("doc_id", ""),
                         "chunk_index": chunk.get("chunk_index", 0),
                         "total_chunks": chunk.get("total_chunks", 0),
-                        "chunk_text": chunk.get("chunk_text", "")
+                        "text": chunk.get("text") or chunk.get("chunk_text", "")
                     }
                     
                     batch_data_objects.append(
@@ -643,7 +643,7 @@ def prepare_points_for_qdrant(chunks):
                 "doc_id": chunk.get("doc_id", ""),
                 "chunk_index": chunk.get("chunk_index", 0),
                 "total_chunks": chunk.get("total_chunks", 0),
-                "chunk_text": chunk.get("chunk_text", "")
+                "text": chunk.get("text") or chunk.get("chunk_text", "")
             }
             
             # Créer l'objet PointStruct

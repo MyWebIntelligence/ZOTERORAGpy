@@ -257,7 +257,7 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS):
                 "doc_id":       doc_id, # doc_id is generated, should be fine
                 "chunk_index":  original_chunk_index,
                 "total_chunks": len(text_chunks),
-                "chunk_text":   cleaned_text,
+                "text":         cleaned_text,
                 "ocr_provider": sanitize_metadata_value(provider, ""),
             }
             all_processed_chunks.append(chunk_metadata)
@@ -322,7 +322,7 @@ def process_chunks_for_embedding(chunks_batch):
     Traite un lot de chunks pour y ajouter les embeddings denses.
     Modifie les dictionnaires de chunks en place.
     """
-    texts_to_embed = [chunk["chunk_text"] for chunk in chunks_batch]
+    texts_to_embed = [chunk.get("text", "") for chunk in chunks_batch]
     embeddings = get_embeddings_batch(texts_to_embed)
     
     for i, embedding in enumerate(embeddings):
@@ -464,7 +464,7 @@ def generate_sparse_embeddings(input_json_file=DEFAULT_INPUT_JSON_WITH_EMBEDDING
     print(f"Chargement de {len(all_chunks)} chunks depuis '{input_json_file}' pour génération d'embeddings sparses.")
     
     for i, chunk in enumerate(tqdm(all_chunks, desc="Génération Embeddings Sparses")):
-        chunk_text = chunk.get("chunk_text", "")
+        chunk_text = chunk.get("text", "")
         if not chunk_text:
             print(f"Chunk ID {chunk.get('id', i)} a un texte vide, embedding sparse sera vide.")
             sparse_embedding = {"indices": [], "values": []}
