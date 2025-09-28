@@ -146,3 +146,10 @@ input[type="file"], input[type="text"], input[type="password"], select {
   color: #1976d2;
   text-align: center;
 }
+
+.stage-upload-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}

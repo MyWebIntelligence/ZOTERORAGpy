@@ -85,8 +85,7 @@ Ensuite, ouvrez http://localhost:8000
 
 Flux conseillé:
 - Téléverser un ZIP (export Zotero: JSON + `files/` avec PDFs, ou un dossier de PDFs)
-- Lancer « Process dataframe » pour produire `uploads/<session>/output.csv`
-- Lancer successivement: « Initial chunking », « Dense embeddings », « Sparse embeddings »
+- À chaque étape (Process dataframe, Initial chunking, Dense embeddings, Sparse embeddings), choisir entre « Upload » pour injecter un fichier existant ou « Generate » pour recalculer depuis l'étape précédente. Sans fichier téléversé, l'application utilise automatiquement la sortie générée lors de la précédente exécution.
 - Dans « Upload to DB », choisir Pinecone / Weaviate / Qdrant et renseigner les infos; les clés proviennent de `.env` (réglables via « Settings »)
 
 Où sont stockés les fichiers?
@@ -234,4 +233,3 @@ L’UI (« Settings ») permet de lire/écrire `.env` à la racine de `ragpy/`.
 ### 8) Licence
 
 MIT. Voir `LICENSE`.
-

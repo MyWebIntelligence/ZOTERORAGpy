@@ -141,7 +141,11 @@
     <!-- Step 2: Process DataFrame -->
     <section id="dataframe-section" style="display:none;">
       <h2>2. Extract Text & Metadata</h2>
-      <button id="processDataframeBtn">Run Data Processing</button>
+      <form id="dataframeUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+        <input type="file" id="dataframeUploadInput" name="file" accept=".csv" />
+        <button type="submit">Upload CSV</button>
+      </form>
+      <button id="processDataframeBtn">Generate CSV</button>
       <div id="dataframeResult" class="result"></div>
     </section>
 
@@ -149,13 +153,21 @@
     <section id="initial-chunk-section" style="display:none;">
       <h2>3.1 Initial Text Chunking</h2>
       <p style="color: black; font-size: 0.9em;">Warning: This process can take a long time depending on your file. Do not close your browser. We recommend processing a maximum of 10 articles or one book at a time.</p>
-      <button id="runInitialChunkBtn">Run Initial Chunking</button>
+      <form id="initialChunkUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+        <input type="file" id="initialChunkUploadInput" name="file" accept=".json" />
+        <button type="submit">Upload Chunks JSON</button>
+      </form>
+      <button id="runInitialChunkBtn">Generate Chunks</button>
       <div id="initialChunkResult" class="result"></div>
     </section>
 
     <!-- Step 3.2: Dense Embedding Generation -->
     <section id="dense-embedding-section" style="display:none;">
       <h2>3.2 Dense Embedding Generation</h2>
+      <form id="denseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+        <input type="file" id="denseUploadInput" name="file" accept=".json" />
+        <button type="submit">Upload Dense JSON</button>
+      </form>
       <button id="runDenseEmbeddingBtn">Generate Dense Embeddings</button>
       <div id="denseEmbeddingResult" class="result"></div>
     </section>
@@ -163,6 +175,10 @@
     <!-- Step 3.3: Sparse Embedding Generation -->
     <section id="sparse-embedding-section" style="display:none;">
       <h2>3.3 Sparse Embedding Generation</h2>
+      <form id="sparseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+        <input type="file" id="sparseUploadInput" name="file" accept=".json" />
+        <button type="submit">Upload Sparse JSON</button>
+      </form>
       <button id="runSparseEmbeddingBtn">Generate Sparse Embeddings</button>
       <div id="sparseEmbeddingResult" class="result"></div>
     </section>
@@ -310,6 +326,78 @@
     };
     let currentPath = '';
 
+    function ensureSessionPath(resultDiv) {
+      if (!currentPath) {
+        resultDiv.textContent = 'Session path not initialised. Upload a ZIP archive first.';
+        return false;
+      }
+      return true;
+    }
+
+    function buildDownloadLink(filename) {
+      return `<a href="/download_file?session_path=${encodeURIComponent(currentPath)}&filename=${encodeURIComponent(filename)}" download="${filename}">${filename}</a>`;
+    }
+
+    async function uploadStageArtifact({ stage, fileInput, resultDiv }) {
+      if (!ensureSessionPath(resultDiv)) {
+        return null;
+      }
+
+      if (!fileInput.files || fileInput.files.length === 0) {
+        resultDiv.textContent = 'Please choose a file before uploading.';
+        return null;
+      }
+
+      const formData = new FormData();
+      formData.append('path', currentPath);
+      formData.append('file', fileInput.files[0]);
+
+      resultDiv.textContent = 'Uploading...';
+
+      try {
+        const res = await fetch(`/upload_stage_file/${stage}`, {
+          method: 'POST',
+          body: formData
+        });
+        const json = await res.json();
+        if (!res.ok || json.status !== 'success') {
+          const errMsg = json.error || res.statusText || 'Upload failed.';
+          resultDiv.textContent = `Error: ${errMsg}`;
+          return null;
+        }
+        return json;
+      } catch (err) {
+        resultDiv.textContent = `Upload failed: ${err}`;
+        return null;
+      }
+    }
+
+    function formatUploadSummary(details) {
+      if (!details || typeof details !== 'object') {
+        return '';
+      }
+
+      const parts = [];
+      if (typeof details.rows === 'number') {
+        parts.push(`Rows: <strong>${details.rows}</strong>`);
+      }
+      if (typeof details.columns === 'number') {
+        parts.push(`Columns: <strong>${details.columns}</strong>`);
+      }
+      if (typeof details.count === 'number') {
+        parts.push(`Items: <strong>${details.count}</strong>`);
+      }
+      if (details.parse_warning) {
+        parts.push(`<span class="error-text">${details.parse_warning}</span>`);
+      }
+
+      if (parts.length === 0) {
+        return '';
+      }
+
+      return `<p>${parts.join(' • ')}</p>`;
+    }
+
     // Step 1: Upload ZIP
     document.getElementById('uploadForm').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -338,6 +426,9 @@
     // Step 2: Process DataFrame
     document.getElementById('processDataframeBtn').addEventListener('click', async () => {
       const resultDiv = document.getElementById('dataframeResult');
+      if (!ensureSessionPath(resultDiv)) {
+        return;
+      }
       resultDiv.textContent = 'Processing...';
       const form = new URLSearchParams();
       form.append('path', currentPath);
@@ -351,7 +442,7 @@
         const json = await res.json();
         if (res.ok) {
           const fileName = json.csv.split('/').pop();
-          const downloadLink = `<a href="/download_file?session_path=${encodeURIComponent(currentPath)}&filename=${encodeURIComponent(fileName)}" download="${fileName}">${fileName}</a>`;
+          const downloadLink = buildDownloadLink(fileName);
           resultDiv.innerHTML = `<p>Fichier généré : ${downloadLink}</p>`;
           document.getElementById('initial-chunk-section').style.display = 'block';
         } else {
@@ -362,9 +453,27 @@
       }
     });
 
+    document.getElementById('dataframeUploadForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const resultDiv = document.getElementById('dataframeResult');
+      const fileInput = document.getElementById('dataframeUploadInput');
+      const response = await uploadStageArtifact({ stage: 'dataframe', fileInput, resultDiv });
+      if (!response) {
+        return;
+      }
+      const downloadLink = buildDownloadLink(response.filename);
+      const summary = formatUploadSummary(response.details);
+      resultDiv.innerHTML = `<p>CSV uploaded: ${downloadLink}</p>${summary}`;
+      fileInput.value = '';
+      document.getElementById('initial-chunk-section').style.display = 'block';
+    });
+
     // Step 3.1: Initial Text Chunking
     document.getElementById('runInitialChunkBtn').addEventListener('click', async () => {
       const resultDiv = document.getElementById('initialChunkResult');
+      if (!ensureSessionPath(resultDiv)) {
+        return;
+      }
       resultDiv.textContent = 'Running initial chunking...';
       const form = new URLSearchParams();
       form.append('path', currentPath);
@@ -378,7 +487,7 @@
         const json = await res.json();
         if (res.ok && json.status === "success") {
           const fileName = json.file.split('/').pop();
-          const downloadLink = `<a href="/download_file?session_path=${encodeURIComponent(currentPath)}&filename=${encodeURIComponent(fileName)}" download="${fileName}">${fileName}</a>`;
+          const downloadLink = buildDownloadLink(fileName);
           resultDiv.innerHTML = `<p>Fichier généré : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
           document.getElementById('dense-embedding-section').style.display = 'block';
         } else {
@@ -389,9 +498,27 @@
       }
     });
 
+    document.getElementById('initialChunkUploadForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const resultDiv = document.getElementById('initialChunkResult');
+      const fileInput = document.getElementById('initialChunkUploadInput');
+      const response = await uploadStageArtifact({ stage: 'initial', fileInput, resultDiv });
+      if (!response) {
+        return;
+      }
+      const downloadLink = buildDownloadLink(response.filename);
+      const summary = formatUploadSummary(response.details);
+      resultDiv.innerHTML = `<p>Chunks JSON uploaded: ${downloadLink}</p>${summary}`;
+      fileInput.value = '';
+      document.getElementById('dense-embedding-section').style.display = 'block';
+    });
+
     // Step 3.2: Dense Embedding Generation
     document.getElementById('runDenseEmbeddingBtn').addEventListener('click', async () => {
       const resultDiv = document.getElementById('denseEmbeddingResult');
+      if (!ensureSessionPath(resultDiv)) {
+        return;
+      }
       resultDiv.textContent = 'Generating dense embeddings...';
       const form = new URLSearchParams();
       form.append('path', currentPath);
@@ -405,7 +532,7 @@
         const json = await res.json();
         if (res.ok && json.status === "success") {
           const fileName = json.file.split('/').pop();
-          const downloadLink = `<a href="/download_file?session_path=${encodeURIComponent(currentPath)}&filename=${encodeURIComponent(fileName)}" download="${fileName}">${fileName}</a>`;
+          const downloadLink = buildDownloadLink(fileName);
           resultDiv.innerHTML = `<p>Fichier généré : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
           document.getElementById('sparse-embedding-section').style.display = 'block';
         } else {
@@ -416,9 +543,27 @@
       }
     });
 
+    document.getElementById('denseUploadForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const resultDiv = document.getElementById('denseEmbeddingResult');
+      const fileInput = document.getElementById('denseUploadInput');
+      const response = await uploadStageArtifact({ stage: 'dense', fileInput, resultDiv });
+      if (!response) {
+        return;
+      }
+      const downloadLink = buildDownloadLink(response.filename);
+      const summary = formatUploadSummary(response.details);
+      resultDiv.innerHTML = `<p>Dense JSON uploaded: ${downloadLink}</p>${summary}`;
+      fileInput.value = '';
+      document.getElementById('sparse-embedding-section').style.display = 'block';
+    });
+
     // Step 3.3: Sparse Embedding Generation
     document.getElementById('runSparseEmbeddingBtn').addEventListener('click', async () => {
       const resultDiv = document.getElementById('sparseEmbeddingResult');
+      if (!ensureSessionPath(resultDiv)) {
+        return;
+      }
       resultDiv.textContent = 'Generating sparse embeddings...';
       const form = new URLSearchParams();
       form.append('path', currentPath);
@@ -432,7 +577,7 @@
         const json = await res.json();
         if (res.ok && json.status === "success") {
           const fileName = json.file.split('/').pop();
-          const downloadLink = `<a href="/download_file?session_path=${encodeURIComponent(currentPath)}&filename=${encodeURIComponent(fileName)}" download="${fileName}">${fileName}</a>`;
+          const downloadLink = buildDownloadLink(fileName);
           resultDiv.innerHTML = `<p>Fichier généré : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
           document.getElementById('db-section').style.display = 'block';
         } else {
@@ -441,6 +586,21 @@
       } catch (err) {
         resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
       }
+    });
+
+    document.getElementById('sparseUploadForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const resultDiv = document.getElementById('sparseEmbeddingResult');
+      const fileInput = document.getElementById('sparseUploadInput');
+      const response = await uploadStageArtifact({ stage: 'sparse', fileInput, resultDiv });
+      if (!response) {
+        return;
+      }
+      const downloadLink = buildDownloadLink(response.filename);
+      const summary = formatUploadSummary(response.details);
+      resultDiv.innerHTML = `<p>Sparse JSON uploaded: ${downloadLink}</p>${summary}`;
+      fileInput.value = '';
+      document.getElementById('db-section').style.display = 'block';
     });
 
     // Step 4: Upload to DB
@@ -468,6 +628,9 @@
 
     document.getElementById('uploadDbBtn').addEventListener('click', async () => {
       const resultDiv = document.getElementById('dbResult');
+      if (!ensureSessionPath(resultDiv)) {
+        return;
+      }
       resultDiv.textContent = 'Uploading to DB...';
       const form = new URLSearchParams();
       form.append('path', currentPath);

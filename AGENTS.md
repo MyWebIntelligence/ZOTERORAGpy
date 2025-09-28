@@ -2,6 +2,8 @@
 
 Ce document décrit en détail les agents en ligne de commande disponibles dans le projet `ragpy`. Il s'adresse aux utilisateurs des CLI Vibe Coding qui souhaitent orchestrer et automatiser le pipeline RAG sans passer par l'interface web.
 
+> Astuce interface : dans l'UI FastAPI, chaque étape du pipeline dispose désormais d'un couple de boutons « Upload » / « Generate ». Sans fichier téléversé, l'étape réutilise automatiquement le résultat précédent, ce qui facilite la reprise d'un traitement après incident.
+
 ## Vue d'ensemble des agents
 
 | Agent | Localisation | Rôle principal | Commande de base |
@@ -230,4 +232,3 @@ PY
 - Sur machine partagée, nettoyer les zip/upload dans `uploads/` après usage.
 - Capitaliser les logs (`logs/app.log`, `logs/pdf_processing.log`, `<output>/chunking.log`) pour documenter les ateliers.
 - Vérifier systématiquement la taille des lots et les quotas API avant de lancer des traitements massifs.
-

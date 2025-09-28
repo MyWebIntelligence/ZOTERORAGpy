@@ -5,6 +5,7 @@ import zipfile
 import subprocess
 import uuid # Import uuid for generating unique names
 import json
+import csv
 import pandas as pd
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
@@ -287,8 +288,113 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
         logger.error(f"General error in processing/previewing CSV {out_csv}: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "CSV read or preview failed.", "details": str(e)})
 
+
+@app.post("/upload_stage_file/{stage}")
+async def upload_stage_file(stage: str, path: str = Form(...), file: UploadFile = File(...)):
+    """Allow operators to upload intermediate artifacts for any stage."""
+    logger.info(f"Received upload for stage '{stage}' targeting path '{path}' with original filename '{file.filename}'")
+
+    config = STAGE_UPLOAD_CONFIG.get(stage)
+    if not config:
+        logger.error(f"Unknown stage '{stage}' supplied to upload endpoint")
+        return JSONResponse(status_code=400, content={"error": f"Unknown stage: {stage}"})
+
+    absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
+    if not os.path.isdir(absolute_processing_path):
+        logger.error(f"Upload target directory does not exist: {absolute_processing_path}")
+        return JSONResponse(status_code=400, content={"error": f"Processing directory not found: {path}"})
+
+    _, ext = os.path.splitext(file.filename or "")
+    ext = ext.lower()
+    allowed_exts = config.get("allowed_extensions", [])
+    if allowed_exts and ext not in allowed_exts:
+        logger.error(f"File extension '{ext}' is not allowed for stage '{stage}' (allowed: {allowed_exts})")
+        return JSONResponse(status_code=400, content={"error": f"Invalid file type for stage {stage}.", "allowed_extensions": allowed_exts})
+
+    target_filename = config["filename"]
+    target_path = os.path.join(absolute_processing_path, target_filename)
+
+    try:
+        file.file.seek(0)
+        with open(target_path, "wb") as handled:
+            shutil.copyfileobj(file.file, handled)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Failed to store upload for stage '{stage}' at '{target_path}': {exc}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"Failed to write uploaded file: {exc}"})
+
+    summary = summarize_uploaded_stage(stage, target_path)
+    logger.info(f"Stored uploaded file for stage '{stage}' at '{target_path}' with summary: {summary}")
+
+    response_payload = {
+        "status": "success",
+        "stage": stage,
+        "filename": target_filename,
+        "relative_path": target_filename,
+        "details": summary
+    }
+
+    return JSONResponse(response_payload)
+
 # --- Phased Chunking Endpoints ---
 BASE_CHUNK_OUTPUT_NAME = "output" # Consistent name from output.csv
+
+STAGE_UPLOAD_CONFIG = {
+    "dataframe": {
+        "filename": f"{BASE_CHUNK_OUTPUT_NAME}.csv",
+        "allowed_extensions": [".csv"],
+        "summary_type": "csv",
+        "description": "Processed dataframe CSV"
+    },
+    "initial": {
+        "filename": f"{BASE_CHUNK_OUTPUT_NAME}_chunks.json",
+        "allowed_extensions": [".json"],
+        "summary_type": "json_list",
+        "description": "Initial chunk JSON"
+    },
+    "dense": {
+        "filename": f"{BASE_CHUNK_OUTPUT_NAME}_chunks_with_embeddings.json",
+        "allowed_extensions": [".json"],
+        "summary_type": "json_list",
+        "description": "Dense embeddings JSON"
+    },
+    "sparse": {
+        "filename": f"{BASE_CHUNK_OUTPUT_NAME}_chunks_with_embeddings_sparse.json",
+        "allowed_extensions": [".json"],
+        "summary_type": "json_list",
+        "description": "Sparse embeddings JSON"
+    }
+}
+
+
+def summarize_uploaded_stage(stage_key: str, file_path: str) -> dict:
+    """Build a lightweight summary for uploaded intermediate files."""
+    config = STAGE_UPLOAD_CONFIG.get(stage_key, {})
+    summary_type = config.get("summary_type")
+    summary: dict = {}
+
+    if summary_type == "csv":
+        try:
+            with open(file_path, newline='', encoding='utf-8') as csvfile:
+                reader = csv.reader(csvfile)
+                headers = next(reader, None)
+                row_count = sum(1 for _ in reader)
+            summary["rows"] = row_count
+            if headers is not None:
+                summary["columns"] = len(headers)
+        except Exception as exc:  # noqa: BLE001
+            summary["parse_warning"] = f"Failed to analyse CSV: {exc}"
+    elif summary_type == "json_list":
+        try:
+            with open(file_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, list):
+                summary["count"] = len(data)
+            else:
+                summary["parse_warning"] = "Uploaded JSON is not a list; unable to count items."
+        except Exception as exc:  # noqa: BLE001
+            summary["parse_warning"] = f"Failed to analyse JSON: {exc}"
+
+    return summary
 
 from fastapi import Query, Body
 
