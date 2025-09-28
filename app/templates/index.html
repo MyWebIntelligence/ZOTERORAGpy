@@ -141,10 +141,6 @@
     <!-- Step 2: Process DataFrame -->
     <section id="dataframe-section" style="display:none;">
       <h2>2. Extract Text & Metadata</h2>
-      <form id="dataframeUploadForm" enctype="multipart/form-data" class="stage-upload-form">
-        <input type="file" id="dataframeUploadInput" name="file" accept=".csv" />
-        <button type="submit">Upload CSV</button>
-      </form>
       <button id="processDataframeBtn">Generate CSV</button>
       <div id="dataframeResult" class="result"></div>
     </section>
@@ -154,8 +150,8 @@
       <h2>3.1 Initial Text Chunking</h2>
       <p style="color: black; font-size: 0.9em;">Warning: This process can take a long time depending on your file. Do not close your browser. We recommend processing a maximum of 10 articles or one book at a time.</p>
       <form id="initialChunkUploadForm" enctype="multipart/form-data" class="stage-upload-form">
-        <input type="file" id="initialChunkUploadInput" name="file" accept=".json" />
-        <button type="submit">Upload Chunks JSON</button>
+        <input type="file" id="initialChunkUploadInput" name="file" accept=".csv" />
+        <button type="submit">Upload output.csv</button>
       </form>
       <button id="runInitialChunkBtn">Generate Chunks</button>
       <div id="initialChunkResult" class="result"></div>
@@ -166,7 +162,7 @@
       <h2>3.2 Dense Embedding Generation</h2>
       <form id="denseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
         <input type="file" id="denseUploadInput" name="file" accept=".json" />
-        <button type="submit">Upload Dense JSON</button>
+        <button type="submit">Upload output_chunks.json</button>
       </form>
       <button id="runDenseEmbeddingBtn">Generate Dense Embeddings</button>
       <div id="denseEmbeddingResult" class="result"></div>
@@ -177,7 +173,7 @@
       <h2>3.3 Sparse Embedding Generation</h2>
       <form id="sparseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
         <input type="file" id="sparseUploadInput" name="file" accept=".json" />
-        <button type="submit">Upload Sparse JSON</button>
+        <button type="submit">Upload output_chunks_with_embeddings.json</button>
       </form>
       <button id="runSparseEmbeddingBtn">Generate Sparse Embeddings</button>
       <div id="sparseEmbeddingResult" class="result"></div>
@@ -453,21 +449,6 @@
       }
     });
 
-    document.getElementById('dataframeUploadForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const resultDiv = document.getElementById('dataframeResult');
-      const fileInput = document.getElementById('dataframeUploadInput');
-      const response = await uploadStageArtifact({ stage: 'dataframe', fileInput, resultDiv });
-      if (!response) {
-        return;
-      }
-      const downloadLink = buildDownloadLink(response.filename);
-      const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>CSV uploaded: ${downloadLink}</p>${summary}`;
-      fileInput.value = '';
-      document.getElementById('initial-chunk-section').style.display = 'block';
-    });
-
     // Step 3.1: Initial Text Chunking
     document.getElementById('runInitialChunkBtn').addEventListener('click', async () => {
       const resultDiv = document.getElementById('initialChunkResult');
@@ -508,7 +489,7 @@
       }
       const downloadLink = buildDownloadLink(response.filename);
       const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>Chunks JSON uploaded: ${downloadLink}</p>${summary}`;
+      resultDiv.innerHTML = `<p>CSV uploaded: ${downloadLink}</p>${summary}`;
       fileInput.value = '';
       document.getElementById('dense-embedding-section').style.display = 'block';
     });
@@ -553,7 +534,7 @@
       }
       const downloadLink = buildDownloadLink(response.filename);
       const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>Dense JSON uploaded: ${downloadLink}</p>${summary}`;
+      resultDiv.innerHTML = `<p>Chunks JSON uploaded: ${downloadLink}</p>${summary}`;
       fileInput.value = '';
       document.getElementById('sparse-embedding-section').style.display = 'block';
     });
@@ -598,7 +579,7 @@
       }
       const downloadLink = buildDownloadLink(response.filename);
       const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>Sparse JSON uploaded: ${downloadLink}</p>${summary}`;
+      resultDiv.innerHTML = `<p>Dense embeddings JSON uploaded: ${downloadLink}</p>${summary}`;
       fileInput.value = '';
       document.getElementById('db-section').style.display = 'block';
     });

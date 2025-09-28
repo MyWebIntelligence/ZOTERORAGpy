@@ -85,7 +85,7 @@ Ensuite, ouvrez http://localhost:8000
 
 Flux conseillé:
 - Téléverser un ZIP (export Zotero: JSON + `files/` avec PDFs, ou un dossier de PDFs)
-- À chaque étape (Process dataframe, Initial chunking, Dense embeddings, Sparse embeddings), choisir entre « Upload » pour injecter un fichier existant ou « Generate » pour recalculer depuis l'étape précédente. Sans fichier téléversé, l'application utilise automatiquement la sortie générée lors de la précédente exécution.
+- Lors des étapes 3.1 à 3.3, choisir entre « Upload » pour réinjecter respectivement `output.csv`, `output_chunks.json` ou `output_chunks_with_embeddings.json`, puis « Generate » pour recalculer. Sans fichier téléversé, l'application réutilise automatiquement la sortie disponible de la session en cours.
 - Dans « Upload to DB », choisir Pinecone / Weaviate / Qdrant et renseigner les infos; les clés proviennent de `.env` (réglables via « Settings »)
 
 Où sont stockés les fichiers?

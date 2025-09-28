@@ -339,29 +339,23 @@ async def upload_stage_file(stage: str, path: str = Form(...), file: UploadFile 
 BASE_CHUNK_OUTPUT_NAME = "output" # Consistent name from output.csv
 
 STAGE_UPLOAD_CONFIG = {
-    "dataframe": {
+    "initial": {
         "filename": f"{BASE_CHUNK_OUTPUT_NAME}.csv",
         "allowed_extensions": [".csv"],
         "summary_type": "csv",
-        "description": "Processed dataframe CSV"
+        "description": "Output CSV from dataframe processing"
     },
-    "initial": {
+    "dense": {
         "filename": f"{BASE_CHUNK_OUTPUT_NAME}_chunks.json",
         "allowed_extensions": [".json"],
         "summary_type": "json_list",
-        "description": "Initial chunk JSON"
+        "description": "Chunks JSON from initial chunking"
     },
-    "dense": {
+    "sparse": {
         "filename": f"{BASE_CHUNK_OUTPUT_NAME}_chunks_with_embeddings.json",
         "allowed_extensions": [".json"],
         "summary_type": "json_list",
         "description": "Dense embeddings JSON"
-    },
-    "sparse": {
-        "filename": f"{BASE_CHUNK_OUTPUT_NAME}_chunks_with_embeddings_sparse.json",
-        "allowed_extensions": [".json"],
-        "summary_type": "json_list",
-        "description": "Sparse embeddings JSON"
     }
 }
 

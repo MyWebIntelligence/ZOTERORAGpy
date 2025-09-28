@@ -2,7 +2,7 @@
 
 Ce document décrit en détail les agents en ligne de commande disponibles dans le projet `ragpy`. Il s'adresse aux utilisateurs des CLI Vibe Coding qui souhaitent orchestrer et automatiser le pipeline RAG sans passer par l'interface web.
 
-> Astuce interface : dans l'UI FastAPI, chaque étape du pipeline dispose désormais d'un couple de boutons « Upload » / « Generate ». Sans fichier téléversé, l'étape réutilise automatiquement le résultat précédent, ce qui facilite la reprise d'un traitement après incident.
+> Astuce interface : dans l'UI FastAPI, les étapes 3.1 à 3.3 proposent un couple « Upload » / « Generate » pour réinjecter respectivement `output.csv`, `output_chunks.json` ou `output_chunks_with_embeddings.json`. Sans fichier téléversé, l'étape réutilise automatiquement le résultat précédent afin de reprendre un traitement interrompu.
 
 ## Vue d'ensemble des agents
 
