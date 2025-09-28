@@ -10,3 +10,5 @@ tqdm
 python-dateutil
 python-dotenv
 tiktoken
+mistralai
+requests

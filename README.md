@@ -64,6 +64,7 @@ copy scripts\.env.example .env
 Contenu minimal de `.env` (à adapter):
 ```env
 OPENAI_API_KEY=sk-...                # Obligatoire (embeddings + recodage GPT)
+MISTRAL_API_KEY=mist-...             # Recommandé pour l'OCR Markdown
 PINECONE_API_KEY=pcsk-...            # Optionnel si Pinecone
 WEAVIATE_URL=https://...             # Optionnel si Weaviate
 WEAVIATE_API_KEY=...                 # Optionnel si Weaviate
@@ -102,7 +103,7 @@ Traitement complet (hors interface web) à partir d’un export Zotero placé da
 python scripts/rad_dataframe.py \
   --json sources/MaBiblio/MaBiblio.json \
   --dir  sources/MaBiblio \
-  --output sources/MaBiblio/output.csv
+ --output sources/MaBiblio/output.csv
 ```
 
 2) Chunking + embeddings denses + sparses
@@ -116,6 +117,8 @@ Sorties attendues dans `sources/MaBiblio/`:
 - `output_chunks.json`
 - `output_chunks_with_embeddings.json`
 - `output_chunks_with_embeddings_sparse.json`
+
+Le CSV intermédiaire contient un champ `texteocr_provider` indiquant si l'OCR provient de Mistral, d'un fallback OpenAI ou du mode local historique; la phase de chunking saute automatiquement le recodage GPT lorsque la source est Mistral.
 
 3) Chargement en base vectorielle (optionnel, programmatique)
 

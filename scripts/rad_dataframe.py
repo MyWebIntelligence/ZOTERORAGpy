@@ -2,6 +2,7 @@ import os
 import json
 import re
 import unicodedata
+import base64
 import pandas as pd
 
 def strip_accents(s):
@@ -32,8 +33,10 @@ def levenshtein(a, b):
 import fitz  # PyMuPDF
 from tqdm import tqdm
 import logging
-from typing import Optional
+from typing import Optional, List, NamedTuple
 import argparse
+import requests
+from dotenv import load_dotenv
 
 # --- Path and Logging Setup ---
 SCRIPT_FILE_PATH = os.path.abspath(__file__)
@@ -59,41 +62,325 @@ logger.info(f"Script LOG_DIR_SCRIPT: {LOG_DIR_SCRIPT}")
 logger.info(f"Script log file: {pdf_processing_log_file}")
 # --- End Path and Logging Setup ---
 
-def extract_text_with_ocr(pdf_path: str, max_pages: Optional[int] = None) -> str:
-    """
-    Extrait le texte d'un PDF, avec tentative d'OCR si le texte initial est faible.
-    
-    Args:
-        pdf_path: Chemin résoluble (absolu ou relatif au CWD au moment de l'appel) du fichier PDF.
-        max_pages: Nombre maximum de pages à traiter (None pour toutes).
-        
-    Returns:
-        Texte extrait concaténé ou chaîne vide en cas d'erreur
-    """
-    full_text = []
+load_dotenv()
+
+def _truthy_env(value: Optional[str], default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(f"Valeur invalide pour {name}='{raw}', fallback sur {default}.")
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(f"Valeur invalide pour {name}='{raw}', fallback sur {default}.")
+        return default
+
+
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+MISTRAL_API_BASE_URL = os.getenv("MISTRAL_API_BASE_URL", "https://api.mistral.ai")
+MISTRAL_OCR_MODEL = os.getenv("MISTRAL_OCR_MODEL", "pixtral-large-latest")
+MISTRAL_OCR_PROMPT = os.getenv(
+    "MISTRAL_OCR_PROMPT",
+    "Tu es un moteur d'OCR. Transcris le document PDF fourni en Markdown fidèle, "
+    "conserve les titres, listes, tableaux et texte sans résumer ni inventer."
+)
+MISTRAL_OCR_TIMEOUT = _env_int("MISTRAL_OCR_TIMEOUT", 300)
+MISTRAL_DELETE_UPLOADED_FILE = _truthy_env(os.getenv("MISTRAL_DELETE_UPLOADED_FILE"), True)
+
+OPENAI_OCR_MODEL = os.getenv("OPENAI_OCR_MODEL", "gpt-4o-mini")
+OPENAI_OCR_PROMPT = os.getenv(
+    "OPENAI_OCR_PROMPT",
+    "Transcris cette page PDF en Markdown lisible sans résumer ni modifier le contenu."
+)
+OPENAI_OCR_MAX_PAGES = _env_int("OPENAI_OCR_MAX_PAGES", 10)
+OPENAI_OCR_MAX_TOKENS = _env_int("OPENAI_OCR_MAX_TOKENS", 2048)
+OPENAI_OCR_RENDER_SCALE = _env_float("OPENAI_OCR_RENDER_SCALE", 2.0)
+
+
+class OCRExtractionError(Exception):
+    """Raised when OCR extraction fails for all providers."""
+
+
+class OCRResult(NamedTuple):
+    text: str
+    provider: str
+
+
+def _extract_text_with_legacy_pdf(pdf_path: str, max_pages: Optional[int] = None) -> str:
+    full_text: List[str] = []
     try:
         with fitz.open(pdf_path) as doc:
             num_pages = min(max_pages, len(doc)) if max_pages else len(doc)
-            
-            for page_num in tqdm(range(num_pages), 
-                               desc=f"Extracting {os.path.basename(pdf_path)}"):
+            for page_num in tqdm(
+                range(num_pages),
+                desc=f"Extracting {os.path.basename(pdf_path)} (legacy)",
+            ):
                 try:
                     page = doc.load_page(page_num)
-                    # Essayer d'abord l'extraction normale
                     text = page.get_text("text").strip()
-                    # Si peu de texte détecté (< 50 mots), utiliser OCR
                     if len(text.split()) < 50:
                         text = page.get_text("ocr").strip()
                     full_text.append(text)
                 except Exception as page_error:
                     logger.warning(f"Page {page_num} error in {pdf_path}: {page_error}")
                     continue
-                    
     except Exception as e:
         logger.error(f"Failed to process {pdf_path}: {e}")
         return ""
-        
     return "\n\n".join(filter(None, full_text))
+
+
+def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -> str:
+    if not MISTRAL_API_KEY:
+        raise OCRExtractionError("MISTRAL_API_KEY manquante.")
+
+    instructions = MISTRAL_OCR_PROMPT
+    if max_pages:
+        instructions += f"\nNe traite que les {max_pages} premières pages du document."
+
+    base_url = MISTRAL_API_BASE_URL.rstrip("/")
+    headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}"}
+
+    with requests.Session() as session:
+        with open(pdf_path, "rb") as pdf_file:
+            files = {
+                "file": (os.path.basename(pdf_path), pdf_file, "application/pdf")
+            }
+            data = {"purpose": "ocr"}
+            upload_resp = session.post(
+                f"{base_url}/v1/files",
+                headers=headers,
+                files=files,
+                data=data,
+                timeout=MISTRAL_OCR_TIMEOUT,
+            )
+
+        upload_resp.raise_for_status()
+        upload_payload = upload_resp.json()
+        file_id = (
+            upload_payload.get("id")
+            or upload_payload.get("file_id")
+            or upload_payload.get("data", {}).get("id")
+        )
+        if not file_id:
+            raise OCRExtractionError(
+                "La réponse Mistral ne contient pas d'identifiant de fichier pour l'OCR."
+            )
+
+        payload = {
+            "model": MISTRAL_OCR_MODEL,
+            "response_format": {"type": "markdown"},
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": instructions},
+                        {"type": "input_file", "file_id": file_id},
+                    ],
+                }
+            ],
+        }
+
+        response = session.post(
+            f"{base_url}/v1/responses",
+            headers={**headers, "Content-Type": "application/json"},
+            json=payload,
+            timeout=MISTRAL_OCR_TIMEOUT,
+        )
+        response.raise_for_status()
+        response_payload = response.json()
+
+        text_fragments: List[str] = []
+        if isinstance(response_payload, dict):
+            output_blocks = response_payload.get("output")
+            if isinstance(output_blocks, list):
+                for block in output_blocks:
+                    if isinstance(block, dict) and block.get("type") in {"output_text", "text"}:
+                        fragment = block.get("text") or block.get("content") or ""
+                        if fragment:
+                            text_fragments.append(fragment)
+
+            if not text_fragments:
+                choices = response_payload.get("choices")
+                if isinstance(choices, list):
+                    for choice in choices:
+                        message = choice.get("message", {})
+                        content = message.get("content")
+                        if isinstance(content, str):
+                            text_fragments.append(content)
+                        elif isinstance(content, list):
+                            for part in content:
+                                if isinstance(part, dict) and part.get("type") in {"text", "output_text"}:
+                                    fragment = part.get("text") or ""
+                                    if fragment:
+                                        text_fragments.append(fragment)
+
+        markdown_text = "\n".join(fragment.strip() for fragment in text_fragments if fragment).strip()
+        if not markdown_text:
+            raise OCRExtractionError("La réponse Mistral est vide.")
+
+        if MISTRAL_DELETE_UPLOADED_FILE:
+            try:
+                session.delete(
+                    f"{base_url}/v1/files/{file_id}",
+                    headers=headers,
+                    timeout=15,
+                )
+            except requests.RequestException as cleanup_error:
+                logger.debug(
+                    "Échec du nettoyage du fichier OCR Mistral %s: %s",
+                    file_id,
+                    cleanup_error,
+                )
+
+        return markdown_text
+
+
+def _extract_text_with_openai(
+    pdf_path: str,
+    api_key: str,
+    max_pages: Optional[int] = None,
+) -> str:
+    from openai import OpenAI
+
+    base_limit = max_pages if max_pages is not None else float("inf")
+    max_allowed = OPENAI_OCR_MAX_PAGES if OPENAI_OCR_MAX_PAGES > 0 else float("inf")
+
+    outputs: List[str] = []
+    client = OpenAI(api_key=api_key)
+
+    with fitz.open(pdf_path) as doc:
+        total_pages = len(doc)
+        limit = int(min(base_limit, max_allowed, total_pages))
+
+        for page_index in tqdm(
+            range(limit),
+            desc=f"OpenAI OCR {os.path.basename(pdf_path)}",
+        ):
+            page = doc.load_page(page_index)
+            matrix = fitz.Matrix(OPENAI_OCR_RENDER_SCALE, OPENAI_OCR_RENDER_SCALE)
+            pix = page.get_pixmap(matrix=matrix)
+            image_bytes = pix.tobytes("png")
+            image_b64 = base64.b64encode(image_bytes).decode("ascii")
+
+            user_content = [
+                {
+                    "type": "text",
+                    "text": f"{OPENAI_OCR_PROMPT}\nPage {page_index + 1}.",
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                },
+            ]
+
+            response = client.chat.completions.create(
+                model=OPENAI_OCR_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a meticulous OCR engine that outputs Markdown without omitting any content.",
+                    },
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=OPENAI_OCR_MAX_TOKENS,
+            )
+
+            choice = response.choices[0] if response.choices else None
+            page_text = ""
+            if choice and getattr(choice, "message", None):
+                page_text = (choice.message.content or "").strip()
+
+            if page_text:
+                outputs.append(f"<!-- Page {page_index + 1} -->\n{page_text}")
+
+    if not outputs:
+        raise OCRExtractionError("La réponse OpenAI est vide.")
+
+    return "\n\n".join(outputs)
+
+
+def _finalize_ocr_result(text: str, provider: str, return_details: bool):
+    if return_details:
+        return OCRResult(text=text, provider=provider)
+    return text
+
+
+def extract_text_with_ocr(
+    pdf_path: str,
+    max_pages: Optional[int] = None,
+    *,
+    return_details: bool = False,
+):
+    """Attempt Markdown-first OCR with Mistral, fall back to OpenAI then legacy extraction."""
+
+    last_error: Optional[Exception] = None
+
+    if MISTRAL_API_KEY:
+        try:
+            logger.debug("Tentative d'OCR Mistral pour %s", pdf_path)
+            mistral_text = _extract_text_with_mistral(pdf_path, max_pages=max_pages)
+            return _finalize_ocr_result(mistral_text, "mistral", return_details)
+        except Exception as mistral_error:
+            last_error = mistral_error
+            logger.warning(
+                "Échec Mistral OCR pour %s: %s",
+                pdf_path,
+                mistral_error,
+            )
+    else:
+        logger.debug("MISTRAL_API_KEY absente, OCR Mistral ignoré pour %s", pdf_path)
+
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if openai_key:
+        try:
+            logger.debug("Fallback OpenAI OCR pour %s", pdf_path)
+            openai_text = _extract_text_with_openai(pdf_path, openai_key, max_pages=max_pages)
+            return _finalize_ocr_result(openai_text, "openai", return_details)
+        except Exception as openai_error:
+            last_error = openai_error
+            logger.warning(
+                "Échec OpenAI OCR pour %s: %s",
+                pdf_path,
+                openai_error,
+            )
+    else:
+        logger.debug("OPENAI_API_KEY absente, OCR OpenAI ignoré pour %s", pdf_path)
+
+    if not MISTRAL_API_KEY and not openai_key:
+        logger.error(
+            "Aucune clé API OCR configurée (MISTRAL_API_KEY ou OPENAI_API_KEY). "
+            "Basculer sur l'extraction locale peut dégrader la qualité du texte."
+        )
+
+    if last_error:
+        logger.info("Retour au processus OCR historique pour %s", pdf_path)
+
+    legacy_text = _extract_text_with_legacy_pdf(pdf_path, max_pages=max_pages)
+    if legacy_text.strip():
+        return _finalize_ocr_result(legacy_text, "legacy", return_details)
+
+    error_message = (
+        "Impossible d'extraire le texte du document. Configurez MISTRAL_API_KEY ou OPENAI_API_KEY "
+        "pour activer l'OCR en Markdown."
+    )
+    raise OCRExtractionError(error_message)
 
 def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
     """
@@ -187,12 +474,27 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
                                 continue # Passer au prochain attachment si le PDF n'est pas trouvé
 
                         logger.info(f"Traitement du PDF : {actual_pdf_path}")
+                        try:
+                            ocr_payload = extract_text_with_ocr(
+                                actual_pdf_path,
+                                return_details=True,
+                            )
+                        except OCRExtractionError as ocr_error:
+                            logger.error(
+                                "Échec OCR pour %s (%s): %s",
+                                actual_pdf_path,
+                                path_from_json,
+                                ocr_error,
+                            )
+                            continue
+
                         records.append({
                             **metadata,
                             "filename": os.path.basename(path_from_json), # Conserve le nom de fichier original du JSON
                             "path": actual_pdf_path, # Stocke le chemin résolu et existant
                             "attachment_title": attachment.get("title", ""),
-                            "texteocr": extract_text_with_ocr(actual_pdf_path)
+                            "texteocr": ocr_payload.text,
+                            "texteocr_provider": ocr_payload.provider,
                         })
             except Exception as item_error:
                 logger.error(f"Error processing item: {item_error}")
@@ -227,6 +529,19 @@ def extract_pdf_metadata_to_dataframe(pdf_directory: str) -> pd.DataFrame:
         full_path = os.path.join(pdf_directory, filename)
         try:
             with fitz.open(full_path) as doc:
+                try:
+                    ocr_payload = extract_text_with_ocr(
+                        full_path,
+                        return_details=True,
+                    )
+                except OCRExtractionError as ocr_error:
+                    logger.error(
+                        "Échec OCR pour %s: %s",
+                        full_path,
+                        ocr_error,
+                    )
+                    continue
+
                 records.append({
                     "type": "article",
                     "authors": doc.metadata.get('author', ''),
@@ -237,7 +552,8 @@ def extract_pdf_metadata_to_dataframe(pdf_directory: str) -> pd.DataFrame:
                     "filename": filename,
                     "path": full_path,
                     "attachment_title": os.path.splitext(filename)[0],
-                    "texteocr": extract_text_with_ocr(full_path)
+                    "texteocr": ocr_payload.text,
+                    "texteocr_provider": ocr_payload.provider,
                 })
         except Exception as e:
             logger.error(f"Failed to process {filename}: {e}")

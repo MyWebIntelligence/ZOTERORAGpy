@@ -55,9 +55,16 @@ cd /chemin/vers/__RAG
 Transformer un export Zotero (`.json` + arborescence `files/`) en CSV enrichi avec texte OCR. Première étape du pipeline CLI.
 
 ### Dépendances spécifiques
-- `fitz` (PyMuPDF) pour l'extraction texte + OCR.
+- `mistralai` et `requests` pour l'appel OCR Markdown côté Mistral.
+- `openai` (fallback vision) et `fitz` (PyMuPDF) pour les alternatives.
 - `pandas` pour l'assemblage du DataFrame.
 - Logger configuré vers `logs/pdf_processing.log`.
+
+### Variables d'environnement clés
+- `MISTRAL_API_KEY` (obligatoire pour la voie OCR Mistral).
+- `MISTRAL_OCR_MODEL`, `MISTRAL_API_BASE_URL`, `MISTRAL_OCR_PROMPT` (optionnels pour ajuster le provider).
+- `OPENAI_API_KEY` et `OPENAI_OCR_MODEL` pour le fallback vision.
+- `OPENAI_OCR_MAX_PAGES`, `OPENAI_OCR_MAX_TOKENS`, `OPENAI_OCR_RENDER_SCALE` pour contrôler les appels de secours.
 
 ### Paramètres CLI
 ```bash
@@ -72,8 +79,8 @@ python scripts/rad_dataframe.py \
 
 ### Comportement remarqué
 - En cas de PDF introuvable, tente une recherche fuzzy (normalisation accent, Levenshtein ≤ 2) dans le dossier visé.
-- `extract_text_with_ocr` bascule automatiquement sur OCR si < 50 mots extraits nativement.
-- Les métadonnées extraites: `type`, `title`, `date`, `url`, `doi`, `authors`, `filename`, `path`, `attachment_title`, `texteocr`.
+- `extract_text_with_ocr` tente d'abord un rendu complet Markdown via Mistral, puis bascule sur un fallback OpenAI vision, avant de revenir au flux PyMuPDF historique si aucun service distant n'est disponible.
+- Les métadonnées extraites incluent désormais `texteocr_provider` pour tracer l'origine (`mistral`, `openai`, `legacy`).
 - Le CSV est encodé en `utf-8-sig` pour compatibilité Excel.
 
 ### Journaux & diagnostics
@@ -95,6 +102,7 @@ Enrichir le CSV issu de `rad_dataframe.py` via trois phases successives:
 - Librairies: `langchain_text_splitters`, `openai`, `spacy` (`fr_core_news_md` téléchargé si absent), `tqdm`, `pandas`.
 - Concurrency: `ThreadPoolExecutor` (par défaut `os.cpu_count() - 1`).
 - Sauvegarde thread-safe avec un verrou global `SAVE_LOCK`.
+- Si `texteocr_provider` vaut `mistral`, la phase initiale saute le recodage GPT et réutilise les chunks Markdown tels quels pour éviter des appels OpenAI inutiles.
 
 ### Paramètres CLI
 ```bash
@@ -108,7 +116,7 @@ python scripts/rad_chunk.py \
 - `--phase` : `initial`, `dense`, `sparse`, ou `all` (enchaîne les trois).
 
 ### Détails par phase
-- **initial** : lit un CSV, découpe le champ `texteocr` en chunks (~2 500 tokens avec chevauchement 250), recode via GPT (`gpt-4o-mini` par défaut), sauvegarde `output_chunks.json`.
+- **initial** : lit un CSV, découpe le champ `texteocr` en chunks (~2 500 tokens avec chevauchement 250), recode via GPT (`gpt-4o-mini`) uniquement si l'OCR ne provient pas de Mistral, puis sauvegarde `output_chunks.json`.
 - **dense** : attend un fichier `_chunks.json`, génère les embeddings denses OpenAI (`text-embedding-3-large`), écrit `_chunks_with_embeddings.json`.
 - **sparse** : attend `_chunks_with_embeddings.json`, dérive les features spaCy (POS filtrés, lemmas, TF normalisé, hachage mod 100 000), sauvegarde `_chunks_with_embeddings_sparse.json`.
 - **all** : enchaîne les trois sous-étapes avec journalisation dans `<output>/chunking.log`.

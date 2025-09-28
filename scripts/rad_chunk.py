@@ -201,6 +201,12 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS):
         print(f"Document ignoré (texte vide) : {row_data.get('filename', 'Nom de fichier inconnu')}")
         return []
 
+    provider_raw = row_data.get("texteocr_provider", "")
+    if isinstance(provider_raw, float) and pd.isna(provider_raw):
+        provider_raw = ""
+    provider = str(provider_raw).strip().lower()
+    recode_required = provider != "mistral"
+
     doc_id = str(random.randint(10**11, 10**12 - 1))
     text_chunks = TEXT_SPLITTER.split_text(text)
     
@@ -210,15 +216,21 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS):
     all_processed_chunks = []
     for start_index in range(0, len(text_chunks), DEFAULT_BATCH_SIZE_GPT):
         batch_to_recode = text_chunks[start_index : start_index + DEFAULT_BATCH_SIZE_GPT]
-        print(f"  Lot {start_index // DEFAULT_BATCH_SIZE_GPT + 1} / {((len(text_chunks) - 1) // DEFAULT_BATCH_SIZE_GPT) + 1} en recodage...")
-        
-        cleaned_batch = gpt_recode_batch(
-            batch_to_recode,
-            instructions="ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence par une phrase complète et se termine par un point. Supprime le bruit d'OCR et les imperfections en conservant le sens original. Ne echange ni ajoute aucun mot du texte d'origine. C'est une correction et un nettoyage de texte (suppression des erreurs) pas une réécriture",
-            model="gpt-4o-mini", # As per master code
-            temperature=0.3,
-            max_tokens=8000 # As per master code for this call
-        )
+        total_batches = ((len(text_chunks) - 1) // DEFAULT_BATCH_SIZE_GPT) + 1
+
+        if recode_required:
+            print(f"  Lot {start_index // DEFAULT_BATCH_SIZE_GPT + 1} / {total_batches} en recodage...")
+            cleaned_batch = gpt_recode_batch(
+                batch_to_recode,
+                instructions="ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence par une phrase complète et se termine par un point. Supprime le bruit d'OCR et les imperfections en conservant le sens original. Ne echange ni ajoute aucun mot du texte d'origine. C'est une correction et un nettoyage de texte (suppression des erreurs) pas une réécriture",
+                model="gpt-4o-mini", # As per master code
+                temperature=0.3,
+                max_tokens=8000 # As per master code for this call
+            )
+        else:
+            if start_index == 0:
+                print("  OCR Mistral détecté → recodage GPT sauté (chunks utilisés tels quels).")
+            cleaned_batch = batch_to_recode
 
         for i, cleaned_text in enumerate(cleaned_batch):
             original_chunk_index = start_index + i + 1
@@ -245,7 +257,8 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS):
                 "doc_id":       doc_id, # doc_id is generated, should be fine
                 "chunk_index":  original_chunk_index,
                 "total_chunks": len(text_chunks),
-                "chunk_text":   cleaned_text
+                "chunk_text":   cleaned_text,
+                "ocr_provider": sanitize_metadata_value(provider, ""),
             }
             all_processed_chunks.append(chunk_metadata)
 
