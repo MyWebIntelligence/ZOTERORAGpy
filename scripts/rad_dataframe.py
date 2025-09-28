@@ -211,21 +211,40 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
 
         text_fragments: List[str] = []
         if isinstance(response_payload, dict):
-            full_text = response_payload.get("text")
-            if isinstance(full_text, str) and full_text.strip():
-                text_fragments.append(full_text.strip())
+            possible_fields = [
+                response_payload.get("markdown"),
+                response_payload.get("text"),
+            ]
+            for candidate in possible_fields:
+                if isinstance(candidate, str) and candidate.strip():
+                    text_fragments.append(candidate.strip())
 
             pages = response_payload.get("pages")
             if isinstance(pages, list):
                 for page in pages:
                     if isinstance(page, dict):
-                        page_text = page.get("text")
-                        if isinstance(page_text, str) and page_text.strip():
-                            text_fragments.append(page_text.strip())
+                        for key in ("markdown", "text"):
+                            page_text = page.get(key)
+                            if isinstance(page_text, str) and page_text.strip():
+                                text_fragments.append(page_text.strip())
+
+            outputs = response_payload.get("output")
+            if isinstance(outputs, list):
+                for block in outputs:
+                    if isinstance(block, dict):
+                        for key in ("markdown", "text", "content"):
+                            value = block.get(key)
+                            if isinstance(value, str) and value.strip():
+                                text_fragments.append(value.strip())
 
         markdown_text = "\n\n".join(dict.fromkeys(text_fragments))
         markdown_text = markdown_text.strip()
         if not markdown_text:
+            logger.warning(
+                "Réponse OCR Mistral vide pour %s (keys=%s)",
+                pdf_path,
+                list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload),
+            )
             raise OCRExtractionError("La réponse Mistral est vide.")
 
         if MISTRAL_DELETE_UPLOADED_FILE:
