@@ -6,6 +6,12 @@ import subprocess
 import uuid # Import uuid for generating unique names
 import json
 import csv
+import sys
+
+try:
+    csv.field_size_limit(sys.maxsize)
+except OverflowError:
+    csv.field_size_limit(2**31 - 1)
 import pandas as pd
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
