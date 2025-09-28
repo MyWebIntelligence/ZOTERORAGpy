@@ -177,8 +177,8 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
         payload = {
             "model": MISTRAL_OCR_MODEL,
             "document": {
-                "type": "document_id",
-                "document_id": file_id,
+                "type": "file",
+                "file_id": file_id,
             },
             "include_image_base64": False,
         }
