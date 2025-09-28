@@ -180,6 +180,9 @@
       <div id="pineconeParams" class="db-params" style="margin-top:10px;">
         <label for="pineconeIndexName">Pinecone Index Name:</label>
         <input type="text" id="pineconeIndexName" name="pinecone_index_name" value="articles" placeholder="e.g., articles">
+        <br>
+        <label for="pineconeNamespace" style="margin-top:5px; display:inline-block;">Pinecone Namespace (optional):</label>
+        <input type="text" id="pineconeNamespace" name="pinecone_namespace" placeholder="e.g., workshop" />
       </div>
       <div id="weaviateParams" class="db-params" style="display:none; margin-top:10px;">
         <label for="weaviateClassName">Weaviate Class Name:</label>
@@ -473,6 +476,7 @@
 
       if (dbChoice === 'pinecone') {
         form.append('pinecone_index_name', document.getElementById('pineconeIndexName').value);
+        form.append('pinecone_namespace', document.getElementById('pineconeNamespace').value);
       } else if (dbChoice === 'weaviate') {
         form.append('weaviate_class_name', document.getElementById('weaviateClassName').value);
         form.append('weaviate_tenant_name', document.getElementById('weaviateTenantName').value);
@@ -517,6 +521,10 @@
             resultDiv.innerHTML = `<p>Status: <strong>${String(json.status)}</strong>. Message: ${String(messageText)}</p>`;
             if (countText) {
                  resultDiv.innerHTML += `<p>${String(countText)}</p>`;
+            }
+            if (json && Object.prototype.hasOwnProperty.call(json, 'namespace')) {
+              const nsLabel = json.namespace ? String(json.namespace) : '(default namespace)';
+              resultDiv.innerHTML += `<p>Pinecone namespace: <strong>${nsLabel}</strong></p>`;
             }
           } else {
             // This case means res.ok was true, but json is null or lacks a status.

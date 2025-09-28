@@ -1,5 +1,7 @@
 # II - Implémentation dans une base de données vectorielle
 
+from __future__ import annotations
+
 
 ##  BASE VECTORIELLE - Pinecone
 
@@ -10,15 +12,21 @@ import warnings
 warnings.simplefilter("ignore", ResourceWarning)
 import json
 import time
-from pinecone import Pinecone # Reverted import
 from tqdm import tqdm
 import traceback # Ajout pour traceback.print_exc()
+
+try:
+    from pinecone import Pinecone  # Reverted import
+    _pinecone_import_error = None
+except ImportError as exc:  # pragma: no cover - only triggered when dependency missing
+    Pinecone = None
+    _pinecone_import_error = exc
 # Configuration des tailles de lots et du parallélisme
 PINECONE_BATCH_SIZE = 100  # Nombre de vecteurs à upserter en une seule requête Pinecone
 # MAX_WORKERS = os.cpu_count() - 1 # Défini mais non utilisé dans ce script pour le parallélisme d'upsert direct.
                                  # Pourrait être utilisé si les étapes de préparation ou d'autres opérations étaient parallélisées.
 
-def upsert_batch_to_pinecone(index, vectors_batch):
+def upsert_batch_to_pinecone(index, vectors_batch, namespace=None):
     """Upserts a batch of vectors to a Pinecone index.
 
     Includes a simple retry mechanism for transient errors.
@@ -29,19 +37,26 @@ def upsert_batch_to_pinecone(index, vectors_batch):
                                     Pinecone's upsert method. Each dictionary
                                     should contain 'id', 'values', and optionally
                                     'metadata' and 'sparse_values'.
+        namespace (str | None): Optional namespace to target within the index.
     Returns:
         bool: True if the upsert was successful (or succeeded on retry),
               False otherwise.
     """
     try:
-        index.upsert(vectors=vectors_batch)
+        upsert_kwargs = {"vectors": vectors_batch}
+        if namespace:
+            upsert_kwargs["namespace"] = namespace
+        index.upsert(**upsert_kwargs)
         return True
     except Exception as e:
         print(f"Erreur lors de l'upsert par lot dans Pinecone: {e}")
         print("Nouvelle tentative dans 2 secondes...")
         time.sleep(2)
         try:
-            index.upsert(vectors=vectors_batch)
+            upsert_kwargs = {"vectors": vectors_batch}
+            if namespace:
+                upsert_kwargs["namespace"] = namespace
+            index.upsert(**upsert_kwargs)
             print("Nouvelle tentative d'upsert réussie.")
             return True
         except Exception as e_retry:
@@ -105,7 +120,7 @@ def prepare_vectors_for_pinecone(chunks):
             
     return vectors
 
-def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api_key=None):
+def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api_key=None, namespace=None):
     """Inserts embeddings from a JSON file into a Pinecone index.
 
     This function handles initializing the Pinecone client, checking for the
@@ -122,6 +137,8 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
                                     Defaults to "articles".
         pinecone_api_key (str, optional): The API key for Pinecone. If None, the function
                                           will raise an error internally as it's required.
+        namespace (str, optional): Pinecone namespace to target within the index. Defaults
+                                   to None which uses the index default namespace.
 
     Returns:
         dict: A dictionary containing the status of the operation, a descriptive
@@ -129,10 +146,15 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
               Example:
               {
                   "status": "success" | "error" | "partial_error" | "success_partial_data",
-                  "message": "Descriptive message of the outcome.",
-                  "inserted_count": int (number of vectors successfully upserted)
-              }
+              "message": "Descriptive message of the outcome.",
+              "inserted_count": int (number of vectors successfully upserted)
+          }
     """
+    if Pinecone is None:
+        raise ImportError(
+            "Le paquet 'pinecone' est requis pour l'insertion Pinecone. Installez-le via 'pip install pinecone'."
+        ) from _pinecone_import_error
+
     if not os.path.exists(embeddings_json_file):
         msg = f"Le fichier {embeddings_json_file} n'existe pas."
         print(msg)
@@ -228,7 +250,8 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
     index = None
     try:
         index = pc.Index(index_name)
-        print(f"Connecté à l'index Pinecone: {index_name}")
+        ns_msg = f" (namespace: '{namespace}')" if namespace else ""
+        print(f"Connecté à l'index Pinecone: {index_name}{ns_msg}")
     except Exception as e:
         msg = f"Failed to connect to Pinecone index '{index_name}': {e}"
         print(msg)
@@ -271,7 +294,7 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
             total_processed_chunks += len(batch_chunks) 
             
             if vectors_to_upsert:
-                success_upsert = upsert_batch_to_pinecone(index, vectors_to_upsert)
+                success_upsert = upsert_batch_to_pinecone(index, vectors_to_upsert, namespace=namespace)
                 if success_upsert:
                     total_inserted_count += len(vectors_to_upsert)
                     print(f"Lot {i//PINECONE_BATCH_SIZE + 1}: {len(vectors_to_upsert)} vecteurs insérés avec succès pour le document {doc_id}.")
@@ -281,12 +304,14 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
             elif batch_chunks: 
                  print(f"Lot {i//PINECONE_BATCH_SIZE + 1}: Aucun vecteur valide à insérer pour le document {doc_id}.")
 
-    final_message_parts = [
-        "Insertion terminée.",
+    final_message_parts = ["Insertion terminée."]
+    if namespace:
+        final_message_parts.append(f"Namespace ciblé: {namespace}.")
+    final_message_parts.extend([
         f"Total de chunks traités (tentative de préparation): {total_processed_chunks}.",
         f"Total de chunks effectivement préparés et insérés avec succès dans Pinecone: {total_inserted_count}",
         f"(sur {len(all_chunks)} chunks initialement chargés si tous étaient valides)."
-    ]
+    ])
     final_message = " ".join(final_message_parts)
     print(f"\n{final_message}")
 
@@ -331,17 +356,27 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
 
 ## BASE VECTORIELLE Weaviate
 
-import os
-import json
-import weaviate
-from weaviate.classes.init import Auth
-# from weaviate.classes.config import Configure # Not strictly needed for this script's operations
 from uuid import uuid5, NAMESPACE_DNS
-from tqdm import tqdm
 from dateutil import parser
 import re
-import qdrant_client
-from qdrant_client import models
+
+try:
+    import weaviate
+    from weaviate.classes.init import Auth
+    _weaviate_import_error = None
+except ImportError as exc:  # pragma: no cover - optional dependency
+    weaviate = None
+    Auth = None
+    _weaviate_import_error = exc
+
+try:
+    import qdrant_client
+    from qdrant_client import models
+    _qdrant_import_error = None
+except ImportError as exc:  # pragma: no cover - optional dependency
+    qdrant_client = None
+    models = None
+    _qdrant_import_error = exc
 
 # Configuration des tailles de lots
 WEAVIATE_BATCH_SIZE = 100
@@ -419,10 +454,15 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
         int: The total number of chunks successfully inserted into Weaviate.
              Returns 0 if the file doesn't exist or a major error occurs during setup.
     """
+    if weaviate is None or Auth is None:
+        raise ImportError(
+            "Le paquet 'weaviate-client' est requis pour l'insertion Weaviate. Installez-le via 'pip install weaviate-client'."
+        ) from _weaviate_import_error
+
     if not os.path.exists(embeddings_json_file):
         print(f"Le fichier {embeddings_json_file} n'existe pas.")
         return 0
-    
+
     client = None  # Initialiser client à None
     
     if not url:
@@ -578,10 +618,15 @@ def prepare_points_for_qdrant(chunks):
                                                 ready for upsertion to Qdrant.
                                                 Chunks missing 'embedding' are skipped.
     """
+    if qdrant_client is None or models is None:
+        raise ImportError(
+            "Le paquet 'qdrant-client' est requis pour l'insertion Qdrant. Installez-le via 'pip install qdrant-client'."
+        ) from _qdrant_import_error
+
     points = []
     for chunk in chunks:
         dense_embedding = chunk.get("embedding")
-        
+
         if dense_embedding is not None:
             # Utiliser l'ID du chunk comme ID du point Qdrant. 
             # Qdrant accepte les UUIDs (chaînes ou objets UUID) ou les entiers comme ID.
@@ -628,9 +673,14 @@ def upsert_batch_to_qdrant(client: qdrant_client.QdrantClient, collection_name: 
         tuple[bool, int]: A tuple containing:
                           - bool: True if the upsert was successful (or succeeded on retry),
                                   False otherwise.
-                          - int: The number of points successfully processed in the batch
+                                  - int: The number of points successfully processed in the batch
                                  (0 if the operation failed).
     """
+    if qdrant_client is None or models is None:
+        raise ImportError(
+            "Le paquet 'qdrant-client' est requis pour l'insertion Qdrant. Installez-le via 'pip install qdrant-client'."
+        ) from _qdrant_import_error
+
     try:
         # Utiliser wait=True pour s'assurer que l'opération est terminée avant de continuer
         operation_info = client.upsert(collection_name=collection_name, points=points_batch, wait=True)
@@ -677,6 +727,11 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
              Returns 0 if the file doesn't exist, URL is missing, or a major
              error occurs during setup or processing.
     """
+    if qdrant_client is None or models is None:
+        raise ImportError(
+            "Le paquet 'qdrant-client' est requis pour l'insertion Qdrant. Installez-le via 'pip install qdrant-client'."
+        ) from _qdrant_import_error
+
     if not os.path.exists(embeddings_json_file):
         print(f"Le fichier {embeddings_json_file} n'existe pas.")
         return 0

@@ -5,6 +5,7 @@ langchain-text-splitters
 spacy
 pinecone
 weaviate-client
+qdrant-client
 tqdm
 python-dateutil
 python-dotenv

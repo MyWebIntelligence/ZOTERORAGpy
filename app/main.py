@@ -609,13 +609,14 @@ async def upload_db(
     path: str = Form(...), 
     db_choice: str = Form(...),
     pinecone_index_name: str = Form(None),
+    pinecone_namespace: str = Form(None),
     weaviate_class_name: str = Form(None),
     weaviate_tenant_name: str = Form(None),
     qdrant_collection_name: str = Form(None)
 ): # path is now relative to UPLOAD_DIR
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"/upload_db called with relative path: '{path}', resolved to absolute: '{absolute_processing_path}', db_choice: '{db_choice}'")
-    logger.info(f"Pinecone index: {pinecone_index_name}, Weaviate class: {weaviate_class_name}, Qdrant collection: {qdrant_collection_name}")
+    logger.info(f"Pinecone index: {pinecone_index_name}, namespace: {pinecone_namespace}, Weaviate class: {weaviate_class_name}, Qdrant collection: {qdrant_collection_name}")
 
     chunks_json = os.path.join(absolute_processing_path, f"{BASE_CHUNK_OUTPUT_NAME}_chunks_with_embeddings_sparse.json")
     if not os.path.exists(chunks_json):
@@ -671,12 +672,14 @@ async def upload_db(
                 return JSONResponse(status_code=400, content={"error": "Pinecone API Key not found in credentials."})
             if not pinecone_index_name:
                 return JSONResponse(status_code=400, content={"error": "Pinecone Index Name is required."})
+            namespace_value = (pinecone_namespace or "").strip() or None
             
-            logger.info(f"Starting Pinecone upload to index: {pinecone_index_name} with file {chunks_json}")
+            logger.info(f"Starting Pinecone upload to index: {pinecone_index_name}, namespace: {namespace_value} with file {chunks_json}")
             pinecone_result = insert_to_pinecone( # Capture the result
                 embeddings_json_file=chunks_json,
                 index_name=pinecone_index_name,
-                pinecone_api_key=api_key
+                pinecone_api_key=api_key,
+                namespace=namespace_value
             )
             # Use the status and message from pinecone_result for the response
             if pinecone_result.get("status") == "success" or pinecone_result.get("status") == "success_partial_data":
@@ -685,7 +688,8 @@ async def upload_db(
                     "status": "success", # Simplified status for frontend if needed, or pass pinecone_result["status"]
                     "message": pinecone_result.get("message", "Pinecone operation completed."),
                     "inserted_count": pinecone_result.get("inserted_count", 0),
-                    "db_choice": db_choice
+                    "db_choice": db_choice,
+                    "namespace": namespace_value
                 }
                 logger.info(f"Returning 200 OK for Pinecone success: {response_content}")
                 return JSONResponse(response_content)
@@ -695,7 +699,8 @@ async def upload_db(
                     "error": pinecone_result.get("message", "Pinecone operation failed."),
                     "status": pinecone_result.get("status", "error"), # Pass along the specific status
                     "inserted_count": pinecone_result.get("inserted_count", 0),
-                    "db_choice": db_choice
+                    "db_choice": db_choice,
+                    "namespace": namespace_value
                 })
 
         elif db_choice == "weaviate":
