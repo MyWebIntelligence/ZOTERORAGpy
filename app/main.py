@@ -140,6 +140,80 @@ async def upload_zip(file: UploadFile = File(...)):
     logger.info(f"Returning relative processing path: {relative_processing_path} to client. (Absolute was: {processing_path})")
     return JSONResponse({"path": relative_processing_path, "tree": tree})
 
+@app.post("/upload_csv")
+async def upload_csv_endpoint(file: UploadFile = File(...)):
+    """
+    Upload CSV file for direct ingestion (bypass PDF/OCR).
+    Converts CSV to DataFrame using ingestion.csv_ingestion module,
+    then saves it as output.csv for the pipeline.
+    """
+    # Generate unique directory for this CSV upload
+    unique_id = str(uuid.uuid4().hex)[:8]
+    original_filename, file_extension = os.path.splitext(file.filename)
+
+    # Validate file extension
+    if file_extension.lower() != ".csv":
+        logger.error(f"Invalid file extension for CSV upload: {file_extension}")
+        return JSONResponse(status_code=400, content={"error": "Only .csv files are accepted."})
+
+    dst_dir_name = f"{unique_id}_{original_filename}"
+    dst_dir = os.path.join(UPLOAD_DIR, dst_dir_name)
+
+    os.makedirs(dst_dir, exist_ok=True)
+
+    # Save uploaded CSV temporarily
+    temp_csv_path = os.path.join(dst_dir, f"{original_filename}.csv")
+    try:
+        with open(temp_csv_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        logger.info(f"Uploaded CSV saved to: {temp_csv_path}")
+    except Exception as e:
+        logger.error(f"Failed to save CSV file: {e}")
+        if os.path.exists(dst_dir):
+            shutil.rmtree(dst_dir)
+        return JSONResponse(status_code=500, content={"error": "Failed to save CSV file.", "details": str(e)})
+
+    # Import ingestion module
+    try:
+        import sys
+        if RAGPY_DIR not in sys.path:
+            sys.path.insert(0, RAGPY_DIR)
+        from ingestion import ingest_csv_to_dataframe
+    except ImportError as e:
+        logger.error(f"Failed to import ingestion module: {e}")
+        return JSONResponse(status_code=500, content={"error": "Server configuration error: CSV ingestion module not found.", "details": str(e)})
+
+    # Convert CSV to DataFrame using ingestion module
+    try:
+        logger.info(f"Converting CSV to DataFrame using ingestion module: {temp_csv_path}")
+        df = ingest_csv_to_dataframe(temp_csv_path)
+
+        # Save as output.csv (compatible with pipeline)
+        output_csv_path = os.path.join(dst_dir, "output.csv")
+        df.to_csv(output_csv_path, index=False, encoding="utf-8-sig")
+        logger.info(f"DataFrame saved as output.csv: {output_csv_path}")
+
+        # Delete temporary CSV
+        os.remove(temp_csv_path)
+
+        # Build file tree
+        tree = ["output.csv"]
+
+        relative_processing_path = os.path.relpath(dst_dir, UPLOAD_DIR)
+        logger.info(f"CSV ingestion successful. Returning path: {relative_processing_path}")
+
+        return JSONResponse({
+            "path": relative_processing_path,
+            "tree": tree,
+            "message": f"CSV ingested successfully: {len(df)} rows processed."
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to process CSV: {e}", exc_info=True)
+        if os.path.exists(dst_dir):
+            shutil.rmtree(dst_dir)
+        return JSONResponse(status_code=500, content={"error": "Failed to process CSV file.", "details": str(e)})
+
 @app.post("/stop_all_scripts")
 async def stop_all_scripts():
     command = 'pkill -SIGTERM -f "python3 scripts/rad_"'

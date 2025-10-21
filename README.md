@@ -1,6 +1,8 @@
 # RAGpy
 
-Pipeline de traitement de documents (PDF, exports Zotero) et interface web pour générer des chunks de texte, produire des embeddings denses et parcimonieux, puis charger ces données dans une base vectorielle (Pinecone, Weaviate ou Qdrant) pour des usages RAG.
+Pipeline de traitement de documents (PDF, exports Zotero, **CSV**) et interface web pour générer des chunks de texte, produire des embeddings denses et parcimonieux, puis charger ces données dans une base vectorielle (Pinecone, Weaviate ou Qdrant) pour des usages RAG.
+
+**Nouveau** : Support d'ingestion CSV directe (bypass OCR) pour économiser temps et coûts API.
 
 ---
 
@@ -83,14 +85,28 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 Ensuite, ouvrez http://localhost:8000
 
-Flux conseillé:
+**Deux options d'ingestion disponibles** :
+
+#### Option A : ZIP (Zotero + PDFs) - Flux complet avec OCR
+
 - Téléverser un ZIP (export Zotero: JSON + `files/` avec PDFs, ou un dossier de PDFs)
-- Lancer « Process dataframe » pour produire `uploads/<session>/output.csv`
+- Lancer « Process dataframe » pour produire `uploads/<session>/output.csv` (OCR Mistral/OpenAI)
 - Lancer successivement: « Initial chunking », « Dense embeddings », « Sparse embeddings »
-- Dans « Upload to DB », choisir Pinecone / Weaviate / Qdrant et renseigner les infos; les clés proviennent de `.env` (réglables via « Settings »)
+- Dans « Upload to DB », choisir Pinecone / Weaviate / Qdrant et renseigner les infos
+
+#### Option B : CSV (Direct) - **NOUVEAU** - Bypass OCR
+
+- Téléverser un CSV avec une colonne `text` (ou `description`, `content`, etc.)
+- **Skip** l'étape « Process dataframe » → passe directement au chunking
+- Le reste du flux reste identique (chunking → embeddings → DB)
+- **Avantage** : 80% moins de coûts API (pas d'OCR ni de recodage GPT)
+
+**Documentation CSV** : Voir [.claude/task/CSV_INGESTION_GUIDE.md](.claude/task/CSV_INGESTION_GUIDE.md)
 
 Où sont stockés les fichiers?
 - Dans `uploads/<session>/` avec les sorties: `output.csv`, `output_chunks.json`, `output_chunks_with_embeddings.json`, `output_chunks_with_embeddings_sparse.json`.
+
+**Note** : Les clés API proviennent de `.env` (réglables via le bouton « Settings ⚙️ » en haut à droite)
 
 Astuce: un script shell d’aide `ragpy_cli.sh` existe pour démarrer/arrêter le serveur. Il suppose d’être exécuté depuis le dossier parent contenant `ragpy/`. Si vous êtes déjà dans `ragpy/`, préférez la commande `uvicorn app.main:app ...` ci‑dessus.
 

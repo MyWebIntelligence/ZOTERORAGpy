@@ -128,13 +128,37 @@
       <div id="stopScriptsResult" class="result" style="display: none; margin-top:10px;"></div>
     </div>
 
-    <!-- Step 1: Upload ZIP -->
+    <!-- Step 1: Upload Documents -->
     <section id="upload-section">
-      <h2>1. Upload ZIP Archive</h2>
-      <form id="uploadForm" enctype="multipart/form-data">
-        <input type="file" name="file" accept=".zip" required />
-        <button type="submit">Upload</button>
-      </form>
+      <h2>1. Upload Documents</h2>
+      <p style="color: #555; margin-bottom: 15px;">Choose your data source:</p>
+
+      <!-- Option A: ZIP (Zotero + PDFs) -->
+      <div style="border: 2px solid #1976d2; border-radius: 8px; padding: 15px; margin-bottom: 15px; background: #f0f7ff;">
+        <h3 style="margin-top: 0; color: #1976d2;">📦 Option A: ZIP Archive (Zotero + PDFs)</h3>
+        <p style="font-size: 0.9em; color: #555;">
+          For Zotero exports containing a JSON file + PDF attachments.
+          Requires OCR processing (Mistral/OpenAI).
+        </p>
+        <form id="uploadZipForm" enctype="multipart/form-data">
+          <input type="file" name="file" accept=".zip" required />
+          <button type="submit">Upload ZIP</button>
+        </form>
+      </div>
+
+      <!-- Option B: CSV Direct -->
+      <div style="border: 2px solid #2e7d32; border-radius: 8px; padding: 15px; background: #f1f8f4;">
+        <h3 style="margin-top: 0; color: #2e7d32;">📄 Option B: CSV File (Direct Text)</h3>
+        <p style="font-size: 0.9em; color: #555;">
+          For CSV files with a text column (e.g., "text", "description", "content").
+          <strong>Skips OCR</strong> - faster and cheaper (no GPT recodage).
+        </p>
+        <form id="uploadCsvForm" enctype="multipart/form-data">
+          <input type="file" name="file" accept=".csv" required />
+          <button type="submit" style="background: #2e7d32;">Upload CSV</button>
+        </form>
+      </div>
+
       <div id="uploadResult" class="result"></div>
     </section>
 
@@ -394,11 +418,11 @@
       return `<p>${parts.join(' • ')}</p>`;
     }
 
-    // Step 1: Upload ZIP
-    document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+    // Step 1A: Upload ZIP (Zotero + PDFs)
+    document.getElementById('uploadZipForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const uploadResult = document.getElementById('uploadResult');
-      uploadResult.textContent = 'Uploading...';
+      uploadResult.textContent = 'Uploading ZIP...';
       const formData = new FormData(e.target);
 
       try {
@@ -409,10 +433,40 @@
         const json = await res.json();
         if (res.ok) {
           currentPath = json.path;
-          uploadResult.innerHTML = `<p>Uploaded to: <strong>${currentPath}</strong></p>`;
+          uploadResult.innerHTML = `<p>✅ ZIP uploaded: <strong>${currentPath}</strong></p><p style="color: #1976d2;">Next: Extract Text & Metadata (Step 2)</p>`;
           document.getElementById('dataframe-section').style.display = 'block';
         } else {
           uploadResult.textContent = 'Error: ' + (json.error || res.statusText);
+        }
+      } catch (err) {
+        uploadResult.textContent = 'Upload failed: ' + err;
+      }
+    });
+
+    // Step 1B: Upload CSV (Direct ingestion)
+    document.getElementById('uploadCsvForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const uploadResult = document.getElementById('uploadResult');
+      uploadResult.textContent = 'Uploading and processing CSV...';
+      const formData = new FormData(e.target);
+
+      try {
+        const res = await fetch('/upload_csv', {
+          method: 'POST',
+          body: formData
+        });
+        const json = await res.json();
+        if (res.ok) {
+          currentPath = json.path;
+          uploadResult.innerHTML = `<p>✅ CSV ingested: <strong>${currentPath}</strong></p><p>${json.message || ''}</p><p style="color: #2e7d32;">CSV processed! Next: Text Chunking (Step 3.1)</p>`;
+          // Skip dataframe section for CSV (already processed)
+          document.getElementById('dataframe-section').style.display = 'none';
+          document.getElementById('initial-chunk-section').style.display = 'block';
+        } else {
+          uploadResult.textContent = 'Error: ' + (json.error || res.statusText);
+          if (json.details) {
+            uploadResult.innerHTML += '<br><small>' + json.details + '</small>';
+          }
         }
       } catch (err) {
         uploadResult.textContent = 'Upload failed: ' + err;
