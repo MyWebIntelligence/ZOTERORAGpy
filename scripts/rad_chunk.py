@@ -73,8 +73,8 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 if RecursiveCharacterTextSplitter:
     TEXT_SPLITTER = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
         model_name="text-embedding-3-large",  # This model is for token counting for the splitter
-        chunk_size=2500,
-        chunk_overlap=250,
+        chunk_size=1000,
+        chunk_overlap=150,
         separators=["\n\n", "#", "##", "\n", " ", ""] # Ajout des nouveaux séparateurs avec priorité
     )
 else:
@@ -205,7 +205,8 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS):
     if isinstance(provider_raw, float) and pd.isna(provider_raw):
         provider_raw = ""
     provider = str(provider_raw).strip().lower()
-    recode_required = provider != "mistral"
+    # Skip recodage GPT si OCR Mistral (déjà Markdown) ou source CSV (déjà propre)
+    recode_required = provider not in ("mistral", "csv")
 
     doc_id = str(random.randint(10**11, 10**12 - 1))
     text_chunks = TEXT_SPLITTER.split_text(text)
@@ -247,19 +248,25 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS):
                     return value
                 return str(value) # Fallback to string representation
 
+            # Construction dynamique des métadonnées
+            # Injecte TOUTES les colonnes du row_data (compatibilité CSV)
             chunk_metadata = {
                 "id":           f"{doc_id}_{original_chunk_index}",
-                "type":         sanitize_metadata_value(row_data.get("type", "")),
-                "title":        sanitize_metadata_value(row_data.get("title", "")),
-                "authors":      sanitize_metadata_value(row_data.get("authors", "")),
-                "date":         sanitize_metadata_value(row_data.get("date", "")), # Handles NaN for date
-                "filename":     sanitize_metadata_value(row_data.get("filename", "")),
-                "doc_id":       doc_id, # doc_id is generated, should be fine
+                "doc_id":       doc_id,
                 "chunk_index":  original_chunk_index,
                 "total_chunks": len(text_chunks),
                 "text":         cleaned_text,
-                "ocr_provider": sanitize_metadata_value(provider, ""),
             }
+
+            # Injecter toutes les métadonnées source (sauf texteocr qui est dans "text")
+            for key, value in row_data.items():
+                # Exclure les champs déjà gérés ou trop volumineux
+                if key not in ("texteocr", "text", "id", "doc_id", "chunk_index", "total_chunks"):
+                    chunk_metadata[key] = sanitize_metadata_value(value, "")
+
+            # S'assurer que ocr_provider est présent (backward compatibility)
+            if "ocr_provider" not in chunk_metadata and "texteocr_provider" not in chunk_metadata:
+                chunk_metadata["ocr_provider"] = sanitize_metadata_value(provider, "")
             all_processed_chunks.append(chunk_metadata)
 
     if all_processed_chunks:

@@ -42,7 +42,7 @@ pip install -r scripts/requirements.txt
 pip install fastapi uvicorn jinja2 python-multipart
 
 # 4. Installer le modèle spaCy FR (si textes FR)
-python -m spacy download fr_core_news_md
+python3 -m spacy download fr_core_news_md
 
 # 5. Créer le fichier .env à la racine
 cp scripts/.env.example .env  # si présent, sinon créez-le manuellement
@@ -64,9 +64,6 @@ copy scripts\.env.example .env
 Contenu minimal de `.env` (à adapter):
 ```env
 OPENAI_API_KEY=sk-...                # Obligatoire (embeddings + recodage GPT)
-MISTRAL_API_KEY=mist-...             # Recommandé pour l'OCR Markdown
-MISTRAL_OCR_MODEL=mistral-ocr-latest # (optionnel) Override du modèle OCR
-MISTRAL_API_BASE_URL=https://api.mistral.ai  # (optionnel) Endpoint OCR
 PINECONE_API_KEY=pcsk-...            # Optionnel si Pinecone
 WEAVIATE_URL=https://...             # Optionnel si Weaviate
 WEAVIATE_API_KEY=...                 # Optionnel si Weaviate
@@ -88,7 +85,8 @@ Ensuite, ouvrez http://localhost:8000
 
 Flux conseillé:
 - Téléverser un ZIP (export Zotero: JSON + `files/` avec PDFs, ou un dossier de PDFs)
-- Lors des étapes 3.1 à 3.3, choisir entre « Upload » pour réinjecter respectivement `output.csv`, `output_chunks.json` ou `output_chunks_with_embeddings.json`, puis « Generate » pour recalculer. Sans fichier téléversé, l'application réutilise automatiquement la sortie disponible de la session en cours.
+- Lancer « Process dataframe » pour produire `uploads/<session>/output.csv`
+- Lancer successivement: « Initial chunking », « Dense embeddings », « Sparse embeddings »
 - Dans « Upload to DB », choisir Pinecone / Weaviate / Qdrant et renseigner les infos; les clés proviennent de `.env` (réglables via « Settings »)
 
 Où sont stockés les fichiers?
@@ -105,7 +103,7 @@ Traitement complet (hors interface web) à partir d’un export Zotero placé da
 python scripts/rad_dataframe.py \
   --json sources/MaBiblio/MaBiblio.json \
   --dir  sources/MaBiblio \
- --output sources/MaBiblio/output.csv
+  --output sources/MaBiblio/output.csv
 ```
 
 2) Chunking + embeddings denses + sparses
@@ -119,8 +117,6 @@ Sorties attendues dans `sources/MaBiblio/`:
 - `output_chunks.json`
 - `output_chunks_with_embeddings.json`
 - `output_chunks_with_embeddings_sparse.json`
-
-Le CSV intermédiaire contient un champ `texteocr_provider` indiquant si l'OCR provient de Mistral (endpoint `v1/ocr`), d'un fallback OpenAI ou du mode local historique; la phase de chunking saute automatiquement le recodage GPT lorsque la source est Mistral.
 
 3) Chargement en base vectorielle (optionnel, programmatique)
 
@@ -238,3 +234,4 @@ L’UI (« Settings ») permet de lire/écrire `.env` à la racine de `ragpy/`.
 ### 8) Licence
 
 MIT. Voir `LICENSE`.
+

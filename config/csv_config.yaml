@@ -1,0 +1,74 @@
+# Configuration pour l'ingestion CSV dans le pipeline RAGpy
+# Ce fichier définit les paramètres par défaut pour la lecture et le traitement des fichiers CSV
+
+csv:
+  # Nom de la colonne contenant le texte principal
+  # Cette colonne sera mappée vers la variable pivot 'texteocr'
+  text_column: "text"
+
+  # Encodage du fichier CSV
+  # Valeurs possibles:
+  #   - "auto": détection automatique via chardet (recommandé)
+  #   - "utf-8": encodage UTF-8 standard
+  #   - "latin-1": encodage ISO-8859-1 (ancien format Windows)
+  #   - "cp1252": encodage Windows-1252
+  #   - Tout autre encodage supporté par Python
+  encoding: "auto"
+
+  # Séparateur de colonnes
+  # Valeurs courantes: "," (virgule), ";" (point-virgule), "\t" (tabulation)
+  delimiter: ","
+
+  # Liste des colonnes à inclure dans les métadonnées
+  # Si vide [], toutes les colonnes (sauf text_column) seront incluses
+  # Exemples:
+  #   meta_columns: []                          # Toutes les colonnes
+  #   meta_columns: ["title", "category", "date"]  # Seulement ces 3 colonnes
+  meta_columns: []
+
+  # Ignorer les lignes dont la colonne texte est vide
+  # Si true, les lignes avec texte vide ne génèrent pas de Document
+  # Si false, une erreur est levée
+  skip_empty: true
+
+  # Ajouter automatiquement le champ 'row_index' dans les métadonnées
+  # Utile pour tracer l'origine d'un chunk dans le CSV d'origine
+  add_row_index: true
+
+# Exemples de configurations pour cas d'usage spécifiques
+
+# Exemple 1: Support tickets
+# csv:
+#   text_column: "description"
+#   encoding: "utf-8"
+#   delimiter: ","
+#   meta_columns: ["ticket_id", "title", "category", "priority", "status", "created_at"]
+#   skip_empty: true
+#   add_row_index: true
+
+# Exemple 2: Articles de blog exportés
+# csv:
+#   text_column: "content"
+#   encoding: "utf-8"
+#   delimiter: ","
+#   meta_columns: ["title", "author", "publish_date", "tags", "url"]
+#   skip_empty: true
+#   add_row_index: false
+
+# Exemple 3: Base de connaissances produits
+# csv:
+#   text_column: "description_longue"
+#   encoding: "latin-1"
+#   delimiter: ";"
+#   meta_columns: ["ref_produit", "nom", "categorie", "prix", "stock"]
+#   skip_empty: true
+#   add_row_index: true
+
+# Exemple 4: Export depuis Excel (CSV avec point-virgule)
+# csv:
+#   text_column: "texte"
+#   encoding: "cp1252"
+#   delimiter: ";"
+#   meta_columns: []
+#   skip_empty: true
+#   add_row_index: true

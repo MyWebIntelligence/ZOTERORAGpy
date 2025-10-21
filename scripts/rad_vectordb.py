@@ -68,7 +68,7 @@ def prepare_vectors_for_pinecone(chunks):
     Prépare les vecteurs au format attendu par Pinecone, incluant les données de vecteurs sparse si disponibles.
     Chaque 'chunk' d'entrée est supposé être un dictionnaire.
     - 'embedding': contient le vecteur dense (liste de flottants).
-    - 'sparse_embedding': (optionnel) contient les données du vecteur sparse 
+    - 'sparse_embedding': (optionnel) contient les données du vecteur sparse
       sous la forme d'un dictionnaire {"indices": [...], "values": [...]}.
     - 'id': l'identifiant unique du vecteur.
     - Autres clés: utilisées comme métadonnées.
@@ -77,22 +77,24 @@ def prepare_vectors_for_pinecone(chunks):
     for chunk in chunks:
         # Vérifier que l'embedding dense existe et n'est pas None
         dense_embedding = chunk.get("embedding")
-        
+
         if dense_embedding is not None:
+            # Construction dynamique des métadonnées
+            # Injecte TOUTES les clés du chunk (compatibilité CSV et autres sources)
+            metadata = {}
+            for key, value in chunk.items():
+                # Exclure les champs techniques (vecteurs et identifiants)
+                if key not in ("id", "embedding", "sparse_embedding", "values"):
+                    metadata[key] = value
+
+            # S'assurer que "text" est présent (backward compatibility)
+            if "text" not in metadata and "chunk_text" in chunk:
+                metadata["text"] = chunk.get("chunk_text", "")
+
             vector_data = {
                 "id": chunk["id"],
                 "values": dense_embedding,  # Vecteur dense
-                "metadata": {
-                    "title": chunk.get("title", ""),
-                    "authors": chunk.get("authors", ""),
-                    "date": chunk.get("date", ""),
-                    "type": chunk.get("type", ""),
-                    "filename": chunk.get("filename", ""),
-                    "doc_id": chunk.get("doc_id", ""),
-                    "chunk_index": chunk.get("chunk_index", 0),
-                    "total_chunks": chunk.get("total_chunks", 0),
-                    "text": chunk.get("text") or chunk.get("chunk_text", "")
-                }
+                "metadata": metadata
             }
             
             # Vérifier et ajouter les données du vecteur sparse si elles existent
@@ -537,18 +539,22 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
             for chunk in current_batch_chunks:
                 if chunk.get("embedding") is not None:
                     uuid_str = generate_uuid(chunk["id"]) # Ensure this is a string for DataObject
-                    
-                    properties = {
-                        "title": chunk.get("title", ""),
-                        "authors": chunk.get("authors", ""),
-                        "date": normalize_date_to_rfc3339(chunk.get("date", "")),
-                        "type": chunk.get("type", ""),
-                        "filename": chunk.get("filename", ""),
-                        "doc_id": chunk.get("doc_id", ""),
-                        "chunk_index": chunk.get("chunk_index", 0),
-                        "total_chunks": chunk.get("total_chunks", 0),
-                        "text": chunk.get("text") or chunk.get("chunk_text", "")
-                    }
+
+                    # Construction dynamique des properties
+                    # Injecte TOUTES les clés du chunk (compatibilité CSV et autres sources)
+                    properties = {}
+                    for key, value in chunk.items():
+                        # Exclure les champs techniques (vecteurs et identifiants)
+                        if key not in ("id", "embedding", "sparse_embedding"):
+                            # Normaliser les dates pour Weaviate (RFC3339)
+                            if key in ("date", "created_at", "updated_at", "published_at") and value:
+                                properties[key] = normalize_date_to_rfc3339(str(value))
+                            else:
+                                properties[key] = value
+
+                    # S'assurer que "text" est présent (backward compatibility)
+                    if "text" not in properties and "chunk_text" in chunk:
+                        properties["text"] = chunk.get("chunk_text", "")
                     
                     batch_data_objects.append(
                         weaviate.classes.data.DataObject(
@@ -628,23 +634,23 @@ def prepare_points_for_qdrant(chunks):
         dense_embedding = chunk.get("embedding")
 
         if dense_embedding is not None:
-            # Utiliser l'ID du chunk comme ID du point Qdrant. 
+            # Utiliser l'ID du chunk comme ID du point Qdrant.
             # Qdrant accepte les UUIDs (chaînes ou objets UUID) ou les entiers comme ID.
             # Générer un UUID v5 stable à partir de l'ID original du chunk pour assurer la compatibilité.
-            point_id = generate_uuid(chunk["id"]) 
-            
-            payload = {
-                "original_id": chunk["id"], # Garder l'ID original dans le payload pour référence
-                "title": chunk.get("title", ""),
-                "authors": chunk.get("authors", ""),
-                "date": chunk.get("date", ""), # Qdrant stocke les dates comme strings ou timestamps
-                "type": chunk.get("type", ""),
-                "filename": chunk.get("filename", ""),
-                "doc_id": chunk.get("doc_id", ""),
-                "chunk_index": chunk.get("chunk_index", 0),
-                "total_chunks": chunk.get("total_chunks", 0),
-                "text": chunk.get("text") or chunk.get("chunk_text", "")
-            }
+            point_id = generate_uuid(chunk["id"])
+
+            # Construction dynamique du payload
+            # Injecte TOUTES les clés du chunk (compatibilité CSV et autres sources)
+            payload = {"original_id": chunk["id"]}  # Garder l'ID original dans le payload
+
+            for key, value in chunk.items():
+                # Exclure les champs techniques (vecteurs et identifiants)
+                if key not in ("id", "embedding", "sparse_embedding"):
+                    payload[key] = value
+
+            # S'assurer que "text" est présent (backward compatibility)
+            if "text" not in payload and "chunk_text" in chunk:
+                payload["text"] = chunk.get("chunk_text", "")
             
             # Créer l'objet PointStruct
             point = models.PointStruct(
