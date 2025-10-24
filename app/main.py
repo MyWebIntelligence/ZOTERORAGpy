@@ -489,6 +489,8 @@ async def get_credentials():
     Get credentials from ragpy/.env for the settings form.
     Returns a JSON with keys for:
       - OPENAI_API_KEY
+      - OPENROUTER_API_KEY, OPENROUTER_DEFAULT_MODEL
+      - MISTRAL_API_KEY, MISTRAL_OCR_MODEL, MISTRAL_API_BASE_URL
       - PINECONE_API_KEY, PINECONE_ENV
       - WEAVIATE_API_KEY, WEAVIATE_URL
       - QDRANT_API_KEY, QDRANT_URL
@@ -502,6 +504,7 @@ async def get_credentials():
         # Return empty strings for all keys if .env doesn't exist, so frontend form is populated correctly
         credential_keys_on_missing = [
             "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_DEFAULT_MODEL",
+            "MISTRAL_API_KEY", "MISTRAL_OCR_MODEL", "MISTRAL_API_BASE_URL",
             "PINECONE_API_KEY", "PINECONE_ENV",
             "WEAVIATE_API_KEY", "WEAVIATE_URL", "QDRANT_API_KEY", "QDRANT_URL"
         ]
@@ -526,6 +529,7 @@ async def get_credentials():
     # Return just the credentials keys that we need for the form
     credential_keys = [
         "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_DEFAULT_MODEL",
+        "MISTRAL_API_KEY", "MISTRAL_OCR_MODEL", "MISTRAL_API_BASE_URL",
         "PINECONE_API_KEY", "PINECONE_ENV",
         "WEAVIATE_API_KEY", "WEAVIATE_URL",
         "QDRANT_API_KEY", "QDRANT_URL"
@@ -541,9 +545,11 @@ async def save_credentials(
     data: dict = Body(...)
 ):
     """
-    Save credentials for OpenAI, Pinecone, Weaviate, Qdrant to ragpy/.env.
+    Save credentials for OpenAI, OpenRouter, Mistral, Pinecone, Weaviate, Qdrant to ragpy/.env.
     Expects a JSON body with keys:
       - OPENAI_API_KEY
+      - OPENROUTER_API_KEY, OPENROUTER_DEFAULT_MODEL
+      - MISTRAL_API_KEY, MISTRAL_OCR_MODEL, MISTRAL_API_BASE_URL
       - PINECONE_API_KEY, PINECONE_ENV
       - WEAVIATE_API_KEY, WEAVIATE_URL
       - QDRANT_API_KEY, QDRANT_URL
@@ -573,6 +579,7 @@ async def save_credentials(
     # This prevents accidental overwriting of other .env variables if `data` contains more keys.
     credential_keys_to_save = [
         "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_DEFAULT_MODEL",
+        "MISTRAL_API_KEY", "MISTRAL_OCR_MODEL", "MISTRAL_API_BASE_URL",
         "PINECONE_API_KEY", "PINECONE_ENV",
         "WEAVIATE_API_KEY", "WEAVIATE_URL", "QDRANT_API_KEY", "QDRANT_URL"
     ]

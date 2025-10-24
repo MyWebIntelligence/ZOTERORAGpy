@@ -102,6 +102,15 @@
           <input type="text" id="openrouterModel" name="OPENROUTER_DEFAULT_MODEL" autocomplete="off" placeholder="openai/gemini-2.5-flash" />
         </div>
         <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
+          <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">Mistral (Optional - for OCR)</h3>
+          <label for="mistralKey">API Key</label>
+          <input type="text" id="mistralKey" name="MISTRAL_API_KEY" autocomplete="off" placeholder="Mistral API Key" />
+          <label for="mistralModel">OCR Model</label>
+          <input type="text" id="mistralModel" name="MISTRAL_OCR_MODEL" autocomplete="off" placeholder="mistral-ocr-latest" />
+          <label for="mistralUrl">API Base URL</label>
+          <input type="text" id="mistralUrl" name="MISTRAL_API_BASE_URL" autocomplete="off" placeholder="https://api.mistral.ai" />
+        </div>
+        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
           <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">Pinecone</h3>
           <label for="pineconeKey">API Key</label>
           <input type="text" id="pineconeKey" name="PINECONE_API_KEY" autocomplete="off" placeholder="Pinecone API Key" />
