@@ -501,13 +501,14 @@ async def get_credentials():
         logger.error(f".env file not found at: {env_path}")
         # Return empty strings for all keys if .env doesn't exist, so frontend form is populated correctly
         credential_keys_on_missing = [
-            "OPENAI_API_KEY", "PINECONE_API_KEY", "PINECONE_ENV",
+            "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_DEFAULT_MODEL",
+            "PINECONE_API_KEY", "PINECONE_ENV",
             "WEAVIATE_API_KEY", "WEAVIATE_URL", "QDRANT_API_KEY", "QDRANT_URL"
         ]
         empty_credentials = {k: "" for k in credential_keys_on_missing}
         logger.info("Returning empty credentials as .env file was not found.")
         return JSONResponse(status_code=200, content=empty_credentials) # Return 200 with empty strings
-    
+
     # Read existing .env
     env_vars = {}
     try:
@@ -521,10 +522,10 @@ async def get_credentials():
     except Exception as e:
         logger.error(f"Error reading .env file: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": f"Failed to read credentials: {str(e)}"})
-    
+
     # Return just the credentials keys that we need for the form
     credential_keys = [
-        "OPENAI_API_KEY",
+        "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_DEFAULT_MODEL",
         "PINECONE_API_KEY", "PINECONE_ENV",
         "WEAVIATE_API_KEY", "WEAVIATE_URL",
         "QDRANT_API_KEY", "QDRANT_URL"
@@ -571,7 +572,8 @@ async def save_credentials(
     # Only update keys that are explicitly part of the credentials form
     # This prevents accidental overwriting of other .env variables if `data` contains more keys.
     credential_keys_to_save = [
-        "OPENAI_API_KEY", "PINECONE_API_KEY", "PINECONE_ENV",
+        "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_DEFAULT_MODEL",
+        "PINECONE_API_KEY", "PINECONE_ENV",
         "WEAVIATE_API_KEY", "WEAVIATE_URL", "QDRANT_API_KEY", "QDRANT_URL"
     ]
     updated_keys = []
@@ -654,9 +656,11 @@ async def get_first_chunk(path: str = Query(...), filetype: str = Query(...)): #
         return JSONResponse(status_code=500, content={"error": f"Failed to read chunk file: {e}"})
 
 @app.post("/initial_text_chunking")
-async def initial_text_chunking(path: str = Form(...)): # path is now relative to UPLOAD_DIR
+async def initial_text_chunking(path: str = Form(...), model: str = Form(None)): # path is now relative to UPLOAD_DIR
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"initial_text_chunking received relative path: '{path}', resolved to absolute: '{absolute_processing_path}'")
+    if model:
+        logger.info(f"LLM model specified for recoding: {model}")
 
     input_csv = os.path.join(absolute_processing_path, f"{BASE_CHUNK_OUTPUT_NAME}.csv")
     output_json = os.path.join(absolute_processing_path, f"{BASE_CHUNK_OUTPUT_NAME}_chunks.json")
@@ -669,14 +673,19 @@ async def initial_text_chunking(path: str = Form(...)): # path is now relative t
         # Ensure script path is robust
         script_path = os.path.abspath(os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py"))
         logger.info(f"Executing rad_chunk.py (initial) with script: {script_path}, input: {input_csv}, output dir: {absolute_processing_path}")
-        
-        # Modifié pour que stdout/stderr du script aillent vers la console uvicorn
-        subprocess.run([
+
+        # Build command with optional --model parameter
+        cmd = [
             "python3", script_path,
             "--phase", "initial",
-            "--input", input_csv, 
+            "--input", input_csv,
             "--output", absolute_processing_path
-        ], check=True, timeout=3600) # Timeout augmenté à 1 heure (3600 secondes)
+        ]
+        if model:
+            cmd.extend(["--model", model])
+
+        # Modifié pour que stdout/stderr du script aillent vers la console uvicorn
+        subprocess.run(cmd, check=True, timeout=3600) # Timeout augmenté à 1 heure (3600 secondes)
     except subprocess.TimeoutExpired:
         logger.error(f"Initial chunking script timed out after 1 hour. Path: {absolute_processing_path}")
         return JSONResponse(status_code=504, content={"error": "Initial chunking timed out (1 hour)."})

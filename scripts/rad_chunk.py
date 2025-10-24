@@ -69,6 +69,18 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# OpenRouter Client Initialization (optional, for cost-effective alternatives)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+openrouter_client = None
+if OPENROUTER_API_KEY:
+    openrouter_client = OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1"
+    )
+    print("OpenRouter client initialized successfully.")
+else:
+    print("OpenRouter API key not found. Will use OpenAI for all LLM calls.")
+
 # Text Splitter Initialization
 if RecursiveCharacterTextSplitter:
     TEXT_SPLITTER = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
@@ -110,7 +122,23 @@ def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3,
     """
     Recoder un lot de textes selon des instructions précises en parallèle,
     puis retenter séquentiellement en cas d'erreur.
+
+    Args:
+        model: Nom du modèle (ex: "gpt-4o-mini" pour OpenAI, "openai/gemini-2.5-flash" pour OpenRouter)
+               Si le modèle contient "/" → utilise OpenRouter, sinon OpenAI
     """
+    # Auto-detect which client to use based on model format
+    use_openrouter = "/" in model  # OpenRouter models have format "provider/model"
+    active_client = openrouter_client if (use_openrouter and openrouter_client) else client
+
+    if use_openrouter and not openrouter_client:
+        print(f"Warning: OpenRouter model '{model}' requested but OpenRouter client not initialized.")
+        print("Falling back to OpenAI gpt-4o-mini")
+        model = "gpt-4o-mini"
+        active_client = client
+
+    print(f"Using {'OpenRouter' if (use_openrouter and openrouter_client) else 'OpenAI'} with model: {model}")
+
     messages_list = []
     for chunk in chunks:
         prompt = (
@@ -128,8 +156,8 @@ def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3,
     with ThreadPoolExecutor(max_workers=DEFAULT_MAX_WORKERS) as executor:
         futures = {
             executor.submit(
-                lambda msgs: client.chat.completions.create(
-                    model=model,
+                lambda msgs, mdl=model: active_client.chat.completions.create(
+                    model=mdl,
                     messages=msgs,
                     temperature=temperature,
                     max_tokens=max_tokens
@@ -152,7 +180,7 @@ def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3,
             print(f"Tentative de 2ᵉ passe pour le chunk #{i+1}")
             try:
                 time.sleep(2) # Wait before retrying
-                resp = client.chat.completions.create(
+                resp = active_client.chat.completions.create(
                     model=model,
                     messages=messages_list[i],
                     temperature=temperature,
@@ -184,13 +212,16 @@ def save_raw_chunks_to_json_incrementally(chunks_to_add, json_file):
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(merged_chunks, f, ensure_ascii=False, indent=2)
 
-def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS):
+def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-mini"):
     """
     Traite un document (représenté par row_data, ex: une ligne de DataFrame).
     1. Extraction et nettoyage du texte (implicite par TEXT_SPLITTER)
     2. Découpage en chunks avec TEXT_SPLITTER
     3. Recodage par batch avec gpt_recode_batch
     4. Sauvegarde des chunks avec save_raw_chunks_to_json_incrementally
+
+    Args:
+        model: Modèle LLM pour le recodage (ex: "gpt-4o-mini" ou "openai/gemini-2.5-flash")
     """
     if TEXT_SPLITTER is None:
         print("Erreur: TEXT_SPLITTER n'est pas initialisé. Impossible de traiter le document.")
@@ -224,9 +255,9 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS):
             cleaned_batch = gpt_recode_batch(
                 batch_to_recode,
                 instructions="ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence par une phrase complète et se termine par un point. Supprime le bruit d'OCR et les imperfections en conservant le sens original. Ne echange ni ajoute aucun mot du texte d'origine. C'est une correction et un nettoyage de texte (suppression des erreurs) pas une réécriture",
-                model="gpt-4o-mini", # As per master code
+                model=model,
                 temperature=0.3,
-                max_tokens=8000 # As per master code for this call
+                max_tokens=8000
             )
         else:
             if start_index == 0:
@@ -278,18 +309,21 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS):
     
     return all_processed_chunks
 
-def process_all_documents(df, json_file=DEFAULT_JSON_FILE_CHUNKS):
+def process_all_documents(df, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-mini"):
     """
     Lance le traitement de tous les documents d'un DataFrame en parallèle.
     Utilise un nombre limité de workers pour process_document_chunks pour éviter la surcharge API.
+
+    Args:
+        model: Modèle LLM pour le recodage (ex: "gpt-4o-mini" ou "openai/gemini-2.5-flash")
     """
     # Max 3 documents processed in parallel for their chunking/recoding stages
-    num_doc_workers = min(3, DEFAULT_MAX_WORKERS) 
-    
+    num_doc_workers = min(3, DEFAULT_MAX_WORKERS)
+
     with ThreadPoolExecutor(max_workers=num_doc_workers) as executor:
         # df.iterrows() returns (index, Series)
         futures = {
-            executor.submit(process_document_chunks, row_series, json_file): idx 
+            executor.submit(process_document_chunks, row_series, json_file, model): idx
             for idx, row_series in df.iterrows()
         }
         
@@ -499,9 +533,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Process text data through chunking and embedding phases.")
     parser.add_argument("--input", required=True, help="Path to the input file (CSV for 'initial' phase, JSON for 'dense' and 'sparse' phases).")
     parser.add_argument("--output", required=True, help="Directory to save the output JSON files.")
-    parser.add_argument("--phase", choices=['initial', 'dense', 'sparse', 'all'], default='all', 
+    parser.add_argument("--phase", choices=['initial', 'dense', 'sparse', 'all'], default='all',
                         help="Specify processing phase: 'initial' (chunking), 'dense' (dense embeddings), 'sparse' (sparse embeddings), or 'all'.")
-    
+    parser.add_argument("--model", type=str, default="gpt-4o-mini",
+                        help="LLM model for text recoding. Use 'gpt-4o-mini' (OpenAI) or 'openai/gemini-2.5-flash' (OpenRouter). Default: gpt-4o-mini")
+
     args = parser.parse_args()
 
     # Setup logging for chunking phase
@@ -595,8 +631,8 @@ if __name__ == '__main__':
             except OSError as e:
                 print(f"Avertissement: Impossible de supprimer {initial_chunks_json}: {e}. Le contenu pourrait être ajouté.")
                 logger.warning(f"Avertissement: Impossible de supprimer {initial_chunks_json}: {e}. Le contenu pourrait être ajouté.")
-        
-        process_all_documents(df, json_file=initial_chunks_json)
+
+        process_all_documents(df, json_file=initial_chunks_json, model=args.model)
         if not os.path.exists(initial_chunks_json) or os.path.getsize(initial_chunks_json) == 0:
             print(f"Erreur: Aucun chunk n'a été généré dans '{initial_chunks_json}'.")
             logger.error(f"Erreur: Aucun chunk n'a été généré dans '{initial_chunks_json}'.")

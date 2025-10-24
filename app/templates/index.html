@@ -95,6 +95,13 @@
           <input type="text" id="openaiKey" name="OPENAI_API_KEY" autocomplete="off" placeholder="sk-..." />
         </div>
         <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
+          <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">OpenRouter (Optional - for cost savings)</h3>
+          <label for="openrouterKey">API Key</label>
+          <input type="text" id="openrouterKey" name="OPENROUTER_API_KEY" autocomplete="off" placeholder="sk-or-v1-..." />
+          <label for="openrouterModel">Default Model</label>
+          <input type="text" id="openrouterModel" name="OPENROUTER_DEFAULT_MODEL" autocomplete="off" placeholder="openai/gemini-2.5-flash" />
+        </div>
+        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
           <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">Pinecone</h3>
           <label for="pineconeKey">API Key</label>
           <input type="text" id="pineconeKey" name="PINECONE_API_KEY" autocomplete="off" placeholder="Pinecone API Key" />
@@ -177,6 +184,9 @@
         <input type="file" id="initialChunkUploadInput" name="file" accept=".csv" />
         <button type="submit">Upload output.csv</button>
       </form>
+      <label for="recodingModelInput" style="margin-top: 10px; display: block;">Recoding Model (optional):</label>
+      <input type="text" id="recodingModelInput" placeholder="openai/gemini-2.5-flash" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;" />
+      <p style="font-size: 0.85em; color: #666; margin-top: -5px;">Leave empty to use default from Settings. Format: "openai/gemini-2.5-flash" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
       <button id="runInitialChunkBtn">Generate Chunks</button>
       <div id="initialChunkResult" class="result"></div>
     </section>
@@ -512,6 +522,14 @@
       resultDiv.textContent = 'Running initial chunking...';
       const form = new URLSearchParams();
       form.append('path', currentPath);
+
+      // Get the model from the input field (if provided)
+      const modelInput = document.getElementById('recodingModelInput');
+      const model = modelInput ? modelInput.value.trim() : '';
+      if (model) {
+        form.append('model', model);
+        console.log(`Using recoding model: ${model}`);
+      }
 
       try {
         const res = await fetch('/initial_text_chunking', {

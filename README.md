@@ -65,13 +65,17 @@ copy scripts\.env.example .env
 
 Contenu minimal de `.env` (à adapter):
 ```env
-OPENAI_API_KEY=sk-...                # Obligatoire (embeddings + recodage GPT)
-PINECONE_API_KEY=pcsk-...            # Optionnel si Pinecone
-WEAVIATE_URL=https://...             # Optionnel si Weaviate
-WEAVIATE_API_KEY=...                 # Optionnel si Weaviate
-QDRANT_URL=https://...               # Optionnel si Qdrant
-QDRANT_API_KEY=...                   # Optionnel (instances publiques sans clé)
+OPENAI_API_KEY=sk-...                      # Obligatoire (embeddings + recodage GPT)
+OPENROUTER_API_KEY=sk-or-v1-...            # Optionnel (alternative économique pour recodage)
+OPENROUTER_DEFAULT_MODEL=openai/gemini-2.5-flash  # Modèle par défaut OpenRouter
+PINECONE_API_KEY=pcsk-...                  # Optionnel si Pinecone
+WEAVIATE_URL=https://...                   # Optionnel si Weaviate
+WEAVIATE_API_KEY=...                       # Optionnel si Weaviate
+QDRANT_URL=https://...                     # Optionnel si Qdrant
+QDRANT_API_KEY=...                         # Optionnel (instances publiques sans clé)
 ```
+
+**Nouveau** : Support OpenRouter pour réduire les coûts de recodage de 2-3x (ex: Gemini 2.5 Flash ~$0.002/1M tokens vs GPT-4o-mini ~$0.15/1M tokens)
 
 Notes:
 - Placez `.env` à la racine de `ragpy/`.
@@ -108,6 +112,8 @@ Où sont stockés les fichiers?
 
 **Note** : Les clés API proviennent de `.env` (réglables via le bouton « Settings ⚙️ » en haut à droite)
 
+**Réduction des coûts avec OpenRouter** : Lors de l'étape "3.1 Initial Text Chunking", vous pouvez spécifier un modèle OpenRouter (ex: `openai/gemini-2.5-flash`) pour le recodage de texte au lieu de GPT-4o-mini. Cela réduit les coûts de ~75% tout en maintenant une qualité comparable. Configurez vos credentials OpenRouter dans Settings.
+
 Astuce: un script shell d’aide `ragpy_cli.sh` existe pour démarrer/arrêter le serveur. Il suppose d’être exécuté depuis le dossier parent contenant `ragpy/`. Si vous êtes déjà dans `ragpy/`, préférez la commande `uvicorn app.main:app ...` ci‑dessus.
 
 ### 3) Utilisation en ligne de commande
@@ -124,10 +130,18 @@ python scripts/rad_dataframe.py \
 
 2) Chunking + embeddings denses + sparses
 ```bash
+# Option A: Utiliser OpenAI GPT-4o-mini (défaut)
 python scripts/rad_chunk.py \
   --input sources/MaBiblio/output.csv \
   --output sources/MaBiblio \
   --phase all
+
+# Option B: Utiliser OpenRouter pour économiser sur le recodage (2-3x moins cher)
+python scripts/rad_chunk.py \
+  --input sources/MaBiblio/output.csv \
+  --output sources/MaBiblio \
+  --phase all \
+  --model openai/gemini-2.5-flash
 ```
 Sorties attendues dans `sources/MaBiblio/`:
 - `output_chunks.json`
@@ -227,15 +241,20 @@ Journaux et sorties:
 - `logs/app.log`, `logs/pdf_processing.log`
 - Fichiers de session dans `uploads/<session>/`
 
-### 6) Variables d’environnement (.env)
+### 6) Variables d'environnement (.env)
 
-Clés supportées par l’UI et les scripts:
-- `OPENAI_API_KEY`
+Clés supportées par l'UI et les scripts:
+
+- `OPENAI_API_KEY` (obligatoire - embeddings + recodage par défaut)
+- `OPENROUTER_API_KEY` (optionnel - alternative économique pour recodage)
+- `OPENROUTER_DEFAULT_MODEL` (optionnel - ex: `openai/gemini-2.5-flash`)
 - `PINECONE_API_KEY`, `PINECONE_ENV` (selon configuration Pinecone)
 - `WEAVIATE_URL`, `WEAVIATE_API_KEY`
 - `QDRANT_URL`, `QDRANT_API_KEY`
 
-L’UI (« Settings ») permet de lire/écrire `.env` à la racine de `ragpy/`.
+L'UI (« Settings ») permet de lire/écrire `.env` à la racine de `ragpy/`.
+
+**OpenRouter** : Service permettant d'accéder à plusieurs LLM (Gemini, Claude, etc.) via une API unifiée. Particulièrement intéressant pour le recodage de texte grâce à des modèles comme Gemini 2.5 Flash (~75% moins cher que GPT-4o-mini). Les embeddings restent générés via OpenAI `text-embedding-3-large`.
 
 ### 7) Dépannage (FAQ)
 
