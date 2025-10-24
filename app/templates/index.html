@@ -99,7 +99,7 @@
           <label for="openrouterKey">API Key</label>
           <input type="text" id="openrouterKey" name="OPENROUTER_API_KEY" autocomplete="off" placeholder="sk-or-v1-..." />
           <label for="openrouterModel">Default Model</label>
-          <input type="text" id="openrouterModel" name="OPENROUTER_DEFAULT_MODEL" autocomplete="off" placeholder="openai/gemini-2.5-flash" />
+          <input type="text" id="openrouterModel" name="OPENROUTER_DEFAULT_MODEL" autocomplete="off" placeholder="google/gemini-2.5-flash" />
         </div>
         <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
           <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">Mistral (Optional - for OCR)</h3>
@@ -286,8 +286,11 @@
           if (input) {
             console.log(`Setting ${key} value`);
             // Truncate API keys for security - show first 20 chars + #####
+            // Only mask fields that contain API_KEY or _KEY in their name
             const value = json[key] || '';
-            if (value.length > 20) {
+            const isApiKey = key.includes('API_KEY') || key.includes('_KEY');
+
+            if (isApiKey && value.length > 20) {
               input.value = value.substring(0, 20) + '##########';
             } else {
               input.value = value;
