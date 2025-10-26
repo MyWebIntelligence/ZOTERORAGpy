@@ -11,6 +11,10 @@ import logging
 import html as html_module
 from typing import Dict, Tuple, Optional
 from openai import OpenAI
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,7 @@ SENTINEL_PREFIX = "ragpy-note-id:"
 # Load environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
 
 # Initialize clients
 openai_client = None
@@ -176,13 +181,14 @@ Commence directement par le contenu HTML, sans préambule."""
         return prompt
 
 
-def _generate_with_llm(prompt: str, model: str = "gpt-4o-mini", temperature: float = 0.2) -> str:
+def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2) -> str:
     """
     Generate note content using LLM.
 
     Args:
         prompt: The prompt to send to the LLM
-        model: Model name (e.g., "gpt-4o-mini" or "openai/gemini-2.5-flash")
+        model: Model name (e.g., "gpt-4o-mini" or "openai/gemini-2.5-flash").
+               If None, uses OPENROUTER_DEFAULT_MODEL from .env
         temperature: Sampling temperature (0.0 to 1.0)
 
     Returns:
@@ -192,6 +198,11 @@ def _generate_with_llm(prompt: str, model: str = "gpt-4o-mini", temperature: flo
         ValueError: If no LLM client is available
         Exception: If the API call fails
     """
+    # Use OPENROUTER_DEFAULT_MODEL if no model specified
+    if not model:
+        model = OPENROUTER_DEFAULT_MODEL
+        logger.info(f"No model specified, using default: {model}")
+
     # Detect which client to use based on model format
     use_openrouter = "/" in model  # OpenRouter models have format "provider/model"
 
@@ -296,7 +307,7 @@ def _fallback_template(metadata: Dict, language: str) -> str:
 def build_note_html(
     metadata: Dict,
     text_content: Optional[str] = None,
-    model: str = "gpt-4o-mini",
+    model: str = None,
     use_llm: bool = True
 ) -> Tuple[str, str]:
     """
@@ -307,7 +318,8 @@ def build_note_html(
     Args:
         metadata: Dictionary with item metadata (title, authors, abstract, etc.)
         text_content: Full text content (texteocr). If None, will use abstract only.
-        model: LLM model to use (default: "gpt-4o-mini")
+        model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
+               Examples: "gpt-4o-mini", "openai/gemini-2.5-flash"
         use_llm: Whether to use LLM or fallback to template (default: True)
 
     Returns:
@@ -327,6 +339,11 @@ def build_note_html(
         >>> print(sentinel)
         ragpy-note-id:abc123...
     """
+    # Use OPENROUTER_DEFAULT_MODEL if no model specified
+    if not model:
+        model = OPENROUTER_DEFAULT_MODEL
+        logger.info(f"No model specified, using default: {model}")
+
     # Detect target language
     language = _detect_language(metadata)
     logger.info(f"Generating note in language: {language}")

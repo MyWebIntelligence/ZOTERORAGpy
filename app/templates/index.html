@@ -863,7 +863,7 @@
       progressText.textContent = 'Starting...';
 
       const modelInput = document.getElementById('zoteroModelInput').value.trim();
-      const model = modelInput || 'gpt-4o-mini'; // Default to gpt-4o-mini if empty
+      const model = modelInput || ''; // Send empty string to use server default (OPENROUTER_DEFAULT_MODEL)
       const form = new URLSearchParams();
       form.append('session', currentPath);
       form.append('model', model);

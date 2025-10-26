@@ -5,10 +5,16 @@
 
 ## Updates
 - **Initial fix:** 2025-10-26 - Multi-method extraction strategy
-- **Additional fix:** 2025-10-26 - Added `load_dotenv()` to enable .env fallback
+- **Additional fix #1:** 2025-10-26 - Added `load_dotenv()` to `zotero_parser.py` to enable .env fallback
+- **Additional fix #2:** 2025-10-26 - Added `load_dotenv()` to `llm_note_generator.py` to enable LLM clients + default model support
 
-## Problem
+## Problems
+
+### Problem 1: Library Information Extraction
 Error when generating Zotero notes: **"Error: Could not extract library information. Please set ZOTERO_USER_ID or ZOTERO_GROUP_ID in Settings."**
+
+### Problem 2: LLM Not Used
+Warning in logs: **"LLM not available or disabled, using template"** - Notes generated with placeholder text instead of intelligent LLM-generated content
 
 ### Root Causes
 
@@ -18,10 +24,16 @@ Error when generating Zotero notes: **"Error: Could not extract library informat
 - The `uri` field may not always be present in all export formats
 - The `itemKey` (or modern `key`) field was not being extracted from the JSON and stored in the CSV
 
-**Issue 2:** Missing .env loading
+**Issue 2:** Missing .env loading in zotero_parser.py
 - The fallback method (Method 3) reads `ZOTERO_USER_ID` and `ZOTERO_GROUP_ID` from environment variables
 - However, `zotero_parser.py` was calling `os.getenv()` without first loading the `.env` file with `load_dotenv()`
 - This caused the fallback to always fail even when credentials were properly configured in `.env`
+
+**Issue 3:** Missing .env loading in llm_note_generator.py
+- The `llm_note_generator.py` module was calling `os.getenv("OPENAI_API_KEY")` and `os.getenv("OPENROUTER_API_KEY")` without loading `.env` first
+- This caused the LLM clients (`openai_client` and `openrouter_client`) to never be initialized
+- Result: The condition `if use_llm and (openai_client or openrouter_client):` always evaluated to False, forcing fallback to template
+- The default model was also hardcoded to `"gpt-4o-mini"` instead of using `OPENROUTER_DEFAULT_MODEL` from `.env`
 
 ## Solution
 
@@ -103,6 +115,51 @@ The code already supports multiple column name variations:
 - ItemKey: Searches for `"itemKey"`, `"item_key"`, or `"key"` columns (line 712)
 - Abstract: Searches for `"abstractNote"` or `"abstract"` columns (line 752)
 
+### 5. LLM Client Initialization Fix
+**File:** `app/utils/llm_note_generator.py` (lines 14-17, 27)
+
+Added `load_dotenv()` to properly initialize LLM clients:
+
+```python
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Load environment variables
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # ✅ Now loads from .env
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # ✅ Now loads from .env
+OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")  # NEW
+```
+
+Result: Both `openai_client` and `openrouter_client` are now properly initialized when keys are present in `.env`.
+
+### 6. Default Model Support
+**Files:** `app/utils/llm_note_generator.py`, `app/templates/index.html`, `app/main.py`
+
+Implemented support for `OPENROUTER_DEFAULT_MODEL` from `.env`:
+
+**Backend (`llm_note_generator.py`):**
+```python
+def _generate_with_llm(prompt: str, model: str = None, ...):
+    # Use OPENROUTER_DEFAULT_MODEL if no model specified
+    if not model:
+        model = OPENROUTER_DEFAULT_MODEL
+        logger.info(f"No model specified, using default: {model}")
+```
+
+**Frontend (`index.html` line 866):**
+```javascript
+const model = modelInput || ''; // Send empty string to use server default
+```
+
+**Endpoint (`main.py` line 621):**
+```python
+model: str = Form("")  # Empty string → uses OPENROUTER_DEFAULT_MODEL
+```
+
+**Result:** When user leaves model field empty, system uses `google/gemini-2.5-flash` (or whatever is configured in `.env`) via OpenRouter.
+
 ## Files Modified
 
 1. **app/utils/zotero_parser.py** (lines 14-17, 81-222, 270-288)
@@ -111,13 +168,26 @@ The code already supports multiple column name variations:
    - Added modern/legacy itemKey support
    - Updated documentation
 
-2. **scripts/rad_dataframe.py** (lines 405-438)
+2. **app/utils/llm_note_generator.py** (lines 14-17, 27, 184-207, 307-349)
+   - **CRITICAL:** Added `load_dotenv()` to initialize LLM clients
+   - Added `OPENROUTER_DEFAULT_MODEL` support
+   - Modified `_generate_with_llm()` to accept `model=None` and use default
+   - Modified `build_note_html()` to accept `model=None` and use default
+   - Updated documentation
+
+3. **scripts/rad_dataframe.py** (lines 405-438)
    - Added `itemKey` field extraction
    - Added `abstract` field extraction
    - Added dual JSON format support
 
-3. **app/templates/index.html** (lines 293-295, 865-866)
-   - Changed model selection from dropdown to text input (separate feature)
+4. **app/templates/index.html** (lines 293-295, 866)
+   - Changed model selection from dropdown to text input
+   - Changed default from `'gpt-4o-mini'` to `''` (empty string for server default)
+
+5. **app/main.py** (lines 621, 635-636, 641, 772-778)
+   - Changed endpoint default from `Form("gpt-4o-mini")` to `Form("")`
+   - Added logic to convert empty string to None before calling `build_note_html()`
+   - Updated documentation
 
 ## Testing
 
@@ -141,14 +211,40 @@ The code already supports multiple column name variations:
 
 ### Expected Behavior
 
+#### Library Extraction (Problem 1)
+
 **Before Fix:**
 ```
-Error: Could not extract library information from any item URI
+ERROR: Could not extract library information from any item URI
 ```
 
 **After Fix:**
 ```
-✅ Created: 5
+WARNING: Could not extract library info from JSON items, checking .env credentials
+INFO: Using ZOTERO_USER_ID from .env: 15681
+INFO: Detected library: type=users, id=15681
+```
+
+#### LLM Generation (Problem 2)
+
+**Before Fix:**
+```
+INFO: LLM not available or disabled, using template
+```
+→ Notes contain placeholder text: "à compléter" / "to be completed"
+
+**After Fix:**
+```
+INFO: OpenRouter client initialized for note generation
+INFO: No model specified, using default: google/gemini-2.5-flash
+INFO: Using OpenRouter with model: google/gemini-2.5-flash
+INFO: Generated note content (length: 1543 chars)
+```
+→ Notes contain intelligent LLM-generated analysis
+
+#### Final Result
+```
+✅ Created: 5 notes with LLM-generated content
 ℹ️ Already exists: 0
 ⏭️ Skipped: 0
 ❌ Errors: 0

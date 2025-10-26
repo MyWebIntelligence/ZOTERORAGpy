@@ -618,7 +618,7 @@ async def save_credentials(
 @app.post("/generate_zotero_notes")
 async def generate_zotero_notes(
     session: str = Form(...),
-    model: str = Form("gpt-4o-mini")
+    model: str = Form("")
 ):
     """
     Generate reading notes for Zotero items and push them to Zotero.
@@ -632,12 +632,13 @@ async def generate_zotero_notes(
 
     Args:
         session: Session directory name (e.g., "abc123_MyLibrary")
-        model: LLM model to use (e.g., "gpt-4o-mini" or "openai/gemini-2.5-flash")
+        model: LLM model to use. If empty string, uses OPENROUTER_DEFAULT_MODEL from .env.
+               Examples: "gpt-4o-mini" (OpenAI), "openai/gemini-2.5-flash" (OpenRouter)
 
     Returns:
         JSON with list of items and their status
     """
-    logger.info(f"Starting Zotero notes generation for session: {session}, model: {model}")
+    logger.info(f"Starting Zotero notes generation for session: {session}, model: {model or 'default'}")
 
     # Build session directory path
     session_dir = os.path.join(UPLOAD_DIR, session)
@@ -767,10 +768,12 @@ async def generate_zotero_notes(
 
             # Generate the note
             logger.info(f"Generating note for item {item_key}")
+            # Convert empty string to None to use default model
+            llm_model = model if model else None
             sentinel, note_html = llm_note_generator.build_note_html(
                 metadata=metadata,
                 text_content=text_content,
-                model=model,
+                model=llm_model,
                 use_llm=True
             )
 
