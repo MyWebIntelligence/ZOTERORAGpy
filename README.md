@@ -395,6 +395,7 @@ L'UI (« Settings ») permet de lire/écrire `.env` à la racine de `ragpy/`.
 - Doublons : Le système vérifie automatiquement l'existence via sentinel unique
 - Erreur 404 : L'itemKey n'existe pas dans votre bibliothèque (vérifiez la synchronisation)
 - Rate limit (429) : Le système gère automatiquement les limites avec retry
+- "Invalid JSON format" : Le système gère automatiquement les deux formats d'export Zotero (tableau direct ou objet avec clé "items")
 
 ### 9) Licence
 

@@ -168,10 +168,13 @@ class TestCreateChildNote:
         mock_response = Mock()
         mock_response.status_code = 201
         mock_response.headers = {"Last-Modified-Version": "101"}
+        # According to Zotero API docs, successful["0"] is the itemKey directly
         mock_response.json.return_value = {
             "successful": {
-                "0": {"key": "NOTEKEY123"}
-            }
+                "0": "NOTEKEY123"
+            },
+            "unchanged": {},
+            "failed": {}
         }
         mock_post.return_value = mock_response
 
@@ -225,8 +228,11 @@ class TestCreateChildNote:
         mock_response_success = Mock()
         mock_response_success.status_code = 201
         mock_response_success.headers = {"Last-Modified-Version": "102"}
+        # Correct format according to Zotero API docs
         mock_response_success.json.return_value = {
-            "successful": {"0": {"key": "NOTEKEY"}}
+            "successful": {"0": "NOTEKEY"},
+            "unchanged": {},
+            "failed": {}
         }
 
         mock_post.side_effect = [mock_response_412, mock_response_success]

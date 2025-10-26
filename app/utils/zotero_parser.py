@@ -127,21 +127,39 @@ def extract_library_info_from_session(session_dir: str) -> Dict:
             "error": f"Failed to read JSON file: {str(e)}"
         }
 
-    # Validate structure
-    if "items" not in data or not isinstance(data["items"], list):
+    # Normalize the data structure
+    # Zotero exports can be either:
+    # 1. Direct array: [{item1}, {item2}, ...]
+    # 2. Object with items key: {"items": [{item1}, {item2}, ...]}
+    if isinstance(data, list):
+        # Format 1: Direct array
+        items = data
+        logger.info(f"Detected Zotero JSON format: direct array with {len(items)} items")
+    elif isinstance(data, dict) and "items" in data:
+        # Format 2: Object with items key
+        items = data["items"]
+        logger.info(f"Detected Zotero JSON format: object with 'items' key, {len(items)} items")
+    else:
         return {
             "success": False,
-            "error": "Invalid Zotero JSON format: missing 'items' array"
+            "error": f"Invalid Zotero JSON format: expected array or object with 'items' key, got {type(data).__name__}"
         }
 
-    if not data["items"]:
+    # Validate items
+    if not isinstance(items, list):
+        return {
+            "success": False,
+            "error": "Invalid Zotero JSON format: 'items' is not an array"
+        }
+
+    if not items:
         return {
             "success": False,
             "error": "No items found in Zotero JSON"
         }
 
     # Extract library info from the first item with a URI
-    for item in data["items"]:
+    for item in items:
         # Try to get URI from item
         uri = item.get("uri")
 
@@ -190,13 +208,20 @@ def extract_item_keys_from_json(json_path: str) -> List[Dict]:
         logger.error(f"Error reading JSON file {json_path}: {e}")
         return []
 
-    if "items" not in data:
-        logger.error("Invalid JSON structure: missing 'items' array")
+    # Normalize the data structure (same as extract_library_info_from_session)
+    if isinstance(data, list):
+        # Format 1: Direct array
+        items = data
+    elif isinstance(data, dict) and "items" in data:
+        # Format 2: Object with items key
+        items = data["items"]
+    else:
+        logger.error(f"Invalid JSON structure: expected array or object with 'items' key, got {type(data).__name__}")
         return []
 
     items_info = []
 
-    for item in data["items"]:
+    for item in items:
         # Skip attachments and notes (we only want parent items)
         item_type = item.get("itemType", "")
         if item_type in ("attachment", "note"):

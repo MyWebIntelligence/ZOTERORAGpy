@@ -287,8 +287,10 @@ def create_child_note(
                 new_version = response.headers.get("Last-Modified-Version")
 
                 # Extract the created note key
+                # According to Zotero API docs, successful["0"] contains the itemKey directly
+                # Response format: {"successful": {"0": "<itemKey>"}, "unchanged": {}, "failed": {}}
                 if "successful" in result and "0" in result["successful"]:
-                    note_key = result["successful"]["0"]["key"]
+                    note_key = result["successful"]["0"]
                     logger.info(f"Successfully created note {note_key} for item {item_key}")
                     return {
                         "success": True,
