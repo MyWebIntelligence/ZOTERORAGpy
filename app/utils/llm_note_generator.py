@@ -101,13 +101,24 @@ def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
     Returns:
         Formatted prompt string
     """
-    # Extract key metadata
-    title = metadata.get("title", "Sans titre")
-    authors = metadata.get("authors", "N/A")
-    date = metadata.get("date", "N/A")
-    abstract = metadata.get("abstract", "")
-    doi = metadata.get("doi", "")
-    url = metadata.get("url", "")
+    # Extract key metadata and convert to strings (handle pandas NaN/float values)
+    def safe_str(value, default="N/A"):
+        """Convert value to string, handling NaN and None."""
+        if value is None or value == "":
+            return default
+        # Check for pandas NaN (float type)
+        if isinstance(value, float):
+            import math
+            if math.isnan(value):
+                return default
+        return str(value)
+
+    title = safe_str(metadata.get("title"), "Sans titre")
+    authors = safe_str(metadata.get("authors"), "N/A")
+    date = safe_str(metadata.get("date"), "N/A")
+    abstract = safe_str(metadata.get("abstract"), "")
+    doi = safe_str(metadata.get("doi"), "")
+    url = safe_str(metadata.get("url"), "")
 
     # Language-specific names
     lang_instructions = {
@@ -121,7 +132,7 @@ def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
     target_lang = lang_instructions.get(language, "français")
 
     # Limit text content to avoid token limits
-    text_limited = text_content[:8000] if text_content else "Non disponible"
+    text_limited = safe_str(text_content[:8000] if text_content else None, "Non disponible")
     abstract_text = abstract if abstract else "Non disponible"
 
     try:
@@ -260,11 +271,24 @@ def _fallback_template(metadata: Dict, language: str) -> str:
     Returns:
         HTML template string
     """
-    title = html_module.escape(metadata.get("title", "Sans titre"))
-    authors = html_module.escape(metadata.get("authors", "N/A"))
-    date = html_module.escape(str(metadata.get("date", "N/A"))[:10])
-    abstract = html_module.escape((metadata.get("abstract", ""))[:1200])
-    url = html_module.escape(metadata.get("url", metadata.get("doi", "")))
+    # Helper to safely convert values to strings
+    def safe_str(value, default="N/A"):
+        """Convert value to string, handling NaN and None."""
+        if value is None or value == "":
+            return default
+        # Check for pandas NaN (float type)
+        if isinstance(value, float):
+            import math
+            if math.isnan(value):
+                return default
+        return str(value)
+
+    title = html_module.escape(safe_str(metadata.get("title"), "Sans titre"))
+    authors = html_module.escape(safe_str(metadata.get("authors"), "N/A"))
+    date = html_module.escape(safe_str(metadata.get("date"), "N/A")[:10])
+    abstract_raw = safe_str(metadata.get("abstract"), "")
+    abstract = html_module.escape(abstract_raw[:1200] if abstract_raw else "")
+    url = html_module.escape(safe_str(metadata.get("url") or metadata.get("doi"), ""))
 
     # Language-specific labels
     labels = {

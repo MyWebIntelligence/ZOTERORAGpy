@@ -7,6 +7,7 @@
 - **Initial fix:** 2025-10-26 - Multi-method extraction strategy
 - **Additional fix #1:** 2025-10-26 - Added `load_dotenv()` to `zotero_parser.py` to enable .env fallback
 - **Additional fix #2:** 2025-10-26 - Added `load_dotenv()` to `llm_note_generator.py` to enable LLM clients + default model support
+- **Additional fix #3:** 2025-10-26 - Added `safe_str()` function to handle pandas NaN/float values in metadata
 
 ## Problems
 
@@ -15,6 +16,9 @@ Error when generating Zotero notes: **"Error: Could not extract library informat
 
 ### Problem 2: LLM Not Used
 Warning in logs: **"LLM not available or disabled, using template"** - Notes generated with placeholder text instead of intelligent LLM-generated content
+
+### Problem 3: Type Error in Prompt Building
+Error in logs: **"LLM generation failed, using template fallback: replace() argument 2 must be str, not float"** - Prompt generation crashes when metadata contains pandas NaN values
 
 ### Root Causes
 
@@ -34,6 +38,12 @@ Warning in logs: **"LLM not available or disabled, using template"** - Notes gen
 - This caused the LLM clients (`openai_client` and `openrouter_client`) to never be initialized
 - Result: The condition `if use_llm and (openai_client or openrouter_client):` always evaluated to False, forcing fallback to template
 - The default model was also hardcoded to `"gpt-4o-mini"` instead of using `OPENROUTER_DEFAULT_MODEL` from `.env`
+
+**Issue 4:** Type error with pandas NaN values
+- When reading CSV files, pandas can return `float('nan')` for empty cells
+- The `_build_prompt()` function was doing `template.replace("{DATE}", date)` where `date` could be a `float` NaN
+- Python's `str.replace()` requires the second argument to be a string, not a float
+- This caused `TypeError: replace() argument 2 must be str, not float` and forced fallback to template
 
 ## Solution
 
@@ -160,6 +170,33 @@ model: str = Form("")  # Empty string → uses OPENROUTER_DEFAULT_MODEL
 
 **Result:** When user leaves model field empty, system uses `google/gemini-2.5-flash` (or whatever is configured in `.env`) via OpenRouter.
 
+### 7. Type-Safe Metadata Conversion
+**File:** `app/utils/llm_note_generator.py` (lines 105-114, 275-284)
+
+Added `safe_str()` helper function to convert all metadata values to strings:
+
+```python
+def safe_str(value, default="N/A"):
+    """Convert value to string, handling NaN and None."""
+    if value is None or value == "":
+        return default
+    # Check for pandas NaN (float type)
+    if isinstance(value, float):
+        import math
+        if math.isnan(value):
+            return default
+    return str(value)
+
+# Usage in _build_prompt()
+title = safe_str(metadata.get("title"), "Sans titre")
+authors = safe_str(metadata.get("authors"), "N/A")
+date = safe_str(metadata.get("date"), "N/A")
+doi = safe_str(metadata.get("doi"), "")
+url = safe_str(metadata.get("url"), "")
+```
+
+**Result:** All metadata values are safely converted to strings before being used in `template.replace()`, preventing `TypeError` with pandas NaN values.
+
 ## Files Modified
 
 1. **app/utils/zotero_parser.py** (lines 14-17, 81-222, 270-288)
@@ -168,11 +205,13 @@ model: str = Form("")  # Empty string → uses OPENROUTER_DEFAULT_MODEL
    - Added modern/legacy itemKey support
    - Updated documentation
 
-2. **app/utils/llm_note_generator.py** (lines 14-17, 27, 184-207, 307-349)
+2. **app/utils/llm_note_generator.py** (lines 14-17, 27, 105-136, 184-207, 275-291, 307-349)
    - **CRITICAL:** Added `load_dotenv()` to initialize LLM clients
+   - **CRITICAL:** Added `safe_str()` helper function to handle pandas NaN values
    - Added `OPENROUTER_DEFAULT_MODEL` support
    - Modified `_generate_with_llm()` to accept `model=None` and use default
    - Modified `build_note_html()` to accept `model=None` and use default
+   - Applied `safe_str()` to all metadata in `_build_prompt()` and `_fallback_template()`
    - Updated documentation
 
 3. **scripts/rad_dataframe.py** (lines 405-438)
@@ -241,6 +280,22 @@ INFO: Using OpenRouter with model: google/gemini-2.5-flash
 INFO: Generated note content (length: 1543 chars)
 ```
 → Notes contain intelligent LLM-generated analysis
+
+#### Type Error (Problem 3)
+
+**Before Fix:**
+```
+ERROR: LLM generation failed, using template fallback: replace() argument 2 must be str, not float
+```
+→ Prompt building crashes when CSV contains empty cells (pandas NaN)
+
+**After Fix:**
+```
+INFO: Loaded prompt template from /Users/.../zotero_prompt.md
+INFO: Using OpenRouter with model: google/gemini-2.5-flash
+INFO: Generated note content (length: 1543 chars)
+```
+→ All metadata safely converted to strings before prompt building
 
 #### Final Result
 ```
