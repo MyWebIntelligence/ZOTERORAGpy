@@ -60,9 +60,33 @@ def _detect_language(metadata: Dict) -> str:
     return "fr"
 
 
+def _load_prompt_template() -> str:
+    """
+    Load the prompt template from zotero_prompt.md file.
+
+    Returns:
+        Prompt template string with placeholders
+
+    Raises:
+        FileNotFoundError: If the prompt file is not found
+    """
+    # Get the directory of this file
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    prompt_file = os.path.join(current_dir, "zotero_prompt.md")
+
+    try:
+        with open(prompt_file, "r", encoding="utf-8") as f:
+            template = f.read()
+        logger.info(f"Loaded prompt template from {prompt_file}")
+        return template
+    except FileNotFoundError:
+        logger.error(f"Prompt template not found at {prompt_file}")
+        raise
+
+
 def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
     """
-    Build the LLM prompt for generating a reading note.
+    Build the LLM prompt by loading template and replacing placeholders.
 
     Args:
         metadata: Dictionary with item metadata
@@ -80,7 +104,7 @@ def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
     doi = metadata.get("doi", "")
     url = metadata.get("url", "")
 
-    # Language-specific instructions
+    # Language-specific names
     lang_instructions = {
         "fr": "français",
         "en": "English",
@@ -89,11 +113,33 @@ def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
         "it": "italiano",
         "pt": "português"
     }
-
     target_lang = lang_instructions.get(language, "français")
 
-    # Build the prompt
-    prompt = f"""Tu es un assistant spécialisé dans la rédaction de fiches de lecture académiques.
+    # Limit text content to avoid token limits
+    text_limited = text_content[:8000] if text_content else "Non disponible"
+    abstract_text = abstract if abstract else "Non disponible"
+
+    try:
+        # Load template from file
+        template = _load_prompt_template()
+
+        # Replace placeholders
+        prompt = template.replace("{TITLE}", title)
+        prompt = prompt.replace("{AUTHORS}", authors)
+        prompt = prompt.replace("{DATE}", date)
+        prompt = prompt.replace("{DOI}", doi)
+        prompt = prompt.replace("{URL}", url)
+        prompt = prompt.replace("{ABSTRACT}", abstract_text)
+        prompt = prompt.replace("{TEXT}", text_limited)
+        prompt = prompt.replace("{LANGUAGE}", target_lang)
+
+        logger.debug(f"Built prompt from template for: {title}")
+        return prompt
+
+    except FileNotFoundError:
+        # Fallback to hardcoded prompt if file not found
+        logger.warning("Prompt template file not found, using fallback hardcoded prompt")
+        prompt = f"""Tu es un assistant spécialisé dans la rédaction de fiches de lecture académiques.
 
 CONTEXTE :
 Titre : {title}
@@ -103,10 +149,10 @@ DOI : {doi}
 URL : {url}
 
 Résumé (si disponible) :
-{abstract if abstract else "Non disponible"}
+{abstract_text}
 
 TEXTE COMPLET :
-{text_content[:8000]}
+{text_limited}
 
 CONSIGNE :
 Rédige une fiche de lecture structurée en {target_lang}, au format HTML simplifié (balises : <p>, <strong>, <em>, <ul>, <li>).
@@ -127,7 +173,7 @@ CONTRAINTES :
 
 Commence directement par le contenu HTML, sans préambule."""
 
-    return prompt
+        return prompt
 
 
 def _generate_with_llm(prompt: str, model: str = "gpt-4o-mini", temperature: float = 0.2) -> str:

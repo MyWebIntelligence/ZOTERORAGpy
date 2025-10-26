@@ -201,6 +201,32 @@ Details:
 
 Les notes créées sont directement accessibles via des liens `zotero://` cliquables dans l'interface, vous permettant d'ouvrir instantanément l'article correspondant dans Zotero Desktop.
 
+#### Personnalisation du Prompt
+
+**NOUVEAU** : Vous pouvez personnaliser le prompt de génération en éditant simplement un fichier texte !
+
+Le fichier [app/utils/zotero_prompt.md](app/utils/zotero_prompt.md) contient le template utilisé pour générer les fiches. Vous pouvez :
+
+- Modifier la structure des fiches (ajouter/supprimer des sections)
+- Changer le ton (plus formel, plus technique, etc.)
+- Ajuster la longueur (100 mots, 500 mots, etc.)
+- Adapter pour votre domaine de recherche
+
+**Placeholders disponibles** : `{TITLE}`, `{AUTHORS}`, `{DATE}`, `{DOI}`, `{URL}`, `{ABSTRACT}`, `{TEXT}`, `{LANGUAGE}`
+
+Exemple de modification rapide :
+
+```markdown
+# Fiche minimaliste (100 mots)
+Résume {TITLE} par {AUTHORS} en 100 mots en {LANGUAGE}.
+
+Texte : {TEXT}
+```
+
+📚 **Guide complet** : Voir [app/utils/README_ZOTERO_PROMPT.md](app/utils/README_ZOTERO_PROMPT.md) pour des exemples détaillés et bonnes pratiques.
+
+**Avantage** : Aucune modification de code nécessaire ! Le fichier est rechargé automatiquement à chaque génération.
+
 ### 4) Utilisation en ligne de commande
 
 Traitement complet (hors interface web) à partir d’un export Zotero placé dans `sources/MaBiblio/`:
