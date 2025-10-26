@@ -19,6 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from logging.handlers import RotatingFileHandler
 
+# Import Zotero utilities
+from app.utils import zotero_client, llm_note_generator, zotero_parser
+
 # --- Path Definitions ---
 APP_DIR = os.path.dirname(os.path.abspath(__file__))  # Should be /.../__RAG/ragpy/app
 RAGPY_DIR = os.path.dirname(APP_DIR)                  # Should be /.../__RAG/ragpy
@@ -506,7 +509,8 @@ async def get_credentials():
             "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_DEFAULT_MODEL",
             "MISTRAL_API_KEY", "MISTRAL_OCR_MODEL", "MISTRAL_API_BASE_URL",
             "PINECONE_API_KEY", "PINECONE_ENV",
-            "WEAVIATE_API_KEY", "WEAVIATE_URL", "QDRANT_API_KEY", "QDRANT_URL"
+            "WEAVIATE_API_KEY", "WEAVIATE_URL", "QDRANT_API_KEY", "QDRANT_URL",
+            "ZOTERO_API_KEY", "ZOTERO_USER_ID", "ZOTERO_GROUP_ID"
         ]
         empty_credentials = {k: "" for k in credential_keys_on_missing}
         logger.info("Returning empty credentials as .env file was not found.")
@@ -532,7 +536,8 @@ async def get_credentials():
         "MISTRAL_API_KEY", "MISTRAL_OCR_MODEL", "MISTRAL_API_BASE_URL",
         "PINECONE_API_KEY", "PINECONE_ENV",
         "WEAVIATE_API_KEY", "WEAVIATE_URL",
-        "QDRANT_API_KEY", "QDRANT_URL"
+        "QDRANT_API_KEY", "QDRANT_URL",
+        "ZOTERO_API_KEY", "ZOTERO_USER_ID", "ZOTERO_GROUP_ID"
     ]
     
     # Return all requested credential keys (even if empty)
@@ -581,7 +586,8 @@ async def save_credentials(
         "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_DEFAULT_MODEL",
         "MISTRAL_API_KEY", "MISTRAL_OCR_MODEL", "MISTRAL_API_BASE_URL",
         "PINECONE_API_KEY", "PINECONE_ENV",
-        "WEAVIATE_API_KEY", "WEAVIATE_URL", "QDRANT_API_KEY", "QDRANT_URL"
+        "WEAVIATE_API_KEY", "WEAVIATE_URL", "QDRANT_API_KEY", "QDRANT_URL",
+        "ZOTERO_API_KEY", "ZOTERO_USER_ID", "ZOTERO_GROUP_ID"
     ]
     updated_keys = []
     for key in credential_keys_to_save:
@@ -607,6 +613,235 @@ async def save_credentials(
     except Exception as e:
         logger.error(f"Failed to write to .env file at {env_path}: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": f"Failed to write credentials to {env_path}", "details": str(e)})
+
+
+@app.post("/generate_zotero_notes")
+async def generate_zotero_notes(
+    session: str = Form(...),
+    model: str = Form("gpt-4o-mini")
+):
+    """
+    Generate reading notes for Zotero items and push them to Zotero.
+
+    This endpoint:
+    1. Reads the output.csv from the session
+    2. For each item with an itemKey:
+       - Generates a reading note using LLM
+       - Pushes it as a child note to Zotero
+    3. Returns the status for each item
+
+    Args:
+        session: Session directory name (e.g., "abc123_MyLibrary")
+        model: LLM model to use (e.g., "gpt-4o-mini" or "openai/gemini-2.5-flash")
+
+    Returns:
+        JSON with list of items and their status
+    """
+    logger.info(f"Starting Zotero notes generation for session: {session}, model: {model}")
+
+    # Build session directory path
+    session_dir = os.path.join(UPLOAD_DIR, session)
+
+    if not os.path.exists(session_dir):
+        logger.error(f"Session directory not found: {session_dir}")
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Session directory not found: {session}"}
+        )
+
+    # Extract library info from Zotero JSON
+    library_info = zotero_parser.extract_library_info_from_session(session_dir)
+
+    if not library_info.get("success"):
+        logger.error(f"Failed to extract library info: {library_info.get('error')}")
+        return JSONResponse(
+            status_code=400,
+            content={"error": library_info.get("error")}
+        )
+
+    library_type = library_info["library_type"]
+    library_id = library_info["library_id"]
+    logger.info(f"Detected library: type={library_type}, id={library_id}")
+
+    # Get Zotero credentials from environment
+    zotero_api_key = os.getenv("ZOTERO_API_KEY")
+
+    if not zotero_api_key:
+        logger.error("ZOTERO_API_KEY not found in environment")
+        return JSONResponse(
+            status_code=400,
+            content={"error": "ZOTERO_API_KEY not configured. Please set it in Settings."}
+        )
+
+    # Verify API key first
+    try:
+        key_info = zotero_client.verify_api_key(zotero_api_key)
+        logger.info(f"Zotero API key verified: {key_info.get('username', 'Unknown user')}")
+    except zotero_client.ZoteroAPIError as e:
+        logger.error(f"Invalid Zotero API key: {e}")
+        return JSONResponse(
+            status_code=401,
+            content={"error": f"Invalid Zotero API key: {e.message}"}
+        )
+
+    # Read the output.csv file
+    csv_path = os.path.join(session_dir, "output.csv")
+
+    if not os.path.exists(csv_path):
+        logger.error(f"output.csv not found at: {csv_path}")
+        return JSONResponse(
+            status_code=404,
+            content={"error": "output.csv not found. Please run 'Generate CSV' first."}
+        )
+
+    # Load CSV with pandas
+    try:
+        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        logger.info(f"Loaded CSV with {len(df)} rows")
+    except Exception as e:
+        logger.error(f"Error reading CSV: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to read CSV: {str(e)}"}
+        )
+
+    # Filter rows with itemKey
+    # Note: itemKey might be stored in different column names depending on rad_dataframe.py
+    # Let's check for common variations
+    itemkey_column = None
+    for col in ["itemKey", "item_key", "key"]:
+        if col in df.columns:
+            itemkey_column = col
+            break
+
+    if not itemkey_column:
+        logger.error("No itemKey column found in CSV")
+        return JSONResponse(
+            status_code=400,
+            content={"error": "No itemKey column found in CSV. Make sure the data comes from a Zotero export."}
+        )
+
+    # Filter items with non-null itemKey
+    df_items = df[df[itemkey_column].notna()].copy()
+    logger.info(f"Found {len(df_items)} items with itemKey")
+
+    if len(df_items) == 0:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "No items with itemKey found in CSV"}
+        )
+
+    # Process each item
+    results = []
+
+    for idx, row in df_items.iterrows():
+        item_key = str(row[itemkey_column])
+        item_result = {
+            "itemKey": item_key,
+            "title": row.get("title", "Untitled"),
+            "status": "pending",
+            "message": ""
+        }
+
+        try:
+            # Build metadata dictionary
+            metadata = {
+                "title": row.get("title", "Untitled"),
+                "authors": row.get("authors", "N/A"),
+                "date": row.get("date", "N/A"),
+                "abstract": row.get("abstractNote", row.get("abstract", "")),
+                "doi": row.get("doi", ""),
+                "url": row.get("url", ""),
+                "language": row.get("language", "")
+            }
+
+            # Get text content (texteocr)
+            text_content = row.get("texteocr", "")
+
+            if not text_content and not metadata.get("abstract"):
+                item_result["status"] = "skipped"
+                item_result["message"] = "No text content or abstract available"
+                logger.warning(f"Skipping item {item_key}: no content")
+                results.append(item_result)
+                continue
+
+            # Generate the note
+            logger.info(f"Generating note for item {item_key}")
+            sentinel, note_html = llm_note_generator.build_note_html(
+                metadata=metadata,
+                text_content=text_content,
+                model=model,
+                use_llm=True
+            )
+
+            # Check if note already exists
+            logger.info(f"Checking if note exists for item {item_key}")
+            note_exists = zotero_client.check_note_exists(
+                library_type=library_type,
+                library_id=library_id,
+                item_key=item_key,
+                sentinel=sentinel,
+                api_key=zotero_api_key
+            )
+
+            if note_exists:
+                item_result["status"] = "exists"
+                item_result["message"] = "Note already exists (idempotent)"
+                item_result["sentinel"] = sentinel
+                logger.info(f"Note already exists for item {item_key}")
+                results.append(item_result)
+                continue
+
+            # Create the note
+            logger.info(f"Creating note for item {item_key}")
+            create_result = zotero_client.create_child_note(
+                library_type=library_type,
+                library_id=library_id,
+                item_key=item_key,
+                note_html=note_html,
+                tags=["ragpy", "fiche-lecture"],
+                api_key=zotero_api_key
+            )
+
+            if create_result.get("success"):
+                item_result["status"] = "created"
+                item_result["message"] = "Note created successfully"
+                item_result["noteKey"] = create_result.get("note_key")
+                item_result["sentinel"] = sentinel
+                item_result["zotero_url"] = f"zotero://select/library/items/{create_result.get('note_key')}"
+                logger.info(f"Successfully created note for item {item_key}")
+            else:
+                item_result["status"] = "error"
+                item_result["message"] = create_result.get("message", "Unknown error")
+                logger.error(f"Failed to create note for item {item_key}: {item_result['message']}")
+
+        except zotero_client.ZoteroAPIError as e:
+            item_result["status"] = "error"
+            item_result["message"] = f"Zotero API error {e.status_code}: {e.message}"
+            logger.error(f"Zotero API error for item {item_key}: {e}")
+        except Exception as e:
+            item_result["status"] = "error"
+            item_result["message"] = f"Unexpected error: {str(e)}"
+            logger.error(f"Unexpected error for item {item_key}: {e}", exc_info=True)
+
+        results.append(item_result)
+
+    # Build summary
+    summary = {
+        "total": len(results),
+        "created": sum(1 for r in results if r["status"] == "created"),
+        "exists": sum(1 for r in results if r["status"] == "exists"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "errors": sum(1 for r in results if r["status"] == "error")
+    }
+
+    logger.info(f"Zotero notes generation complete: {summary}")
+
+    return JSONResponse({
+        "success": True,
+        "summary": summary,
+        "items": results
+    })
 
 
 @app.get("/get_first_chunk")

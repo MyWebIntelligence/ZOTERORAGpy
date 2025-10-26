@@ -131,6 +131,15 @@
           <label for="qdrantUrl">URL</label>
           <input type="text" id="qdrantUrl" name="QDRANT_URL" autocomplete="off" placeholder="http://..." />
         </div>
+        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
+          <h3 style="margin-top:0; margin-bottom: 10px; color: #9c27b0;">Zotero (Optional - for automatic reading notes)</h3>
+          <label for="zoteroApiKey">API Key</label>
+          <input type="password" id="zoteroApiKey" name="ZOTERO_API_KEY" autocomplete="off" placeholder="Get from https://www.zotero.org/settings/keys/new" />
+          <label for="zoteroUserId">User ID (optional - auto-detected)</label>
+          <input type="text" id="zoteroUserId" name="ZOTERO_USER_ID" autocomplete="off" placeholder="Auto-detected from Zotero export" />
+          <label for="zoteroGroupId">Group ID (optional)</label>
+          <input type="text" id="zoteroGroupId" name="ZOTERO_GROUP_ID" autocomplete="off" placeholder="For group libraries" />
+        </div>
         <button type="submit" class="save-btn" style="width:100%; font-size:1.15rem;">Save</button>
         <div class="save-status" id="settingsSaveStatus"></div>
       </form>
@@ -222,37 +231,87 @@
       <div id="sparseEmbeddingResult" class="result"></div>
     </section>
 
-    <!-- Step 4: Upload to Vector DB -->
-    <section id="db-section" style="display:none;">
-      <h2>4. Upload to Vector Database</h2>
-      <label for="dbChoice">Choose Database:</label>
-      <select id="dbChoice">
-        <option value="pinecone">Pinecone</option>
-        <option value="weaviate">Weaviate</option>
-        <option value="qdrant">Qdrant</option>
-      </select>
+    <!-- Step 4: Choose Output Destination(s) -->
+    <section id="output-choice-section" style="display:none;">
+      <h2>4. Choose Output Destination(s)</h2>
+      <p style="color: #555; margin-bottom: 15px;">Select where to send your processed data (you can choose both):</p>
 
-      <div id="pineconeParams" class="db-params" style="margin-top:10px;">
-        <label for="pineconeIndexName">Pinecone Index Name:</label>
-        <input type="text" id="pineconeIndexName" name="pinecone_index_name" value="articles" placeholder="e.g., articles">
-        <br>
-        <label for="pineconeNamespace" style="margin-top:5px; display:inline-block;">Pinecone Namespace (optional):</label>
-        <input type="text" id="pineconeNamespace" name="pinecone_namespace" placeholder="e.g., workshop" />
-      </div>
-      <div id="weaviateParams" class="db-params" style="display:none; margin-top:10px;">
-        <label for="weaviateClassName">Weaviate Class Name:</label>
-        <input type="text" id="weaviateClassName" name="weaviate_class_name" value="Article" placeholder="e.g., Article">
-        <br>
-        <label for="weaviateTenantName" style="margin-top:5px; display:inline-block;">Weaviate Tenant Name:</label>
-        <input type="text" id="weaviateTenantName" name="weaviate_tenant_name" value="alakel" placeholder="e.g., alakel">
-      </div>
-      <div id="qdrantParams" class="db-params" style="display:none; margin-top:10px;">
-        <label for="qdrantCollectionName">Qdrant Collection Name:</label>
-        <input type="text" id="qdrantCollectionName" name="qdrant_collection_name" placeholder="e.g., my_documents" required>
+      <!-- Option A: Vector Database -->
+      <div style="border: 2px solid #1976d2; border-radius: 8px; padding: 15px; margin-bottom: 15px; background: #f0f7ff;">
+        <div style="display: flex; align-items: center; margin-bottom: 10px;">
+          <input type="checkbox" id="vectorDbCheckbox" checked style="margin-right: 10px; width: 20px; height: 20px;" />
+          <h3 style="margin: 0; color: #1976d2;">📊 Option A: Vector Database</h3>
+        </div>
+        <p style="font-size: 0.9em; color: #555; margin-bottom: 10px;">
+          Store embeddings for semantic search and RAG applications.
+        </p>
+
+        <div id="vectorDbOptions" style="margin-top: 10px;">
+          <label for="dbChoice">Choose Database:</label>
+          <select id="dbChoice">
+            <option value="pinecone">Pinecone</option>
+            <option value="weaviate">Weaviate</option>
+            <option value="qdrant">Qdrant</option>
+          </select>
+
+          <div id="pineconeParams" class="db-params" style="margin-top:10px;">
+            <label for="pineconeIndexName">Pinecone Index Name:</label>
+            <input type="text" id="pineconeIndexName" name="pinecone_index_name" value="articles" placeholder="e.g., articles">
+            <br>
+            <label for="pineconeNamespace" style="margin-top:5px; display:inline-block;">Pinecone Namespace (optional):</label>
+            <input type="text" id="pineconeNamespace" name="pinecone_namespace" placeholder="e.g., workshop" />
+          </div>
+          <div id="weaviateParams" class="db-params" style="display:none; margin-top:10px;">
+            <label for="weaviateClassName">Weaviate Class Name:</label>
+            <input type="text" id="weaviateClassName" name="weaviate_class_name" value="Article" placeholder="e.g., Article">
+            <br>
+            <label for="weaviateTenantName" style="margin-top:5px; display:inline-block;">Weaviate Tenant Name:</label>
+            <input type="text" id="weaviateTenantName" name="weaviate_tenant_name" value="alakel" placeholder="e.g., alakel">
+          </div>
+          <div id="qdrantParams" class="db-params" style="display:none; margin-top:10px;">
+            <label for="qdrantCollectionName">Qdrant Collection Name:</label>
+            <input type="text" id="qdrantCollectionName" name="qdrant_collection_name" placeholder="e.g., my_documents" required>
+          </div>
+
+          <button id="uploadDbBtn" style="margin-top:15px;">Upload to Vector DB</button>
+          <div id="dbResult" class="result"></div>
+        </div>
       </div>
 
-      <button id="uploadDbBtn" style="margin-top:15px;">Start Upload</button>
-      <div id="dbResult" class="result"></div>
+      <!-- Option B: Zotero Notes -->
+      <div style="border: 2px solid #9c27b0; border-radius: 8px; padding: 15px; background: #f3e5f5;">
+        <div style="display: flex; align-items: center; margin-bottom: 10px;">
+          <input type="checkbox" id="zoteroNotesCheckbox" style="margin-right: 10px; width: 20px; height: 20px;" />
+          <h3 style="margin: 0; color: #9c27b0;">📝 Option B: Zotero Reading Notes</h3>
+        </div>
+        <p style="font-size: 0.9em; color: #555; margin-bottom: 10px;">
+          Generate AI-powered reading notes and add them to your Zotero library.
+          <strong>Only available for Zotero exports.</strong>
+        </p>
+
+        <div id="zoteroOptions" style="display:none; margin-top: 10px;">
+          <label for="zoteroModelSelect">LLM Model:</label>
+          <select id="zoteroModelSelect" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;">
+            <option value="gpt-4o-mini">OpenAI gpt-4o-mini (Default)</option>
+            <option value="openai/gemini-2.0-flash-exp">OpenRouter Gemini 2.0 Flash (Cheap)</option>
+            <option value="anthropic/claude-3-5-haiku">OpenRouter Claude 3.5 Haiku</option>
+            <option value="gpt-4o">OpenAI GPT-4o (Best quality)</option>
+          </select>
+
+          <button id="generateZoteroNotesBtn" style="margin-top: 10px; background: #9c27b0;">
+            Generate Zotero Notes
+          </button>
+
+          <div id="zoteroProgress" style="display:none; margin-top: 15px;">
+            <div style="background: #e0e0e0; border-radius: 4px; height: 24px; overflow: hidden;">
+              <div id="zoteroProgressBar" style="background: #9c27b0; height: 100%; width: 0%; transition: width 0.3s;"></div>
+            </div>
+            <p id="zoteroProgressText" style="margin-top: 5px; font-size: 0.9em; color: #666;">0/0 items processed</p>
+          </div>
+
+          <div id="zoteroLog" class="result" style="max-height: 400px; overflow-y: auto;"></div>
+        </div>
+      </div>
     </section>
   </div>
 
@@ -644,7 +703,7 @@
           const fileName = json.file.split('/').pop();
           const downloadLink = buildDownloadLink(fileName);
           resultDiv.innerHTML = `<p>Fichier généré : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
-          document.getElementById('db-section').style.display = 'block';
+          document.getElementById('output-choice-section').style.display = 'block';
         } else {
           resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}. Details: ${json.details || json.file || 'N/A'}</p>`;
         }
@@ -781,6 +840,110 @@
       } catch (err) { // Catch network errors or other unhandled issues from fetch itself
         resultDiv.textContent = 'DB upload request failed: ' + err.message;
         console.error("Fetch request error:", err);
+      }
+    });
+
+    // Zotero Notes - Checkbox toggle
+    document.getElementById('zoteroNotesCheckbox').addEventListener('change', (e) => {
+      const zoteroOptions = document.getElementById('zoteroOptions');
+      zoteroOptions.style.display = e.target.checked ? 'block' : 'none';
+    });
+
+    // Zotero Notes - Generation
+    document.getElementById('generateZoteroNotesBtn').addEventListener('click', async () => {
+      const resultDiv = document.getElementById('zoteroLog');
+      const progressDiv = document.getElementById('zoteroProgress');
+      const progressBar = document.getElementById('zoteroProgressBar');
+      const progressText = document.getElementById('zoteroProgressText');
+
+      if (!ensureSessionPath(resultDiv)) {
+        return;
+      }
+
+      // Clear previous results
+      resultDiv.innerHTML = '';
+      progressDiv.style.display = 'block';
+      progressBar.style.width = '0%';
+      progressText.textContent = 'Starting...';
+
+      const model = document.getElementById('zoteroModelSelect').value;
+      const form = new URLSearchParams();
+      form.append('session', currentPath);
+      form.append('model', model);
+
+      try {
+        const res = await fetch('/generate_zotero_notes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: form.toString()
+        });
+
+        const json = await res.json();
+
+        if (!res.ok) {
+          resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || res.statusText}</p>`;
+          progressDiv.style.display = 'none';
+          return;
+        }
+
+        // Display summary
+        const summary = json.summary;
+        progressBar.style.width = '100%';
+        progressText.textContent = `${summary.total}/${summary.total} items processed`;
+
+        let summaryHTML = `<div style="background: #e8f5e9; border-radius: 4px; padding: 10px; margin-bottom: 15px;">
+          <strong>Summary:</strong><br>
+          ✅ Created: ${summary.created}<br>
+          ℹ️ Already exists: ${summary.exists}<br>
+          ⏭️ Skipped: ${summary.skipped}<br>
+          ❌ Errors: ${summary.errors}
+        </div>`;
+
+        // Display detailed results
+        let detailsHTML = '<div style="font-size: 0.9em;"><strong>Details:</strong><br>';
+
+        json.items.forEach((item, idx) => {
+          let statusIcon = '';
+          let statusColor = '';
+
+          switch (item.status) {
+            case 'created':
+              statusIcon = '✅';
+              statusColor = '#4caf50';
+              break;
+            case 'exists':
+              statusIcon = 'ℹ️';
+              statusColor = '#2196f3';
+              break;
+            case 'skipped':
+              statusIcon = '⏭️';
+              statusColor = '#ff9800';
+              break;
+            case 'error':
+              statusIcon = '❌';
+              statusColor = '#f44336';
+              break;
+            default:
+              statusIcon = '❓';
+              statusColor = '#9e9e9e';
+          }
+
+          detailsHTML += `<div style="margin: 8px 0; padding: 8px; background: #f5f5f5; border-left: 4px solid ${statusColor};">
+            ${statusIcon} <strong>${item.title}</strong> (${item.itemKey})<br>
+            <small style="color: #666;">Status: ${item.status}</small>
+            ${item.message ? `<br><small style="color: #666;">${item.message}</small>` : ''}
+            ${item.zotero_url ? `<br><a href="${item.zotero_url}" style="font-size: 0.85em;">Open in Zotero</a>` : ''}
+          </div>`;
+        });
+
+        detailsHTML += '</div>';
+
+        resultDiv.innerHTML = summaryHTML + detailsHTML;
+
+      } catch (err) {
+        resultDiv.innerHTML = `<p class="error-text">Request failed: ${err.message}</p>`;
+        progressDiv.style.display = 'none';
+        console.error("Zotero notes generation error:", err);
       }
     });
 
