@@ -119,6 +119,7 @@ def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
     abstract = safe_str(metadata.get("abstract"), "")
     doi = safe_str(metadata.get("doi"), "")
     url = safe_str(metadata.get("url"), "")
+    problematique = safe_str(metadata.get("problematique"), "Non spécifiée")
 
     # Language-specific names
     lang_instructions = {
@@ -131,8 +132,8 @@ def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
     }
     target_lang = lang_instructions.get(language, "français")
 
-    # Limit text content to avoid token limits
-    text_limited = safe_str(text_content[:8000] if text_content else None, "Non disponible")
+    # Use full text content (no truncation for exhaustive analysis)
+    text_limited = safe_str(text_content if text_content else None, "Non disponible")
     abstract_text = abstract if abstract else "Non disponible"
 
     try:
@@ -145,6 +146,7 @@ def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
         prompt = prompt.replace("{DATE}", date)
         prompt = prompt.replace("{DOI}", doi)
         prompt = prompt.replace("{URL}", url)
+        prompt = prompt.replace("{PROBLEMATIQUE}", problematique)
         prompt = prompt.replace("{ABSTRACT}", abstract_text)
         prompt = prompt.replace("{TEXT}", text_limited)
         prompt = prompt.replace("{LANGUAGE}", target_lang)
@@ -163,6 +165,7 @@ Auteurs : {authors}
 Date : {date}
 DOI : {doi}
 URL : {url}
+Problématique de recherche : {problematique}
 
 Résumé (si disponible) :
 {abstract_text}
@@ -181,10 +184,8 @@ STRUCTURE REQUISE :
 5. **Limites et perspectives** : Points faibles, questions ouvertes
 
 CONTRAINTES :
-- Longueur : 200-300 mots maximum
 - Ton : Neutre, informatif, académique
 - Format : HTML propre (pas de <html>, <head>, <body>)
-- Pas de citations directes longues
 - Concentre-toi sur les points essentiels
 
 Commence directement par le contenu HTML, sans préambule."""
@@ -248,7 +249,7 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2)
                 }
             ],
             temperature=temperature,
-            max_tokens=2000
+            max_tokens=16000  # Allow long exhaustive academic analysis
         )
 
         content = response.choices[0].message.content.strip()
