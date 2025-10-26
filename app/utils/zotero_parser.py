@@ -82,10 +82,10 @@ def extract_library_info_from_session(session_dir: str) -> Dict:
     """
     Extract library information from a Zotero export in a session directory.
 
-    This function:
-    1. Finds the Zotero JSON file in the session directory
-    2. Parses the first item's URI to extract library_type and library_id
-    3. Returns this information for use in API calls
+    This function tries multiple extraction methods:
+    1. Modern format: item["library"]["id"] and item["library"]["type"]
+    2. Legacy format: Parse item["uri"] to extract library info
+    3. Fallback: Use ZOTERO_USER_ID or ZOTERO_GROUP_ID from .env
 
     Args:
         session_dir: Path to the session directory (e.g., "uploads/<session>/")
@@ -158,16 +158,19 @@ def extract_library_info_from_session(session_dir: str) -> Dict:
             "error": "No items found in Zotero JSON"
         }
 
-    # Extract library info from the first item with a URI
+    # Extract library info from items (try multiple methods)
     for item in items:
-        # Try to get URI from item
-        uri = item.get("uri")
+        # Method 1: Modern format - check "library" field
+        library_field = item.get("library")
+        if library_field and isinstance(library_field, dict):
+            lib_type = library_field.get("type")  # "user" or "group"
+            lib_id = library_field.get("id")
 
-        if uri:
-            lib_info = extract_library_info_from_uri(uri)
-            if lib_info:
-                library_type, library_id, _ = lib_info
-                logger.info(f"Extracted library info: type={library_type}, id={library_id}")
+            if lib_type and lib_id:
+                # Convert "user" → "users", "group" → "groups" for API compatibility
+                library_type = "users" if lib_type == "user" else "groups" if lib_type == "group" else lib_type
+                library_id = str(lib_id)
+                logger.info(f"Extracted library info from 'library' field: type={library_type}, id={library_id}")
                 return {
                     "success": True,
                     "library_type": library_type,
@@ -175,10 +178,47 @@ def extract_library_info_from_session(session_dir: str) -> Dict:
                     "json_path": json_path
                 }
 
-    # If no URI found, return error
+        # Method 2: Legacy format - extract from URI
+        uri = item.get("uri")
+        if uri:
+            lib_info = extract_library_info_from_uri(uri)
+            if lib_info:
+                library_type, library_id, _ = lib_info
+                logger.info(f"Extracted library info from URI: type={library_type}, id={library_id}")
+                return {
+                    "success": True,
+                    "library_type": library_type,
+                    "library_id": library_id,
+                    "json_path": json_path
+                }
+
+    # Method 3: Fallback to credentials from .env
+    logger.warning("Could not extract library info from JSON items, checking .env credentials")
+
+    zotero_user_id = os.getenv("ZOTERO_USER_ID")
+    zotero_group_id = os.getenv("ZOTERO_GROUP_ID")
+
+    if zotero_user_id:
+        logger.info(f"Using ZOTERO_USER_ID from .env: {zotero_user_id}")
+        return {
+            "success": True,
+            "library_type": "users",
+            "library_id": zotero_user_id,
+            "json_path": json_path
+        }
+    elif zotero_group_id:
+        logger.info(f"Using ZOTERO_GROUP_ID from .env: {zotero_group_id}")
+        return {
+            "success": True,
+            "library_type": "groups",
+            "library_id": zotero_group_id,
+            "json_path": json_path
+        }
+
+    # If all methods fail, return error
     return {
         "success": False,
-        "error": "Could not extract library information from any item URI"
+        "error": "Could not extract library information. Please set ZOTERO_USER_ID or ZOTERO_GROUP_ID in Settings."
     }
 
 
@@ -186,12 +226,14 @@ def extract_item_keys_from_json(json_path: str) -> List[Dict]:
     """
     Extract all item keys and basic metadata from a Zotero JSON file.
 
+    Supports both modern ("key") and legacy ("itemKey") field names.
+
     Args:
         json_path: Path to the Zotero JSON file
 
     Returns:
         List of dictionaries with item information:
-        - itemKey: The item's key
+        - itemKey: The item's key (extracted from "key" or "itemKey" field)
         - title: Item title
         - itemType: Type of item (article, book, etc.)
         - uri: Zotero URI
@@ -227,10 +269,11 @@ def extract_item_keys_from_json(json_path: str) -> List[Dict]:
         if item_type in ("attachment", "note"):
             continue
 
-        # Extract itemKey
-        item_key = item.get("itemKey")
+        # Extract itemKey (try multiple field names)
+        item_key = item.get("itemKey") or item.get("key")  # Modern exports use "key", legacy use "itemKey"
+
         if not item_key:
-            # Try to extract from URI
+            # Try to extract from URI as last resort
             uri = item.get("uri", "")
             lib_info = extract_library_info_from_uri(uri)
             if lib_info:
@@ -243,6 +286,8 @@ def extract_item_keys_from_json(json_path: str) -> List[Dict]:
                 "itemType": item_type,
                 "uri": item.get("uri", "")
             })
+        else:
+            logger.warning(f"Could not extract itemKey for item: {item.get('title', 'Untitled')}")
 
     logger.info(f"Extracted {len(items_info)} item keys from {json_path}")
     return items_info

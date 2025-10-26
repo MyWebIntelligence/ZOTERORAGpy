@@ -290,13 +290,9 @@
         </p>
 
         <div id="zoteroOptions" style="display:none; margin-top: 10px;">
-          <label for="zoteroModelSelect">LLM Model:</label>
-          <select id="zoteroModelSelect" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;">
-            <option value="gpt-4o-mini">OpenAI gpt-4o-mini (Default)</option>
-            <option value="openai/gemini-2.0-flash-exp">OpenRouter Gemini 2.0 Flash (Cheap)</option>
-            <option value="anthropic/claude-3-5-haiku">OpenRouter Claude 3.5 Haiku</option>
-            <option value="gpt-4o">OpenAI GPT-4o (Best quality)</option>
-          </select>
+          <label for="zoteroModelInput" style="display: block; margin-bottom: 5px;">LLM Model (optional):</label>
+          <input type="text" id="zoteroModelInput" placeholder="openai/gemini-2.5-flash or gpt-4o-mini" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;" />
+          <p style="font-size: 0.85em; color: #666; margin-top: -5px;">Leave empty to use default (gpt-4o-mini). Format: "openai/gemini-2.5-flash" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
 
           <button id="generateZoteroNotesBtn" style="margin-top: 10px; background: #9c27b0;">
             Generate Zotero Notes
@@ -866,7 +862,8 @@
       progressBar.style.width = '0%';
       progressText.textContent = 'Starting...';
 
-      const model = document.getElementById('zoteroModelSelect').value;
+      const modelInput = document.getElementById('zoteroModelInput').value.trim();
+      const model = modelInput || 'gpt-4o-mini'; // Default to gpt-4o-mini if empty
       const form = new URLSearchParams();
       form.append('session', currentPath);
       form.append('model', model);

@@ -405,13 +405,28 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
         logger.info(f"Chargement du fichier JSON Zotero depuis : {json_path}")
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
-        for item in tqdm(data.get("items", []), desc="Processing Zotero items"):
+
+        # Support both Zotero export formats
+        if isinstance(data, list):
+            # Format 1: Direct array [{item1}, {item2}, ...]
+            items = data
+            logger.info(f"Detected Zotero JSON format: direct array with {len(items)} items")
+        elif isinstance(data, dict) and "items" in data:
+            # Format 2: Object with items key {"items": [{item1}, {item2}, ...]}
+            items = data["items"]
+            logger.info(f"Detected Zotero JSON format: object with 'items' key, {len(items)} items")
+        else:
+            logger.error(f"Invalid Zotero JSON format: expected array or object with 'items' key")
+            return pd.DataFrame()
+
+        for item in tqdm(items, desc="Processing Zotero items"):
             try:
                 # Extraction des métadonnées de base
                 metadata = {
+                    "itemKey": item.get("key") or item.get("itemKey", ""),  # Support modern ("key") and legacy ("itemKey")
                     "type": item.get("itemType", ""),
                     "title": item.get("title", ""),
+                    "abstract": item.get("abstractNote", ""),  # Extract abstract for reading notes
                     "date": item.get("date", ""),
                     "url": item.get("url", ""),
                     "doi": item.get("DOI", ""),
