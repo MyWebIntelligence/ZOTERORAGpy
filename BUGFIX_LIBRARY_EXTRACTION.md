@@ -3,18 +3,43 @@
 ## Date
 2025-10-26
 
-## Problem
-Error when generating Zotero notes: **"Error: Could not extract library information from any item URI"**
+## Updates
+- **Initial fix:** 2025-10-26 - Multi-method extraction strategy
+- **Additional fix:** 2025-10-26 - Added `load_dotenv()` to enable .env fallback
 
-### Root Cause
-The system was only trying to extract library information from the `uri` field in Zotero JSON exports. However:
-1. Modern Zotero exports use the `library` field (with `id` and `type` subfields)
-2. The `uri` field may not always be present in all export formats
-3. The `itemKey` (or modern `key`) field was not being extracted from the JSON and stored in the CSV
+## Problem
+Error when generating Zotero notes: **"Error: Could not extract library information. Please set ZOTERO_USER_ID or ZOTERO_GROUP_ID in Settings."**
+
+### Root Causes
+
+**Issue 1:** Limited extraction methods
+- The system was only trying to extract library information from the `uri` field in Zotero JSON exports
+- Modern Zotero exports use the `library` field (with `id` and `type` subfields)
+- The `uri` field may not always be present in all export formats
+- The `itemKey` (or modern `key`) field was not being extracted from the JSON and stored in the CSV
+
+**Issue 2:** Missing .env loading
+- The fallback method (Method 3) reads `ZOTERO_USER_ID` and `ZOTERO_GROUP_ID` from environment variables
+- However, `zotero_parser.py` was calling `os.getenv()` without first loading the `.env` file with `load_dotenv()`
+- This caused the fallback to always fail even when credentials were properly configured in `.env`
 
 ## Solution
 
-### 1. Multi-Method Library Info Extraction
+### 1. Added .env Loading
+**File:** `app/utils/zotero_parser.py` (lines 14-17)
+
+Added the missing `load_dotenv()` call at module initialization:
+
+```python
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+```
+
+This ensures that the fallback method (Method 3) can properly read `ZOTERO_USER_ID` and `ZOTERO_GROUP_ID` from the `.env` file.
+
+### 2. Multi-Method Library Info Extraction
 **File:** `app/utils/zotero_parser.py`
 
 Modified `extract_library_info_from_session()` to try 3 extraction methods in order:
@@ -80,7 +105,8 @@ The code already supports multiple column name variations:
 
 ## Files Modified
 
-1. **app/utils/zotero_parser.py** (lines 81-222)
+1. **app/utils/zotero_parser.py** (lines 14-17, 81-222, 270-288)
+   - **CRITICAL:** Added `load_dotenv()` to enable .env fallback
    - Added 3-method library extraction strategy
    - Added modern/legacy itemKey support
    - Updated documentation
