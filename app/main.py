@@ -618,7 +618,8 @@ async def save_credentials(
 @app.post("/generate_zotero_notes")
 async def generate_zotero_notes(
     session: str = Form(...),
-    model: str = Form("")
+    model: str = Form(""),
+    extended_analysis: str = Form("true")
 ):
     """
     Generate reading notes for Zotero items and push them to Zotero.
@@ -634,11 +635,14 @@ async def generate_zotero_notes(
         session: Session directory name (e.g., "abc123_MyLibrary")
         model: LLM model to use. If empty string, uses OPENROUTER_DEFAULT_MODEL from .env.
                Examples: "gpt-4o-mini" (OpenAI), "openai/gemini-2.5-flash" (OpenRouter)
+        extended_analysis: "true" for exhaustive analysis (8000-12000 words), "false" for quick summary (200-300 words)
 
     Returns:
         JSON with list of items and their status
     """
-    logger.info(f"Starting Zotero notes generation for session: {session}, model: {model or 'default'}")
+    # Convert string to boolean
+    use_extended = extended_analysis.lower() == "true"
+    logger.info(f"Starting Zotero notes generation for session: {session}, model: {model or 'default'}, extended_analysis: {use_extended}")
 
     # Build session directory path
     session_dir = os.path.join(UPLOAD_DIR, session)
@@ -767,14 +771,15 @@ async def generate_zotero_notes(
                 continue
 
             # Generate the note
-            logger.info(f"Generating note for item {item_key}")
+            logger.info(f"Generating note for item {item_key} (extended: {use_extended})")
             # Convert empty string to None to use default model
             llm_model = model if model else None
             sentinel, note_html = llm_note_generator.build_note_html(
                 metadata=metadata,
                 text_content=text_content,
                 model=llm_model,
-                use_llm=True
+                use_llm=True,
+                extended_analysis=use_extended
             )
 
             # Check if note already exists

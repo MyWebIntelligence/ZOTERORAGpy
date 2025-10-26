@@ -65,9 +65,13 @@ def _detect_language(metadata: Dict) -> str:
     return "fr"
 
 
-def _load_prompt_template() -> str:
+def _load_prompt_template(extended_analysis: bool = True) -> str:
     """
-    Load the prompt template from zotero_prompt.md file.
+    Load the prompt template from zotero_prompt.md or zotero_prompt_short.md file.
+
+    Args:
+        extended_analysis: If True, load exhaustive analysis template (zotero_prompt.md)
+                          If False, load short summary template (zotero_prompt_short.md)
 
     Returns:
         Prompt template string with placeholders
@@ -77,19 +81,22 @@ def _load_prompt_template() -> str:
     """
     # Get the directory of this file
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    prompt_file = os.path.join(current_dir, "zotero_prompt.md")
+
+    # Choose template based on analysis mode
+    template_filename = "zotero_prompt.md" if extended_analysis else "zotero_prompt_short.md"
+    prompt_file = os.path.join(current_dir, template_filename)
 
     try:
         with open(prompt_file, "r", encoding="utf-8") as f:
             template = f.read()
-        logger.info(f"Loaded prompt template from {prompt_file}")
+        logger.info(f"Loaded prompt template from {prompt_file} (extended: {extended_analysis})")
         return template
     except FileNotFoundError:
         logger.error(f"Prompt template not found at {prompt_file}")
         raise
 
 
-def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
+def _build_prompt(metadata: Dict, text_content: str, language: str, extended_analysis: bool = True) -> str:
     """
     Build the LLM prompt by loading template and replacing placeholders.
 
@@ -97,6 +104,7 @@ def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
         metadata: Dictionary with item metadata
         text_content: Full text content (texteocr)
         language: Target language code
+        extended_analysis: If True, use full text and exhaustive template. If False, limit text and use short template.
 
     Returns:
         Formatted prompt string
@@ -132,13 +140,19 @@ def _build_prompt(metadata: Dict, text_content: str, language: str) -> str:
     }
     target_lang = lang_instructions.get(language, "français")
 
-    # Use full text content (no truncation for exhaustive analysis)
-    text_limited = safe_str(text_content if text_content else None, "Non disponible")
+    # Limit text based on analysis mode
+    if extended_analysis:
+        # Use full text for exhaustive analysis
+        text_limited = safe_str(text_content if text_content else None, "Non disponible")
+    else:
+        # Limit to 8000 characters for quick summary
+        text_limited = safe_str(text_content[:8000] if text_content else None, "Non disponible")
+
     abstract_text = abstract if abstract else "Non disponible"
 
     try:
         # Load template from file
-        template = _load_prompt_template()
+        template = _load_prompt_template(extended_analysis=extended_analysis)
 
         # Replace placeholders
         prompt = template.replace("{TITLE}", title)
@@ -193,7 +207,7 @@ Commence directement par le contenu HTML, sans préambule."""
         return prompt
 
 
-def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2) -> str:
+def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2, extended_analysis: bool = True) -> str:
     """
     Generate note content using LLM.
 
@@ -202,6 +216,7 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2)
         model: Model name (e.g., "gpt-4o-mini" or "openai/gemini-2.5-flash").
                If None, uses OPENROUTER_DEFAULT_MODEL from .env
         temperature: Sampling temperature (0.0 to 1.0)
+        extended_analysis: If True, use max_tokens=16000. If False, use max_tokens=2000.
 
     Returns:
         Generated HTML content
@@ -234,6 +249,9 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2)
         active_client = openai_client
         logger.info(f"Using OpenAI with model: {model}")
 
+    # Set max_tokens based on analysis mode
+    max_tokens = 16000 if extended_analysis else 2000
+
     # Make the API call
     try:
         response = active_client.chat.completions.create(
@@ -249,7 +267,7 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2)
                 }
             ],
             temperature=temperature,
-            max_tokens=16000  # Allow long exhaustive academic analysis
+            max_tokens=max_tokens
         )
 
         content = response.choices[0].message.content.strip()
@@ -333,7 +351,8 @@ def build_note_html(
     metadata: Dict,
     text_content: Optional[str] = None,
     model: str = None,
-    use_llm: bool = True
+    use_llm: bool = True,
+    extended_analysis: bool = True
 ) -> Tuple[str, str]:
     """
     Build a reading note in HTML format with a unique sentinel.
@@ -346,6 +365,8 @@ def build_note_html(
         model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
                Examples: "gpt-4o-mini", "openai/gemini-2.5-flash"
         use_llm: Whether to use LLM or fallback to template (default: True)
+        extended_analysis: If True, generate exhaustive analysis (8000-12000 words).
+                          If False, generate quick summary (200-300 words).
 
     Returns:
         Tuple of (sentinel, note_html):
@@ -360,7 +381,7 @@ def build_note_html(
         ...     "abstract": "This paper presents...",
         ...     "language": "en"
         ... }
-        >>> sentinel, html = build_note_html(metadata, text_content="Full text...")
+        >>> sentinel, html = build_note_html(metadata, text_content="Full text...", extended_analysis=True)
         >>> print(sentinel)
         ragpy-note-id:abc123...
     """
@@ -384,8 +405,8 @@ def build_note_html(
                 body_html = _fallback_template(metadata, language)
             else:
                 # Build prompt and generate with LLM
-                prompt = _build_prompt(metadata, content, language)
-                body_html = _generate_with_llm(prompt, model=model)
+                prompt = _build_prompt(metadata, content, language, extended_analysis=extended_analysis)
+                body_html = _generate_with_llm(prompt, model=model, extended_analysis=extended_analysis)
         except Exception as e:
             logger.error(f"LLM generation failed, using template fallback: {e}")
             body_html = _fallback_template(metadata, language)
