@@ -1,351 +1,939 @@
-# Plan de Développement : Refonte de l'Interface UI RAGpy
+# Plan de refonte UI - RAGpy Interface Professionnelle
 
-**Date**: 2025-11-22
-**Statut**: ✅ Terminé
+**Date de création** : 2025-11-22  
+**Objectif** : Migration vers une interface moderne tout en préservant l'ergonomie actuelle  
+**Scope** : Refonte complète frontend avec architecture scalable pour futures évolutions  
 
----
+## Vision produit
 
-## Objectifs
+### Objectifs principaux
+1. **Modernisation technologique** : Migration vers stack moderne (Vue.js 3 + TypeScript)
+2. **Design professionnel** : Interface niveau entreprise avec design system cohérent  
+3. **Préservation ergonomie** : Maintenir la simplicité d'usage actuelle (UX inchangée)
+4. **Extensibilité** : Architecture prête pour gestion utilisateurs et nouvelles fonctionnalités
+5. **Performance** : Optimisation loading, responsivité et expérience utilisateur
 
-1. **Étapes toujours visibles** : Toutes les étapes affichées dès le début (plus de révélation progressive)
-2. **Indicateurs visuels** : Bleu (en attente) → Vert (complété avec lien vers fichier produit)
-3. **Arbre décisionnel** : Après CSV, bifurcation entre RAG et Zotero Notes
-
----
-
-## Architecture Actuelle
-
-- **Frontend**: `app/templates/index.html` (979 lignes)
-- **Styles**: `app/static/style.css` (156 lignes)
-- **Backend**: `app/main.py` (1293 lignes) - Pas de modification nécessaire
-
-### Mécanisme actuel de révélation
-Les sections utilisent `style="display:none"` et sont révélées via JavaScript après chaque étape.
+### Contraintes critiques
+✅ **MAINTENIR** l'ergonomie step-by-step actuelle  
+✅ **PRÉSERVER** le flux utilisateur ZIP → Extraction → Pipeline  
+✅ **GARDER** la simplicité : "Upload → Process → Result"  
+✅ **COMPATIBILITÉ** avec les API endpoints FastAPI existants  
 
 ---
 
-## Phase 1 : Nouveau système d'étapes visuelles
+## Analyse de l'existant - Points forts à préserver
 
-### 1.1 Step Tracker Component
+### 🎯 **Ergonomie excellente à maintenir**
+- **Progressive disclosure** : Sections déverrouillées progressivement
+- **Step tracker visuel** : 4 étapes claires (Upload → Extract → Process → Destination)
+- **Decision tree intuitive** : Choix RAG vs Zotero clairement séparés
+- **Feedback temps réel** : SSE progress bars pour opérations longues
+- **Upload simplifié** : ZIP/CSV avec différenciation visuelle claire
 
-Barre horizontale en haut de page montrant toutes les étapes :
+### 🔧 **Fonctionnalités core à migrer**
+- Settings modal avec 13 providers API
+- Upload dual : ZIP (Zotero+PDFs) / CSV (direct)
+- Pipeline branché : RAG complet vs Notes Zotero
+- Progress tracking SSE en temps réel
+- Download des artifacts générés
 
-```
-[1. Upload] → [2. Extraction] → [3. Traitement] → [4. Destination]
-   🔵            ⬜               ⬜                 ⬜
-```
-
-Légende :
-- 🔵 Bleu : Étape active/en attente
-- ✅ Vert : Étape complétée (avec lien téléchargement)
-- ⬜ Gris : Étape verrouillée
-
-### 1.2 Structure HTML du Step Tracker
-
-```html
-<div class="step-tracker">
-  <div class="step-item active" data-step="1">
-    <span class="step-number">1</span>
-    <span class="step-title">Upload</span>
-    <a class="step-file-link" style="display:none"></a>
-  </div>
-  <div class="step-connector"></div>
-  <div class="step-item locked" data-step="2">
-    <span class="step-number">2</span>
-    <span class="step-title">Extraction</span>
-    <a class="step-file-link" style="display:none"></a>
-  </div>
-  <!-- ... autres étapes ... -->
-</div>
-```
-
-### 1.3 CSS pour les états
-
-```css
-/* État par défaut - verrouillé */
-.step-item {
-  opacity: 0.5;
-  color: #9e9e9e;
-}
-
-/* État actif - bleu */
-.step-item.active {
-  opacity: 1;
-  color: #1976d2;
-  border-color: #1976d2;
-}
-
-/* État complété - vert */
-.step-item.completed {
-  opacity: 1;
-  color: #4caf50;
-  border-color: #4caf50;
-}
-
-/* Lien fichier */
-.step-file-link {
-  font-size: 0.8em;
-  color: #4caf50;
-}
-```
+### ⚠️ **Limitations actuelles à corriger**
+- Code JavaScript monolithique (1500+ lignes dans HTML)
+- Pas de composants réutilisables
+- State management artisanal
+- CSS inline et styles éparpillés
+- Pas de validation robuste côté client
+- Interface non responsive sur mobile
+- Accessibilité limitée
 
 ---
 
-## Phase 2 : Arbre de bifurcation POST-CSV
+## Architecture cible
 
-### 2.1 Diagramme de flux
+### Stack technologique moderne
 
 ```
-┌─────────────────────────────────────────┐
-│  Étape 1: Upload (ZIP ou CSV)           │
-│  Étape 2: Extraction texte (si ZIP)     │
-└─────────────────┬───────────────────────┘
-                  │
-        ┌─────────▼─────────┐
-        │   CSV PRÊT        │
-        │ (output.csv)      │
-        └────────┬──────────┘
-                 │
-    ┌────────────┴────────────┐
-    │                         │
-┌───▼───────────────┐   ┌─────▼─────────────┐
-│   🔍 BRANCHE RAG  │   │   📝 BRANCHE      │
-│     (gauche)      │   │   ZOTERO NOTES    │
-│                   │   │     (droite)      │
-│ • 3.1 Chunking    │   │                   │
-│ • 3.2 Dense Embed │   │ • Génération LLM  │
-│ • 3.3 Sparse Embed│   │ • Push vers Zotero│
-│ • 4. Vector DB    │   │                   │
-└───────────────────┘   └───────────────────┘
+Frontend (Nouveau)
+├── Vue.js 3 + Composition API    # Framework réactif moderne
+├── TypeScript                    # Type safety + meilleure DX
+├── Vite                         # Build tool ultra-rapide
+├── Pinia                        # State management Vue 3
+├── Vue Router                   # SPA routing pour futurs modules
+├── Vuelidate                    # Validation formulaires
+├── Headless UI                  # Composants accessibles
+└── Tailwind CSS                 # Design system utilitaire
+
+Backend (Inchangé mais étendu)
+├── FastAPI                      # API REST + SSE (existant)
+├── Jinja2 templates            # Supprimé (remplacé par SPA)
+└── Static files               # Servira uniquement les assets build
 ```
 
-### 2.2 Structure HTML de l'arbre
+### Architecture composants
 
-```html
-<!-- Apparaît après CSV prêt -->
-<div class="decision-tree" id="decision-tree" style="display:none">
-  <h2>Choisissez votre destination</h2>
-  <p class="tree-subtitle">Vous pouvez sélectionner l'une ou les deux options</p>
-
-  <div class="branches-container">
-    <!-- Branche gauche : RAG -->
-    <div class="branch branch-rag" id="rag-branch">
-      <div class="branch-header">
-        <input type="checkbox" id="rag-checkbox" checked>
-        <label for="rag-checkbox">
-          <span class="branch-icon">🔍</span>
-          <span class="branch-title">Nourrir un RAG</span>
-        </label>
-      </div>
-      <div class="branch-content">
-        <!-- Étapes 3.1, 3.2, 3.3, 4 -->
-        <section id="initial-chunk-section">...</section>
-        <section id="dense-embedding-section">...</section>
-        <section id="sparse-embedding-section">...</section>
-        <section id="vector-db-section">...</section>
-      </div>
-    </div>
-
-    <!-- Branche droite : Zotero -->
-    <div class="branch branch-zotero" id="zotero-branch">
-      <div class="branch-header">
-        <input type="checkbox" id="zotero-checkbox">
-        <label for="zotero-checkbox">
-          <span class="branch-icon">📝</span>
-          <span class="branch-title">Notes Zotero</span>
-        </label>
-      </div>
-      <div class="branch-content">
-        <!-- Génération notes Zotero -->
-        <section id="zotero-notes-section">...</section>
-      </div>
-    </div>
-  </div>
-</div>
 ```
-
-### 2.3 CSS pour l'arbre
-
-```css
-.decision-tree {
-  margin: 30px 0;
-  padding: 20px;
-  background: #f5f5f5;
-  border-radius: 12px;
-}
-
-.branches-container {
-  display: flex;
-  gap: 20px;
-  margin-top: 20px;
-}
-
-.branch {
-  flex: 1;
-  background: white;
-  border-radius: 8px;
-  padding: 20px;
-  border: 2px solid #e0e0e0;
-  transition: border-color 0.3s;
-}
-
-.branch.selected {
-  border-color: #1976d2;
-  box-shadow: 0 2px 8px rgba(25, 118, 210, 0.2);
-}
-
-.branch-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding-bottom: 15px;
-  border-bottom: 1px solid #e0e0e0;
-}
-
-.branch-icon {
-  font-size: 1.5em;
-}
-
-.branch-title {
-  font-size: 1.2em;
-  font-weight: 600;
-}
-
-.branch-content {
-  padding-top: 15px;
-}
-
-/* Branche désactivée */
-.branch:not(.selected) .branch-content {
-  opacity: 0.5;
-  pointer-events: none;
-}
+src/
+├── components/                  # Composants réutilisables
+│   ├── ui/                     # Design system base
+│   │   ├── Button.vue          # Boutons avec variants
+│   │   ├── Card.vue            # Cartes et containers
+│   │   ├── Modal.vue           # Modales accessibles
+│   │   ├── ProgressBar.vue     # Barres de progression
+│   │   └── Notification.vue    # Toast system
+│   ├── layout/                 # Structure application
+│   │   ├── AppHeader.vue       # Header avec navigation
+│   │   ├── AppSidebar.vue      # Sidebar (futur multi-projets)
+│   │   └── StepTracker.vue     # Tracker progression
+│   └── features/               # Composants métier
+│       ├── Upload/             # Zone upload
+│       ├── Pipeline/           # Traitement RAG
+│       ├── Settings/           # Configuration
+│       └── Zotero/             # Intégration Zotero
+├── composables/                # Logic réutilisable
+│   ├── useApi.ts              # Client API avec types
+│   ├── useSSE.ts              # Server-Sent Events
+│   ├── useUpload.ts           # Gestion uploads
+│   └── useSteps.ts            # State machine steps
+├── stores/                     # State management Pinia
+│   ├── app.ts                 # État global application
+│   ├── pipeline.ts            # État pipeline RAG
+│   ├── settings.ts            # Configuration utilisateur
+│   └── auth.ts                # Authentification (futur)
+├── types/                      # Types TypeScript
+├── utils/                      # Utilitaires
+└── views/                      # Pages/Routes
+    ├── Dashboard.vue          # Interface principale
+    ├── Login.vue              # Authentification (futur)
+    └── Projects.vue           # Multi-projets (futur)
 ```
 
 ---
 
-## Phase 3 : JavaScript - Gestion d'état
+## Phase 1 : Migration fondations (3-4 semaines)
 
-### 3.1 Nouvel objet state
+### Objectif : Reproduire l'interface actuelle en Vue.js
 
-```javascript
-const appState = {
-  currentPath: '',
-  steps: {
-    upload: { completed: false, file: null },
-    extraction: { completed: false, file: 'output.csv' },
-    chunking: { completed: false, file: 'output_chunks.json' },
-    denseEmbed: { completed: false, file: 'output_chunks_with_embeddings.json' },
-    sparseEmbed: { completed: false, file: 'output_chunks_with_embeddings_sparse.json' },
-    vectorDb: { completed: false, file: null },
-    zoteroNotes: { completed: false, file: null }
-  },
-  selectedBranches: {
-    rag: true,
-    zotero: false
-  }
-};
+#### Semaine 1 : Setup projet et design system
+
+**Setup technique** :
+```bash
+# Initialisation projet Vue.js
+npm create vue@latest ragpy-frontend
+cd ragpy-frontend
+npm install
+
+# Dependencies core
+npm install @vue/typescript @vueuse/core pinia vue-router
+
+# UI/UX
+npm install @headlessui/vue @tailwindcss/forms
+npm install lucide-vue-next  # Icons modernes
+
+# Build et dev tools
+npm install vite @vitejs/plugin-vue typescript
 ```
 
-### 3.2 Fonctions de mise à jour
+**Design system base** :
+- **Variables design** : Migration variables CSS vers Tailwind config
+- **Composants UI primitifs** : Button, Card, Input, Modal, ProgressBar
+- **Tokens couleurs** : Système cohérent (primary-blue, success-green, etc.)
+- **Typography scale** : Hiérarchie textes et espacements
+- **Dark mode ready** : CSS custom properties préparées
 
-```javascript
-function completeStep(stepName, fileName) {
-  appState.steps[stepName].completed = true;
-  appState.steps[stepName].file = fileName;
-  updateStepTracker();
-  updateSectionStyles();
-}
+**Delivrables** :
+- [ ] Setup Vite + Vue 3 + TypeScript fonctionnel
+- [ ] Storybook pour composants UI (développement isolé)
+- [ ] Tailwind config avec tokens design RAGpy
+- [ ] 8-10 composants UI de base documentés
 
-function updateStepTracker() {
-  Object.entries(appState.steps).forEach(([name, data]) => {
-    const stepEl = document.querySelector(`[data-step="${name}"]`);
-    if (!stepEl) return;
+#### Semaine 2 : Architecture state et API
 
-    stepEl.classList.remove('active', 'completed', 'locked');
-
-    if (data.completed) {
-      stepEl.classList.add('completed');
-      if (data.file) {
-        const link = stepEl.querySelector('.step-file-link');
-        link.href = buildDownloadLink(data.file);
-        link.textContent = `📎 ${data.file}`;
-        link.style.display = 'inline';
-      }
-    } else if (isStepAvailable(name)) {
-      stepEl.classList.add('active');
-    } else {
-      stepEl.classList.add('locked');
+**State management** :
+```typescript
+// stores/app.ts
+export const useAppStore = defineStore('app', {
+  state: () => ({
+    currentPath: '',
+    isLoading: false,
+    notifications: [] as Notification[]
+  }),
+  
+  actions: {
+    setCurrentPath(path: string) {
+      this.currentPath = path
+    },
+    showNotification(message: string, type: 'success' | 'error') {
+      // Implementation toast système
     }
-  });
+  }
+})
+
+// stores/pipeline.ts  
+export const usePipelineStore = defineStore('pipeline', {
+  state: () => ({
+    steps: {
+      upload: { completed: false, file: null },
+      extraction: { completed: false, file: 'output.csv' },
+      chunking: { completed: false, file: 'output_chunks.json' },
+      // ...
+    } as PipelineSteps,
+    
+    selectedBranches: {
+      rag: true,
+      zotero: false
+    }
+  }),
+  
+  getters: {
+    currentStep(): StepName {
+      // Logic déterminant l'étape active
+    },
+    canProceedToNextStep(): boolean {
+      // Validation progression
+    }
+  }
+})
+```
+
+**API Client typé** :
+```typescript
+// composables/useApi.ts
+import type { UploadResponse, PipelineStep, Settings } from '@/types'
+
+export function useApi() {
+  const uploadZip = async (file: File): Promise<UploadResponse> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    
+    const response = await fetch('/upload_zip', {
+      method: 'POST',
+      body: formData
+    })
+    
+    if (!response.ok) throw new Error('Upload failed')
+    return response.json()
+  }
+  
+  const processDataframeSSE = (path: string, onProgress: (data: any) => void) => {
+    // Implementation SSE avec types
+  }
+  
+  return { uploadZip, processDataframeSSE }
+}
+```
+
+**Delivrables** :
+- [ ] Stores Pinia complets avec types TypeScript
+- [ ] API client avec tous les endpoints typés
+- [ ] SSE composable pour progress temps réel
+- [ ] Error handling et notifications centralisées
+
+#### Semaine 3 : Composants métier principaux
+
+**Upload Component** :
+```vue
+<!-- components/features/Upload/UploadZone.vue -->
+<template>
+  <div class="grid md:grid-cols-2 gap-6">
+    <!-- Option ZIP -->
+    <UploadCard
+      icon="📦"
+      title="Upload ZIP (Zotero + PDFs)"
+      description="Export Zotero avec PDFs attachés"
+      color="blue"
+      accept=".zip"
+      @upload="handleZipUpload"
+    />
+    
+    <!-- Option CSV -->
+    <UploadCard
+      icon="📊"
+      title="Upload CSV (Direct)"
+      description="Données structurées sans OCR"
+      color="green"
+      accept=".csv"
+      @upload="handleCsvUpload"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { useUpload } from '@/composables/useUpload'
+import { usePipelineStore } from '@/stores/pipeline'
+
+const { uploadZip, uploadCsv } = useUpload()
+const pipeline = usePipelineStore()
+
+async function handleZipUpload(file: File) {
+  try {
+    const result = await uploadZip(file)
+    pipeline.completeStep('upload', result.path)
+  } catch (error) {
+    // Error handling
+  }
+}
+</script>
+```
+
+**Step Tracker Component** :
+```vue
+<!-- components/layout/StepTracker.vue -->
+<template>
+  <div class="step-tracker">
+    <StepItem
+      v-for="(step, index) in steps"
+      :key="step.name"
+      :step="step"
+      :index="index"
+      :is-active="currentStep === step.name"
+      :is-completed="step.completed"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed } from 'vue'
+import { usePipelineStore } from '@/stores/pipeline'
+
+const pipeline = usePipelineStore()
+const steps = computed(() => pipeline.stepsArray)
+const currentStep = computed(() => pipeline.currentStep)
+</script>
+```
+
+**Delivrables** :
+- [ ] UploadZone avec drag&drop et validation
+- [ ] StepTracker avec animations et états visuels
+- [ ] ProcessingSection avec progress SSE intégré
+- [ ] SettingsModal avec validation formulaire Vuelidate
+
+#### Semaine 4 : Pipeline et intégration
+
+**Decision Tree Component** :
+```vue
+<!-- components/features/Pipeline/DecisionTree.vue -->
+<template>
+  <div class="decision-tree grid lg:grid-cols-2 gap-8">
+    <!-- Branche RAG -->
+    <PipelineBranch
+      name="rag"
+      title="🤖 RAG Pipeline"
+      color="blue"
+      :steps="ragSteps"
+      :active="selectedBranches.rag"
+      @toggle="toggleBranch"
+    />
+    
+    <!-- Branche Zotero -->
+    <PipelineBranch
+      name="zotero"
+      title="📚 Zotero Notes"
+      color="purple"
+      :steps="zoteroSteps"
+      :active="selectedBranches.zotero"
+      @toggle="toggleBranch"
+    />
+  </div>
+</template>
+```
+
+**SSE Integration** :
+```typescript
+// composables/useSSE.ts
+export function useSSE() {
+  const connect = (endpoint: string, onMessage: (data: any) => void) => {
+    return new Promise((resolve, reject) => {
+      fetch(endpoint, { method: 'POST' })
+        .then(response => {
+          const reader = response.body?.getReader()
+          const decoder = new TextDecoder()
+          
+          const readChunk = () => {
+            reader?.read().then(({ done, value }) => {
+              if (done) {
+                resolve(undefined)
+                return
+              }
+              
+              const chunk = decoder.decode(value)
+              const lines = chunk.split('\n')
+              
+              lines.forEach(line => {
+                if (line.startsWith('data: ')) {
+                  const data = JSON.parse(line.slice(6))
+                  onMessage(data)
+                }
+              })
+              
+              readChunk()
+            })
+          }
+          
+          readChunk()
+        })
+        .catch(reject)
+    })
+  }
+  
+  return { connect }
+}
+```
+
+**Delivrables** :
+- [ ] DecisionTree avec branches configurables
+- [ ] Pipeline steps avec sub-components
+- [ ] SSE integration complète et robuste
+- [ ] Interface 100% fonctionnelle (parité avec l'actuelle)
+
+---
+
+## Phase 2 : Amélioration design et UX (2-3 semaines)
+
+### Objectif : Interface niveau professionnel avec design moderne
+
+#### Semaine 5-6 : Design system avancé
+
+**Design tokens étendus** :
+```typescript
+// tailwind.config.js
+module.exports = {
+  theme: {
+    extend: {
+      colors: {
+        primary: {
+          50: '#e3f2fd',
+          100: '#bbdefb',
+          500: '#1976d2',
+          600: '#1565c0',
+          700: '#0d47a1'
+        },
+        success: {
+          50: '#e8f5e8',
+          500: '#4caf50',
+          600: '#43a047'
+        }
+      },
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif']
+      },
+      boxShadow: {
+        'card': '0 2px 8px rgba(0,0,0,0.1)',
+        'card-hover': '0 8px 32px rgba(0,0,0,0.12)'
+      }
+    }
+  }
+}
+```
+
+**Composants UI avancés** :
+```vue
+<!-- components/ui/Card.vue -->
+<template>
+  <div
+    :class="[
+      'rounded-xl transition-all duration-300',
+      'bg-white dark:bg-gray-800',
+      'shadow-card hover:shadow-card-hover',
+      {
+        'border-l-4 border-primary-500': variant === 'primary',
+        'border-l-4 border-success-500': variant === 'success',
+        'opacity-60 pointer-events-none': disabled
+      }
+    ]"
+  >
+    <div class="p-6">
+      <slot />
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+interface Props {
+  variant?: 'primary' | 'success' | 'default'
+  disabled?: boolean
 }
 
-function showDecisionTree() {
-  document.getElementById('decision-tree').style.display = 'block';
-  // Animation d'apparition
-  document.getElementById('decision-tree').classList.add('fade-in');
+withDefaults(defineProps<Props>(), {
+  variant: 'default',
+  disabled: false
+})
+</script>
+```
+
+**Animations et transitions** :
+```css
+/* Micro-interactions */
+@keyframes slideInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
-function toggleBranch(branchName, enabled) {
-  appState.selectedBranches[branchName] = enabled;
-  const branch = document.getElementById(`${branchName}-branch`);
-  branch.classList.toggle('selected', enabled);
+@keyframes pulse-success {
+  0% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.4); }
+  70% { box-shadow: 0 0 0 10px rgba(76, 175, 80, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
 }
+
+.step-completed {
+  animation: pulse-success 0.6s ease-out;
+}
+```
+
+**Delivrables** :
+- [ ] Design system complet avec 30+ composants
+- [ ] Dark mode fonctionnel avec toggle
+- [ ] Animations fluides et micro-interactions
+- [ ] Icons library (Lucide) intégrée
+- [ ] Typography et spacing cohérents
+
+#### Semaine 7 : UX et responsivité
+
+**Responsive design avancé** :
+```vue
+<template>
+  <!-- Mobile: Stack vertical -->
+  <div class="space-y-4 lg:space-y-0 lg:grid lg:grid-cols-2 lg:gap-8">
+    
+    <!-- Upload zone adaptive -->
+    <div class="space-y-4 lg:space-y-6">
+      <UploadCard v-for="option in uploadOptions" />
+    </div>
+    
+    <!-- Sidebar mobile: bottom sheet -->
+    <div class="lg:sticky lg:top-6">
+      <ProgressPanel />
+    </div>
+  </div>
+</template>
+```
+
+**Accessibilité WCAG 2.1** :
+- Focus management avec Vue directives
+- Screen reader support complet
+- Keyboard navigation optimisée
+- Contraste couleurs validé
+- Aria labels sur tous les éléments interactifs
+
+**Mobile optimization** :
+- Touch-friendly buttons (min 44px)
+- Swipe gestures pour navigation
+- Modal mobile-first avec bottom sheets
+- Upload files optimisé mobile
+
+**Delivrables** :
+- [ ] Interface parfaitement responsive (mobile → desktop)
+- [ ] Accessibilité WCAG 2.1 Level AA
+- [ ] Touch interactions optimisées
+- [ ] Performance Lighthouse 90+ score
+
+---
+
+## Phase 3 : Fonctionnalités avancées (2-3 semaines)
+
+### Objectif : Features niveau entreprise pour évolutivité
+
+#### Semaine 8-9 : Architecture multi-utilisateurs
+
+**Authentification foundation** :
+```typescript
+// stores/auth.ts
+export const useAuthStore = defineStore('auth', {
+  state: () => ({
+    user: null as User | null,
+    isAuthenticated: false,
+    currentWorkspace: null as Workspace | null
+  }),
+  
+  actions: {
+    async login(credentials: LoginCredentials) {
+      // Login logic
+    },
+    async logout() {
+      // Cleanup session
+    },
+    async switchWorkspace(workspaceId: string) {
+      // Multi-tenant support
+    }
+  }
+})
+
+// Router guards
+router.beforeEach(async (to, from) => {
+  const auth = useAuthStore()
+  
+  if (to.meta.requiresAuth && !auth.isAuthenticated) {
+    return '/login'
+  }
+})
+```
+
+**Multi-projets architecture** :
+```vue
+<!-- views/Dashboard.vue -->
+<template>
+  <div class="dashboard-layout">
+    <!-- Sidebar projects -->
+    <AppSidebar>
+      <ProjectsList />
+      <UserMenu />
+    </AppSidebar>
+    
+    <!-- Main content -->
+    <main class="flex-1">
+      <ProjectHeader />
+      <RAGPipeline />
+    </main>
+  </div>
+</template>
+```
+
+**Gestion sessions avancée** :
+- Sessions persistantes par projet
+- Autosave état pipeline
+- Recovery après déconnexion
+- Partage sessions entre utilisateurs
+
+#### Semaine 10 : Notifications et monitoring
+
+**Toast système avancé** :
+```typescript
+// composables/useNotifications.ts
+export function useNotifications() {
+  const notifications = ref<Notification[]>([])
+  
+  const notify = (
+    message: string, 
+    options: NotificationOptions = {}
+  ) => {
+    const notification: Notification = {
+      id: crypto.randomUUID(),
+      message,
+      type: options.type || 'info',
+      duration: options.duration || 4000,
+      actions: options.actions || []
+    }
+    
+    notifications.value.push(notification)
+    
+    if (notification.duration > 0) {
+      setTimeout(() => {
+        dismiss(notification.id)
+      }, notification.duration)
+    }
+    
+    return notification.id
+  }
+  
+  return { notifications: readonly(notifications), notify, dismiss }
+}
+```
+
+**Analytics et monitoring** :
+```typescript
+// composables/useAnalytics.ts
+export function useAnalytics() {
+  const trackEvent = (eventName: string, properties: Record<string, any>) => {
+    // Tracking pour optimiser UX
+    // Performance metrics
+    // Error tracking
+  }
+  
+  const trackPipelineStep = (step: string, duration: number) => {
+    trackEvent('pipeline_step_completed', { step, duration })
+  }
+  
+  return { trackEvent, trackPipelineStep }
+}
+```
+
+**Delivrables** :
+- [ ] Architecture auth prête (sans backend auth encore)
+- [ ] Multi-projets UI foundation
+- [ ] Système notifications avancé
+- [ ] Analytics events intégrés
+
+---
+
+## Phase 4 : Performance et production (1-2 semaines)
+
+### Objectif : Optimisation et déploiement production
+
+#### Semaine 11 : Optimisation performance
+
+**Code splitting** :
+```typescript
+// router/index.ts
+const routes = [
+  {
+    path: '/',
+    component: () => import('@/views/Dashboard.vue')
+  },
+  {
+    path: '/settings',
+    component: () => import('@/views/Settings.vue')
+  },
+  {
+    path: '/projects/:id',
+    component: () => import('@/views/Project.vue')
+  }
+]
+```
+
+**Lazy loading composants** :
+```vue
+<script setup lang="ts">
+// Lazy load heavy components
+const ZoteroNotes = defineAsyncComponent(() => 
+  import('@/components/features/Zotero/NotesGenerator.vue')
+)
+
+const VectorDatabase = defineAsyncComponent(() => 
+  import('@/components/features/Pipeline/VectorDatabase.vue')
+)
+</script>
+```
+
+**PWA configuration** :
+```typescript
+// vite.config.ts
+import { VitePWA } from 'vite-plugin-pwa'
+
+export default defineConfig({
+  plugins: [
+    VitePWA({
+      registerType: 'autoUpdate',
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,ico,png,svg}']
+      },
+      manifest: {
+        name: 'RAGpy - Academic Research Pipeline',
+        short_name: 'RAGpy',
+        description: 'Process academic documents with RAG pipeline',
+        theme_color: '#1976d2'
+      }
+    })
+  ]
+})
+```
+
+**Optimisations Vite** :
+- Bundle splitting intelligent
+- Tree-shaking optimisé
+- Image optimization (webp, lazy loading)
+- CSS purging et minification
+
+#### Semaine 12 : Déploiement et CI/CD
+
+**Docker frontend** :
+```dockerfile
+# Dockerfile.frontend
+FROM node:18-alpine as build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/nginx.conf
+EXPOSE 80
+```
+
+**CI/CD Pipeline** :
+```yaml
+# .github/workflows/frontend.yml
+name: Frontend CI/CD
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:unit
+      - run: npm run build
+```
+
+**Delivrables** :
+- [ ] Bundle optimisé < 500KB initial
+- [ ] Lighthouse score 95+ (Performance, Accessibility, SEO)
+- [ ] PWA fonctionnelle avec offline support
+- [ ] CI/CD automatisé avec tests et déploiement
+
+---
+
+## Intégration Backend
+
+### Modifications FastAPI minimales
+
+**Nouveau endpoint pour SPA** :
+```python
+# app/main.py
+from fastapi.staticfiles import StaticFiles
+
+# Serve Vue.js build
+app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
+
+@app.get("/")
+async def serve_spa():
+    return FileResponse("frontend/dist/index.html")
+
+@app.get("/{full_path:path}")  
+async def serve_spa_routes(full_path: str):
+    # Serve index.html for all non-API routes (SPA routing)
+    if full_path.startswith("api/"):
+        raise HTTPException(404)
+    return FileResponse("frontend/dist/index.html")
+```
+
+**API versioning** :
+```python
+# Gradual migration
+@app.include_router(api_router, prefix="/api/v1")
+
+# Legacy endpoints keep working
+@app.post("/upload_zip")  # Existing
+@app.post("/api/v1/upload")  # New typed endpoint
+```
+
+**CORS configuration** :
+```python
+# Production-ready CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://ragpy.yourdomain.com"],  # Specific domains
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 ```
 
 ---
 
-## Phase 4 : Fichiers à modifier
+## Migration strategy
 
-| Fichier | Modifications | Lignes estimées |
-|---------|---------------|-----------------|
-| `app/static/style.css` | Ajout styles step-tracker, decision-tree, couleurs | +80 lignes |
-| `app/templates/index.html` | Restructuration complète, nouveau layout | ~200 lignes modifiées |
-| `app/main.py` | Aucune modification nécessaire | 0 |
+### Déploiement progressif
 
----
+**Phase 1 : Coexistence** (2 semaines)
+- Nouvelle interface accessible sur `/v2` 
+- Interface actuelle reste sur `/`
+- Tests utilisateurs et feedback
 
-## Phase 5 : Tests
+**Phase 2 : A/B Testing** (1 semaine)
+- 50% utilisateurs → nouvelle interface
+- Monitoring performance et erreurs
+- Ajustements basés sur retours
 
-### Parcours à tester
+**Phase 3 : Migration complète** (1 semaine)
+- Switch définitif vers nouvelle interface
+- Interface legacy en backup
+- Monitoring complet post-migration
 
-- [ ] ZIP → Extraction → RAG complet (chunking → embeddings → vector DB)
-- [ ] ZIP → Extraction → Zotero Notes
-- [ ] ZIP → Extraction → RAG + Zotero (les deux branches)
-- [ ] CSV direct → RAG complet
-- [ ] CSV direct → Zotero Notes
-- [ ] CSV direct → RAG + Zotero
-
-### Points de vérification
-
-- [ ] Step tracker affiche correctement les états bleu/vert
-- [ ] Liens de téléchargement fonctionnels après complétion
-- [ ] Arbre de décision apparaît après CSV prêt
-- [ ] Branches peuvent être activées/désactivées indépendamment
-- [ ] Responsive design sur mobile/tablette
+### Rollback plan
+- Interface legacy maintenue 1 mois
+- Switch immediate possible via feature flag
+- Monitoring erreurs en temps réel
+- Hotfix capabilities maintenues
 
 ---
 
-## Ordre d'implémentation
+## Budget et timeline
 
-1. ✅ Créer ce fichier de plan
-2. ✅ Modifier `style.css` : ajouter styles step-tracker et decision-tree
-3. ✅ Modifier `index.html` : ajouter Step Tracker en haut
-4. ✅ Modifier `index.html` : restructurer sections pour tout afficher
-5. ✅ Modifier `index.html` : créer l'arbre de décision bifurcation
-6. ✅ Modifier `index.html` : adapter JavaScript pour nouveau state
-7. ✅ Tests complets - Validé par l'utilisateur (2025-11-22)
+### Timeline global : 12 semaines
+
+| Phase | Durée | Effort | Priorité |
+|-------|-------|---------|----------|
+| **Migration fondations** | 4 semaines | 160h | CRITIQUE |
+| **Design professionnel** | 3 semaines | 120h | HAUTE |
+| **Features avancées** | 3 semaines | 120h | MOYENNE |
+| **Production** | 2 semaines | 80h | CRITIQUE |
+
+### Ressources nécessaires
+- **1 Développeur Frontend Senior** (Vue.js/TypeScript expert)
+- **1 UI/UX Designer** (pour design system et prototypes)
+- **0.5 DevOps** (pour CI/CD et déploiement)
+
+### Coût technologique
+- Design tools (Figma Pro) : 15€/mois
+- Hosting frontend (Vercel/Netlify) : 20€/mois  
+- Monitoring (Sentry) : 26€/mois
+- **Total récurrent** : ~60€/mois
 
 ---
 
-## Notes techniques
+## Critères de succès
 
-### Compatibilité
-- Pas de framework JS nécessaire (vanilla JS)
-- CSS flexbox pour le layout de l'arbre
-- Compatible avec le backend FastAPI existant
+### KPIs techniques
+- **Performance** : Lighthouse 95+ (vs 70 actuel)
+- **Accessibilité** : WCAG 2.1 AA compliance
+- **Mobile** : Expérience native iOS/Android
+- **Bundle size** : < 500KB initial load
+- **Error rate** : < 0.1% client errors
 
-### Points d'attention
-- Conserver la logique de session (`currentPath`)
-- Maintenir les fallback uploads pour chaque étape
-- Préserver la gestion des credentials dans la modal settings
+### KPIs utilisateur  
+- **Time to first interaction** : < 2s (vs 5s actuel)
+- **Task completion rate** : 98%+ (maintenir niveau actuel)
+- **User satisfaction** : 4.5/5 (vs 4.0 actuel)
+- **Mobile adoption** : 40%+ sessions mobiles
+
+### KPIs business
+- **Development velocity** : +50% nouvelles features
+- **Maintenance cost** : -30% bugs et hotfixes
+- **Onboarding time** : -40% temps formation nouveaux utilisateurs
+- **Future readiness** : Architecture prête multi-tenant
+
+---
+
+## Risques et mitigations
+
+### Risques techniques
+
+**Risque** : Performance dégradée par rapport à l'actuel  
+**Mitigation** : Benchmarking continu, lazy loading, code splitting
+
+**Risque** : Régression fonctionnelle lors migration  
+**Mitigation** : Tests E2E complets, période coexistence
+
+**Risque** : Courbe d'apprentissage équipe  
+**Mitigation** : Formation Vue.js, documentation détaillée
+
+### Risques utilisateur
+
+**Risque** : Résistance au changement interface  
+**Mitigation** : Migration progressive, formation, support utilisateur
+
+**Risque** : Perte ergonomie actuelle  
+**Mitigation** : Tests utilisateurs réguliers, préservation workflow
+
+---
+
+## Next steps immédiats
+
+### Actions prioritaires (semaine 1)
+
+1. **Validation stakeholders** : Approbation du plan et budget
+2. **Setup équipe** : Recrutement/formation développeur Vue.js
+3. **Prototype rapide** : Maquette interactive Figma
+4. **Architecture PoC** : Setup Vite + Vue 3 + premier composant
+5. **Planning détaillé** : Sprint planning 12 semaines
+
+### Livrables semaine 1
+- [ ] Plan validé et signé
+- [ ] Équipe constituée et formée
+- [ ] Environnement développement setup
+- [ ] Premier prototype navigable
+- [ ] Roadmap détaillée avec jalons
+
+Cette refonte transformera RAGpy en une application web moderne, scalable et prête pour les défis futurs tout en préservant son excellente ergonomie actuelle.

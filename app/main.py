@@ -1291,39 +1291,51 @@ async def process_dataframe_sse(path: str = Form(...)):
             out_csv = os.path.join(absolute_processing_path, 'output.csv')
             script_path = os.path.abspath(os.path.join(RAGPY_DIR, "scripts", "rad_dataframe.py"))
 
+            # Use unbuffered Python output and set environment for real-time progress
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+
             process = await asyncio.create_subprocess_exec(
-                "python3", script_path,
+                "python3", "-u", script_path,
                 "--json", json_path,
                 "--dir", absolute_processing_path,
                 "--output", out_csv,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT
+                stderr=asyncio.subprocess.STDOUT,
+                env=env
             )
 
-            current_progress = 0
+            # Monitor progress by reading the progress file created by rad_dataframe.py
+            progress_file = os.path.splitext(out_csv)[0] + ".progress.json"
+            last_progress = 0
+
             while True:
-                line = await process.stdout.readline()
-                if not line:
+                # Check if process has finished
+                if process.returncode is not None:
                     break
 
-                line_text = line.decode('utf-8', errors='replace').strip()
+                # Try to read progress from file
+                try:
+                    if os.path.exists(progress_file):
+                        with open(progress_file, 'r', encoding='utf-8') as pf:
+                            progress_data = json.load(pf)
+                            current_progress = len(progress_data.get("processed_keys", []))
+                            if current_progress > last_progress:
+                                last_progress = current_progress
+                                yield f"data: {json.dumps({'type': 'progress', 'current': current_progress, 'total': total_items})}\n\n"
+                except (json.JSONDecodeError, IOError):
+                    pass  # File may be being written
 
-                # Parse progress from tqdm output or log lines
-                if "Processing Zotero items:" in line_text or "it/s" in line_text:
-                    # Extract progress from tqdm format like "10%|█|1/10"
-                    import re
-                    match = re.search(r'(\d+)/(\d+)', line_text)
-                    if match:
-                        current = int(match.group(1))
-                        total = int(match.group(2))
-                        yield f"data: {json.dumps({'type': 'progress', 'current': current, 'total': total})}\n\n"
-                elif "Item " in line_text and " saved" in line_text:
-                    current_progress += 1
-                    yield f"data: {json.dumps({'type': 'progress', 'current': current_progress, 'total': total_items})}\n\n"
-                elif "✓" in line_text:
-                    current_progress += 1
-                    yield f"data: {json.dumps({'type': 'progress', 'current': current_progress, 'total': total_items})}\n\n"
+                # Wait a bit before checking again
+                await asyncio.sleep(0.5)
 
+                # Check process status without blocking
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass  # Process still running
+
+            # Final wait for process completion
             await process.wait()
 
             if process.returncode == 0 and os.path.exists(out_csv):

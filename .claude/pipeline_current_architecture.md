@@ -1,1163 +1,484 @@
 # Architecture actuelle du pipeline RAGpy
 
-**Date de création** : 2025-10-21
-**Dernière mise à jour** : 2025-01-25 (ajout app/main.py, ingestion CSV, OpenRouter)
-**Objectif** : Documenter l'architecture existante complète
+**Date de création** : 2025-10-21  
+**Dernière mise à jour** : 2025-11-22 (analyse complète par agents spécialisés)  
+**Objectif** : Documenter l'architecture existante complète avec analyse détaillée
 
 ---
 
-## Vue d'ensemble du flux de données
+## Vue d'ensemble du système
+
+**RAGpy** est un pipeline sophistiqué de **Retrieval-Augmented Generation (RAG)** conçu pour traiter des documents académiques et les préparer pour le stockage dans des bases vectorielles. Le système combine une interface web moderne (FastAPI) avec un pipeline de traitement modulaire pour l'extraction, le chunking, l'embedding et l'insertion vectorielle.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│            PIPELINE COMPLET RAGpy (Mise à jour 2025-01-25)       │
+│                 PIPELINE COMPLET RAGpy (2025-11-22)             │
 └─────────────────────────────────────────────────────────────────┘
 
-0. app/main.py : Serveur FastAPI (ORCHESTRATEUR WEB)
-   ├─ Interface utilisateur : templates/index.html
-   ├─ Gestion de sessions : uploads/<session>/
-   ├─ Endpoints REST pour chaque étape du pipeline
-   ├─ Orchestration des scripts 1-3 via subprocess
-   └─ Gestion credentials (.env) et configuration
+ARCHITECTURE MODULAIRE:
+├── app/                  # Interface web FastAPI (point d'entrée)
+│   ├── main.py          # Orchestrateur web (1,543 lignes)
+│   ├── utils/           # Intégration Zotero
+│   ├── static/          # Assets CSS, favicon
+│   └── templates/       # Templates HTML (Jinja2)
+├── scripts/             # Pipeline de traitement
+│   ├── rad_dataframe.py # PDF/Zotero → CSV (OCR)
+│   ├── rad_chunk.py     # Chunking + embeddings
+│   └── rad_vectordb.py  # Insertion bases vectorielles
+├── core/               # Modèles de données unifiés
+│   └── document.py     # Classe Document abstraite
+├── ingestion/          # Modules d'ingestion
+│   └── csv_ingestion.py # Ingestion CSV directe
+├── config/             # Configuration YAML
+├── tests/              # Suite de tests
+├── uploads/            # Sessions utilisateur
+└── logs/              # Logs application
 
-1. INGESTION (2 sources implémentées)
-   ├─ A) rad_dataframe.py : Zotero JSON + PDF → CSV (output.csv)
-   │     ├─ Input : Zotero JSON + répertoire PDF
-   │     ├─ OCR   : Mistral → OpenAI → PyMuPDF (legacy)
-   │     └─ Output: CSV avec texteocr + texteocr_provider + métadonnées
-   │
-   └─ B) ingestion/csv_ingestion.py : CSV direct → List[Document]
-         ├─ Input : CSV avec colonne texte personnalisable
-         ├─ Mapping : colonne → texteocr
-         ├─ Préservation : toutes les métadonnées CSV
-         └─ Output: List[Document] (core/document.py)
-
-2. rad_chunk.py : CSV/Documents → JSON avec chunks + embeddings
-   ├─ Phase initial : texteocr → chunks JSON (avec recodage GPT/OpenRouter)
-   ├─ Phase dense   : chunks → chunks + embeddings denses (OpenAI)
-   └─ Phase sparse  : chunks → chunks + embeddings sparses (spaCy)
-
-3. rad_vectordb.py : JSON → Base vectorielle
-   ├─ Pinecone  : upsert avec métadonnées
-   ├─ Weaviate  : insert avec métadonnées
-   └─ Qdrant    : upsert avec métadonnées
-
-Utilitaires:
-- scripts/crawl.py : Web crawler → PDF/Markdown (documentation en ligne)
+FLUX DE DONNÉES:
+Input Sources → Data Extraction → Document Processing → Vector Storage
+     ↓              ↓                    ↓                  ↓
+├─ Zotero+PDFs    CSV Generation    Chunking/Embedding   Pinecone
+├─ Direct CSV  →     output.csv  →    JSON stages    →   Weaviate
+└─ Manual Files                                          Qdrant
 ```
 
 ---
 
-## 0. Module `app/main.py` — Orchestrateur FastAPI (POINT D'ENTRÉE)
+## Analyse de l'architecture (2025-11-22)
 
-### Responsabilités
+### 🏗️ **Qualité du code et structure**
 
-**app/main.py (1042 lignes)** est le **point d'entrée principal** de l'application. C'est un serveur FastAPI qui :
-- Expose une interface web complète (templates/index.html)
-- Orchestre les 3 scripts du pipeline via subprocess
-- Gère les sessions utilisateur et les uploads
-- Fournit des endpoints REST pour chaque phase
-- Gère la configuration (.env) et les credentials
+#### **Points forts identifiés**
+- **Architecture modulaire excellente** avec séparation claire des responsabilités
+- **Classe Document unifiée** garantissant la compatibilité pipeline
+- **Logging structuré** avec rotation et niveaux appropriés
+- **Gestion d'erreurs sophistiquée** avec mécanismes de retry
+- **Support multi-providers** pour optimisation des coûts
 
-### Architecture FastAPI
+#### **Points d'amélioration critiques**
+- **app/main.py trop volumineux** (1,543 lignes) → refactorisation nécessaire
+- **Métadonnées hardcodées** dans 4 emplacements critiques
+- **Validation d'entrée insuffisante** sur plusieurs endpoints
+- **Dépendances non épinglées** → risques de sécurité
+- **Conventions de nommage mixtes** (français/anglais)
 
-#### Structure des répertoires
-
+#### **Dette technique majeure**
 ```python
-# Lignes 23-28 : Définition des chemins
-APP_DIR = os.path.dirname(os.path.abspath(__file__))  # .../ragpy/app
-RAGPY_DIR = os.path.dirname(APP_DIR)                  # .../ragpy
-LOG_DIR = os.path.join(RAGPY_DIR, "logs")
-UPLOAD_DIR = os.path.join(RAGPY_DIR, "uploads")
-STATIC_DIR = os.path.join(APP_DIR, "static")
-TEMPLATES_DIR = os.path.join(APP_DIR, "templates")
-```
-
-Chaque session utilisateur obtient un répertoire unique dans `uploads/<session>/` contenant :
-- Fichiers uploadés (ZIP, CSV)
-- Fichiers intermédiaires (output.csv, output_chunks.json, etc.)
-- Logs spécifiques (chunking.log, dense_embedding.log, etc.)
-
-#### Endpoints principaux
-
-| Endpoint | Méthode | Rôle | Script appelé |
-|----------|---------|------|---------------|
-| `/` | GET | Interface web principale | - |
-| `/upload_zip` | POST | Upload ZIP Zotero + extraction | - |
-| `/upload_csv_direct` | POST | Upload CSV direct (ingestion CSV) | - |
-| `/process_dataframe` | POST | Extraction PDF/OCR | `rad_dataframe.py` |
-| `/initial_text_chunking` | POST | Génération des chunks | `rad_chunk.py --phase initial` |
-| `/dense_embedding_generation` | POST | Embeddings denses | `rad_chunk.py --phase dense` |
-| `/sparse_embedding_generation` | POST | Embeddings sparses | `rad_chunk.py --phase sparse` |
-| `/insert_to_vectordb` | POST | Insertion base vectorielle | `rad_vectordb.py` |
-| `/get_credentials` | GET | Récupère credentials du .env | - |
-| `/save_credentials` | POST | Sauvegarde credentials dans .env | - |
-
-#### Flux utilisateur typique (ZIP Zotero)
-
-```python
-# 1. Upload ZIP (ligne 72-140)
-POST /upload_zip
-├─ Extraction ZIP dans uploads/<session>/
-├─ Recherche Zotero JSON
-└─ Retour: {"session": "<session>", "files": [...]}
-
-# 2. Traitement DataFrame/OCR (ligne 538-605)
-POST /process_dataframe
-├─ subprocess.run(["python3", "rad_dataframe.py", ...])
-├─ Input:  uploads/<session>/*.json + PDFs
-└─ Output: uploads/<session>/output.csv
-
-# 3. Chunking initial (ligne 656-698) - NOUVEAU: Support OpenRouter
-POST /initial_text_chunking?model=openai/gemini-2.5-flash
-├─ subprocess.run(["python3", "rad_chunk.py", "--phase", "initial", "--model", model])
-├─ Input:  uploads/<session>/output.csv
-└─ Output: uploads/<session>/output_chunks.json
-
-# 4. Embeddings denses (ligne 700-755)
-POST /dense_embedding_generation
-├─ subprocess.run(["python3", "rad_chunk.py", "--phase", "dense"])
-├─ Input:  uploads/<session>/output_chunks.json
-└─ Output: uploads/<session>/output_chunks_with_embeddings.json
-
-# 5. Embeddings sparses (ligne 757-812)
-POST /sparse_embedding_generation
-├─ subprocess.run(["python3", "rad_chunk.py", "--phase", "sparse"])
-├─ Input:  uploads/<session>/output_chunks_with_embeddings.json
-└─ Output: uploads/<session>/output_chunks_with_embeddings_sparse.json
-
-# 6. Insertion vectorielle (ligne 814-889)
-POST /insert_to_vectordb
-├─ subprocess.run(["python3", "rad_vectordb.py", "--db", db_choice, ...])
-├─ Input:  uploads/<session>/output_chunks_with_embeddings_sparse.json
-└─ Output: Insertion dans Pinecone/Weaviate/Qdrant
-```
-
-#### Gestion des credentials (NOUVEAU 2025-01-25)
-
-```python
-# Ligne 486-536 : GET /get_credentials
-# Lit le fichier .env et retourne les clés API (masquées)
-credentials = {
-    "OPENAI_API_KEY": "sk-...",
-    "OPENROUTER_API_KEY": "sk-or-v1-...",      # NOUVEAU
-    "OPENROUTER_DEFAULT_MODEL": "openai/gemini-2.5-flash",  # NOUVEAU
-    "PINECONE_API_KEY": "pcsk-...",
-    # ... autres credentials
-}
-
-# Ligne 538-601 : POST /save_credentials
-# Sauvegarde les credentials dans le fichier .env
-# Support OpenRouter ajouté le 2025-01-25
-```
-
-### Logging centralisé
-
-```python
-# Ligne 34-50 : Configuration logging
-log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
-app_log_file = os.path.join(LOG_DIR, "app.log")
-file_handler = RotatingFileHandler(app_log_file, maxBytes=10*1024*1024, backupCount=5)
-
-# Logs consolidés :
-# - logs/app.log : Toutes les requêtes FastAPI + erreurs subprocess
-# - uploads/<session>/chunking.log : Logs de rad_chunk.py
-# - uploads/<session>/dense_embedding.log : Logs embeddings denses
-# - uploads/<session>/sparse_embedding.log : Logs embeddings sparses
-```
-
-### Gestion des erreurs subprocess
-
-Tous les endpoints qui appellent des scripts Python gèrent 3 types d'erreurs :
-1. **TimeoutExpired** : Script > 1 heure → Code 504
-2. **CalledProcessError** : Script retourne code != 0 → Code 500 avec détails
-3. **Exception générique** : Erreur inattendue → Code 500 avec traceback
-
-### Variables d'environnement
-
-L'application lit et écrit dans le fichier `.env` à la racine de `ragpy/` :
-
-```bash
-# Obligatoire
-OPENAI_API_KEY
-
-# Nouveaux (2025-01-25)
-OPENROUTER_API_KEY              # Optionnel - Alternative économique
-OPENROUTER_DEFAULT_MODEL        # Optionnel - Modèle par défaut
-
-# Bases vectorielles (au moins 1)
-PINECONE_API_KEY
-PINECONE_ENV
-WEAVIATE_URL
-WEAVIATE_API_KEY
-QDRANT_URL
-QDRANT_API_KEY
-```
-
-### Démarrage du serveur
-
-```bash
-# Ligne 1040+ : Point d'entrée
-# uvicorn app.main:app --reload --host 0.0.0.0
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Le serveur démarre sur `http://localhost:8000` avec live reload en développement.
-
----
-
-## 1A. Module `core/document.py` — Classe Document unifiée (IMPLÉMENTÉ)
-
-### Responsabilités
-
-Définit la **structure de données commune** à toutes les sources d'ingestion (PDF/OCR, CSV, futures sources). Garantit l'uniformité du pipeline.
-
-### Structure de la classe
-
-```python
-# Ligne 16-68 : Classe Document
-@dataclass
-class Document:
-    """
-    Représentation unifiée d'un document dans le pipeline RAGpy.
-
-    Attributs:
-        texteocr (str): Contenu textuel du document. Variable pivot unique
-                        pour tout le pipeline. Ne peut pas être vide.
-        meta (Dict[str, Any]): Métadonnées arbitraires associées au document.
-                               Peut contenir n'importe quels champs selon la source.
-        source_type (str): Type de source d'ingestion ("pdf", "csv", etc.).
-                          Ajouté automatiquement dans meta si absent.
-    """
-    texteocr: str
-    meta: Dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self):
-        """Validation et normalisation automatique."""
-        # Validation texteocr non vide
-        if not self.texteocr or not self.texteocr.strip():
-            raise ValueError("Le champ 'texteocr' ne peut pas être vide")
-
-        # Ajouter source_type dans meta si absent
-        if "source_type" not in self.meta:
-            self.meta["source_type"] = "unknown"
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convertit en dictionnaire (pour compatibilité rad_chunk.py)."""
-        return {
-            "texteocr": self.texteocr,
-            **self.meta
-        }
-```
-
-### Exemples d'utilisation
-
-```python
-# Document issu d'un PDF via OCR
-doc_pdf = Document(
-    texteocr="Texte extrait du PDF...",
-    meta={
-        "title": "Article scientifique",
-        "authors": "Smith, J.",
-        "filename": "article.pdf",
-        "source_type": "pdf",
-        "texteocr_provider": "mistral"
-    }
-)
-
-# Document issu d'un CSV
-doc_csv = Document(
-    texteocr="Contenu de la colonne 'text'",
-    meta={
-        "title": "Titre article",
-        "category": "Science",
-        "url": "https://...",
-        "source_type": "csv",
-        "row_index": 42
-    }
-)
-```
-
-### Avantages de cette abstraction
-
-1. **Uniformité** : Toutes les sources produisent le même type d'objet
-2. **Validation** : Impossible de créer un Document avec texteocr vide
-3. **Extensibilité** : `meta` accepte n'importe quelle métadonnée
-4. **Compatibilité** : `to_dict()` permet l'intégration avec rad_chunk.py
-
----
-
-## 1B. Module `ingestion/csv_ingestion.py` — Ingestion CSV (IMPLÉMENTÉ)
-
-### Responsabilités
-
-Permet d'injecter des fichiers CSV dans le pipeline RAGpy en **contournant l'étape OCR**. Mappe une colonne CSV vers la variable pivot `texteocr` et conserve toutes les autres colonnes comme métadonnées.
-
-### Classes principales
-
-#### `CSVIngestionConfig` (ligne 36-76)
-
-Configuration pour personnaliser l'ingestion CSV :
-
-```python
-config = CSVIngestionConfig(
-    text_column="description",      # Colonne source du texte
-    encoding="auto",                 # Détection auto avec chardet
-    delimiter=",",                   # Séparateur CSV
-    meta_columns=[],                 # Si vide : toutes sauf text_column
-    skip_empty=True,                 # Ignorer lignes avec texte vide
-    add_row_index=True,              # Ajouter row_index dans meta
-    source_type="csv"                # Type de source pour Document
-)
-```
-
-#### `ingest_csv()` (ligne 117-217)
-
-Fonction principale d'ingestion :
-
-```python
-def ingest_csv(
-    csv_path: Union[str, Path],
-    config: Optional[CSVIngestionConfig] = None
-) -> List[Document]:
-    """
-    Ingère un fichier CSV et retourne une liste de Documents.
-
-    Args:
-        csv_path: Chemin vers le fichier CSV
-        config: Configuration (utilise défaut si None)
-
-    Returns:
-        Liste de Documents (core.document.Document)
-
-    Raises:
-        CSVIngestionError: Erreur lors de l'ingestion
-    """
-```
-
-### Flux d'ingestion
-
-```python
-# Ligne 131-161 : Détection d'encodage
-if config.encoding == "auto":
-    with open(csv_path, 'rb') as f:
-        result = chardet.detect(f.read(100000))
-        encoding = result['encoding']
-else:
-    encoding = config.encoding
-
-# Ligne 163-172 : Lecture CSV avec pandas
-df = pd.read_csv(csv_path, encoding=encoding, delimiter=config.delimiter)
-
-# Ligne 174-182 : Validation colonne texte
-if config.text_column not in df.columns:
-    raise CSVIngestionError(f"Colonne '{config.text_column}' introuvable")
-
-# Ligne 184-217 : Création des Documents
-documents = []
-for idx, row in df.iterrows():
-    texte = str(row[config.text_column]).strip()
-
-    if config.skip_empty and not texte:
-        continue
-
-    # Construction métadonnées (toutes colonnes sauf text_column)
-    meta = {}
-    for col in df.columns:
-        if col != config.text_column:
-            meta[col] = row[col]
-
-    if config.add_row_index:
-        meta["row_index"] = idx
-
-    meta["source_type"] = config.source_type
-
-    # Création Document
-    doc = Document(texteocr=texte, meta=meta)
-    documents.append(doc)
-```
-
-### Exemple d'utilisation complète
-
-```python
-from ingestion.csv_ingestion import ingest_csv, CSVIngestionConfig
-
-# Configuration personnalisée
-config = CSVIngestionConfig(
-    text_column="article_text",
-    encoding="utf-8",
-    skip_empty=True
-)
-
-# Ingestion
-documents = ingest_csv("data/articles.csv", config)
-
-# Conversion pour rad_chunk.py
-import pandas as pd
-df = pd.DataFrame([doc.to_dict() for doc in documents])
-df.to_csv("output.csv", index=False)
-
-# Le CSV output.csv contient maintenant :
-# - texteocr : Contenu de la colonne article_text
-# - Toutes les autres colonnes du CSV original
-# - source_type : "csv"
-# - texteocr_provider : absent (pas de recodage GPT)
-```
-
-### Gestion des erreurs
-
-```python
-# Ligne 31-33 : Exception personnalisée
-class CSVIngestionError(Exception):
-    """Exception levée lors d'erreurs d'ingestion CSV."""
-    pass
-
-# Erreurs courantes gérées :
-# - Colonne texte introuvable
-# - Fichier CSV corrompu
-# - Encodage invalide
-# - Toutes les lignes vides après filtrage
-```
-
-### Intégration avec le pipeline
-
-L'ingestion CSV s'intègre **directement après l'étape 1** du pipeline :
-
-```text
-CSV source → csv_ingestion.py → List[Document] → to_dict() → output.csv
-                                                                  ↓
-                                                            rad_chunk.py
-```
-
-Avantage : **Pas de recodage GPT** car `texteocr_provider` absent (économie API).
-
----
-
-## 1C. Module `rad_dataframe.py` — Extraction PDF/OCR
-
-### Responsabilités
-
-- Charger un export Zotero (JSON)
-- Localiser les PDF référencés (avec recherche fuzzy si nécessaire)
-- Extraire le texte via OCR multi-provider
-- Produire un CSV avec métadonnées + texte
-
-### Fonctions clés
-
-| Fonction | Localisation | Rôle |
-|----------|-------------|------|
-| `extract_text_with_ocr()` | ligne 337 | Point d'entrée OCR avec cascade Mistral → OpenAI → Legacy |
-| `_extract_text_with_mistral()` | ligne 144 | OCR Mistral (retourne Markdown) |
-| `_extract_text_with_openai()` | ligne 267 | OCR OpenAI vision (fallback) |
-| `_extract_text_with_legacy_pdf()` | ligne 120 | OCR PyMuPDF (fallback final) |
-| `load_zotero_to_dataframe()` | ligne 397 | Orchestration : JSON → DataFrame |
-
-### Flux détaillé
-
-```python
-# Ligne 490-509 : Extraction OCR avec détails
-ocr_payload = extract_text_with_ocr(
-    actual_pdf_path,
-    return_details=True,  # Retourne OCRResult(text, provider)
-)
-
-# Ligne 503-510 : Construction du record
-records.append({
-    # Métadonnées Zotero
-    "type": ...,
-    "title": ...,
-    "authors": ...,
-    "date": ...,
-    "url": ...,
-    "doi": ...,
-    "filename": ...,
-    "path": ...,
-    "attachment_title": ...,
-
-    # Texte OCR - POINT CRITIQUE
-    "texteocr": ocr_payload.text,           # ← Source unique du texte
-    "texteocr_provider": ocr_payload.provider  # ← "mistral" | "openai" | "legacy"
-})
-```
-
-### Colonnes CSV produites (hardcodées)
-
-| Colonne | Type | Description |
-|---------|------|-------------|
-| `type` | str | Type d'item Zotero ("article", "book", etc.) |
-| `title` | str | Titre du document |
-| `authors` | str | Auteurs (jointure par virgule) |
-| `date` | str | Date de publication |
-| `url` | str | URL de l'article |
-| `doi` | str | Digital Object Identifier |
-| `filename` | str | Nom du fichier PDF |
-| `path` | str | Chemin complet résolu du PDF |
-| `attachment_title` | str | Titre de l'attachement Zotero |
-| **`texteocr`** | **str** | **Texte extrait par OCR (variable pivot)** |
-| **`texteocr_provider`** | **str** | **Fournisseur OCR utilisé** |
-
-### Variables d'environnement
-
-```bash
-# OCR Mistral (prioritaire)
-MISTRAL_API_KEY
-MISTRAL_API_BASE_URL="https://api.mistral.ai"
-MISTRAL_OCR_MODEL="mistral-ocr-latest"
-MISTRAL_OCR_TIMEOUT=300
-MISTRAL_DELETE_UPLOADED_FILE=true
-
-# OCR OpenAI (fallback)
-OPENAI_API_KEY
-OPENAI_OCR_MODEL="gpt-4o-mini"
-OPENAI_OCR_PROMPT="Transcris cette page PDF en Markdown..."
-OPENAI_OCR_MAX_PAGES=10
-OPENAI_OCR_MAX_TOKENS=2048
-OPENAI_OCR_RENDER_SCALE=2.0
-```
-
----
-
-## 2. Module `rad_chunk.py` — Chunking et embeddings
-
-### Responsabilités
-
-- Découper `texteocr` en chunks (~1000 tokens)
-- Recoder les chunks via GPT/OpenRouter (sauf si OCR Mistral ou CSV)
-- Générer embeddings denses (OpenAI `text-embedding-3-large`)
-- Générer embeddings sparses (spaCy TF lemmatisé)
-
-### NOUVEAU (2025-01-25) : Support OpenRouter
-
-Le script supporte maintenant **OpenRouter** comme alternative économique à OpenAI pour le recodage de texte :
-
-```bash
-# Utiliser OpenAI (défaut)
-python rad_chunk.py --input data.csv --output ./out --phase initial
-
-# Utiliser OpenRouter (2-3x moins cher)
-python rad_chunk.py --input data.csv --output ./out --phase initial \
-  --model openai/gemini-2.5-flash
-```
-
-#### Auto-détection du provider (ligne 121-140)
-
-```python
-def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", ...):
-    # Auto-détection basée sur le format du modèle
-    use_openrouter = "/" in model  # "provider/model" = OpenRouter
-    active_client = openrouter_client if use_openrouter else client
-
-    if use_openrouter and not openrouter_client:
-        print(f"Warning: OpenRouter model '{model}' requested but unavailable.")
-        print("Falling back to OpenAI gpt-4o-mini")
-        model = "gpt-4o-mini"
-        active_client = client
-
-    print(f"Using {'OpenRouter' if use_openrouter else 'OpenAI'} with model: {model}")
-```
-
-**Logique de fallback** : Si OpenRouter indisponible → bascule automatiquement vers OpenAI.
-
-#### Client OpenRouter (ligne 72-82)
-
-```python
-# OpenRouter Client Initialization (optional)
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-openrouter_client = None
-if OPENROUTER_API_KEY:
-    openrouter_client = OpenAI(
-        api_key=OPENROUTER_API_KEY,
-        base_url="https://openrouter.ai/api/v1"
-    )
-    print("OpenRouter client initialized successfully.")
-else:
-    print("OpenRouter API key not found. Will use OpenAI for all LLM calls.")
-```
-
-### Fonctions clés
-
-| Fonction | Localisation | Rôle |
-|----------|-------------|------|
-| `process_document_chunks()` | ligne 187 | Orchestration chunking + recodage pour 1 document |
-| `gpt_recode_batch()` | ligne 109 | Recodage GPT par lot (5 chunks par défaut) |
-| `get_embeddings_batch()` | ligne 301 | Embeddings denses OpenAI |
-| `extract_sparse_features()` | ligne 409 | Embeddings sparses spaCy |
-| `save_raw_chunks_to_json_incrementally()` | ligne 169 | Sauvegarde thread-safe incrémentale |
-
-### Flux de traitement (3 phases)
-
-#### Phase `initial` : CSV → Chunks JSON
-
-```python
-# Ligne 199 : POINT D'ENTRÉE du texte
-text = row_data.get("texteocr", "").strip()
-
-# Ligne 232-237 : Décision de recodage selon provider (MISE À JOUR 2025-01-25)
-provider = str(row_data.get("texteocr_provider", "")).lower()
-recode_required = provider not in ("mistral", "csv")  # Skip si Mistral OU CSV
-
-# Ligne 211 : Chunking
-text_chunks = TEXT_SPLITTER.split_text(text)  # RecursiveCharacterTextSplitter
-
-# Ligne 221-233 : Recodage conditionnel
-if recode_required:
-    cleaned_batch = gpt_recode_batch(
-        batch_to_recode,
-        instructions="Nettoie ce chunk OCR brut...",
-        model="gpt-4o-mini"
-    )
-else:
-    cleaned_batch = batch_to_recode  # Pas de recodage
-```
-
-#### Métadonnées des chunks (hardcodées !)
-
-```python
-# Ligne 250-263 : Construction de chunk_metadata
-chunk_metadata = {
-    "id":           f"{doc_id}_{original_chunk_index}",
-    "type":         sanitize_metadata_value(row_data.get("type", "")),
-    "title":        sanitize_metadata_value(row_data.get("title", "")),
-    "authors":      sanitize_metadata_value(row_data.get("authors", "")),
-    "date":         sanitize_metadata_value(row_data.get("date", "")),
-    "filename":     sanitize_metadata_value(row_data.get("filename", "")),
-    "doc_id":       doc_id,
-    "chunk_index":  original_chunk_index,
-    "total_chunks": len(text_chunks),
-    "text":         cleaned_text,
-    "ocr_provider": sanitize_metadata_value(provider, ""),
-}
-```
-
-**Problème identifié** : Liste de champs **hardcodée** ! Toute colonne CSV non listée ici est **perdue**.
-
-#### Phase `dense` : Chunks → Chunks + Embeddings denses
-
-```python
-# Ligne 301-318 : Embeddings denses OpenAI
-def get_embeddings_batch(texts, model="text-embedding-3-large"):
-    response = client.embeddings.create(input=texts, model=model)
-    return [item.embedding for item in response.data]
-```
-
-- Traite les chunks par lots de 32 (configurable)
-- Retries automatiques en cas d'erreur API
-- Sauvegarde intermédiaire tous les ~1000 chunks
-
-#### Phase `sparse` : Chunks → Chunks + Embeddings sparses
-
-```python
-# Ligne 409-449 : Embeddings sparses spaCy
-def extract_sparse_features(text):
-    doc = nlp(text)  # spaCy fr_core_news_md
-    relevant_pos = {"NOUN", "PROPN", "ADJ", "VERB"}
-    lemmas = [token.lemma_.lower() for token in doc
-              if token.pos_ in relevant_pos
-              and not token.is_stop
-              and len(token.lemma_) > 1]
-
-    # TF normalisé avec hachage mod 100k
-    counts = Counter(lemmas)
-    for lemma, count in counts.items():
-        index = hash(lemma) % 100000
-        sparse_dict[str(index)] = count / total_lemmas_in_doc
-
-    return {"indices": [...], "values": [...]}
-```
-
-### Variables d'environnement
-
-```bash
-OPENAI_API_KEY  # Obligatoire pour embeddings + recodage
-```
-
-### Configurations internes
-
-```python
-DEFAULT_MAX_WORKERS = os.cpu_count() - 1  # Parallélisme général
-DEFAULT_BATCH_SIZE_GPT = 5                # Recodage GPT
-DEFAULT_EMBEDDING_BATCH_SIZE = 32         # Embeddings denses
-TEXT_SPLITTER:
-  - chunk_size: 1000 tokens
-  - chunk_overlap: 150 tokens
-  - separators: ["\n\n", "#", "##", "\n", " ", ""]
-```
-
----
-
-## 3. Module `rad_vectordb.py` — Insertion vectorielle
-
-### Responsabilités
-- Charger JSON avec embeddings (denses + sparses)
-- Formatter les données pour chaque provider
-- Upserter par lots vers Pinecone / Weaviate / Qdrant
-
-### Fonctions clés par provider
-
-#### Pinecone
-
-| Fonction | Localisation | Rôle |
-|----------|-------------|------|
-| `prepare_vectors_for_pinecone()` | ligne 66 | Formatte chunks → vecteurs Pinecone |
-| `upsert_batch_to_pinecone()` | ligne 29 | Upsert 1 lot avec retry |
-| `insert_to_pinecone()` | ligne 123 | Orchestration complète |
-
-```python
-# Ligne 85-95 : MÉTADONNÉES HARDCODÉES
-metadata = {
-    "title": chunk.get("title", ""),
-    "authors": chunk.get("authors", ""),
-    "date": chunk.get("date", ""),
-    "type": chunk.get("type", ""),
-    "filename": chunk.get("filename", ""),
-    "doc_id": chunk.get("doc_id", ""),
-    "chunk_index": chunk.get("chunk_index", 0),
-    "total_chunks": chunk.get("total_chunks", 0),
-    "text": chunk.get("text") or chunk.get("chunk_text", "")
-}
-```
-
-**Problème** : Métadonnées **hardcodées** ! Impossible d'injecter des colonnes CSV arbitraires.
-
-#### Weaviate
-
-| Fonction | Localisation | Rôle |
-|----------|-------------|------|
-| `insert_to_weaviate_hybrid()` | ligne 436 | Orchestration complète avec multi-tenancy |
-| `generate_uuid()` | ligne 385 | UUID v5 stable |
-| `normalize_date_to_rfc3339()` | ligne 399 | Conversion dates → RFC3339 |
-
-```python
-# Ligne 541-551 : MÉTADONNÉES HARDCODÉES (même liste)
-properties = {
-    "title": chunk.get("title", ""),
-    "authors": chunk.get("authors", ""),
-    "date": normalize_date_to_rfc3339(chunk.get("date", "")),
-    "type": chunk.get("type", ""),
-    "filename": chunk.get("filename", ""),
-    "doc_id": chunk.get("doc_id", ""),
-    "chunk_index": chunk.get("chunk_index", 0),
-    "total_chunks": chunk.get("total_chunks", 0),
-    "text": chunk.get("text") or chunk.get("chunk_text", "")
-}
-```
-
-#### Qdrant
-
-| Fonction | Localisation | Rôle |
-|----------|-------------|------|
-| `prepare_points_for_qdrant()` | ligne 604 | Formatte chunks → PointStruct |
-| `upsert_batch_to_qdrant()` | ligne 661 | Upsert 1 lot avec retry |
-| `insert_to_qdrant()` | ligne 709 | Orchestration complète |
-
-```python
-# Ligne 636-647 : MÉTADONNÉES HARDCODÉES (même liste)
-payload = {
-    "original_id": chunk["id"],
-    "title": chunk.get("title", ""),
-    "authors": chunk.get("authors", ""),
-    "date": chunk.get("date", ""),
-    "type": chunk.get("type", ""),
-    "filename": chunk.get("filename", ""),
-    "doc_id": chunk.get("doc_id", ""),
-    "chunk_index": chunk.get("chunk_index", 0),
-    "total_chunks": chunk.get("total_chunks", 0),
-    "text": chunk.get("text") or chunk.get("chunk_text", "")
-}
-```
-
-### Configurations
-
-```python
-PINECONE_BATCH_SIZE = 100
-WEAVIATE_BATCH_SIZE = 100
-QDRANT_BATCH_SIZE = 100
-```
-
-### Variables d'environnement
-
-```bash
-# Pinecone
-PINECONE_API_KEY
-PINECONE_ENV  # Optionnel selon SDK version
-
-# Weaviate
-WEAVIATE_URL
-WEAVIATE_API_KEY
-
-# Qdrant
-QDRANT_URL
-QDRANT_API_KEY  # Optionnel (instances locales)
-```
-
----
-
-## 4. Utilitaire `scripts/crawl.py` — Crawling web vers PDF/Markdown
-
-### Responsabilités
-
-Script autonome pour crawler des sites web et convertir les pages en PDF ou Markdown. Utile pour créer des sources documentaires à partir de documentation en ligne.
-
-### Fonctionnalités
-
-```python
-# Configuration (ligne 20-23)
-START_URL = "https://docs.n8n.io/integrations/"
-DOMAIN = urlparse(START_URL).netloc
-PDF_DIR = "pages_pdf"
-MD_DIR = "pages_md"
-```
-
-#### Crawling récursif (ligne 64-103)
-
-```python
-def crawl(url):
-    if url in VISITED:
-        return
-    VISITED.add(url)
-
-    # Téléchargement HTML
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Conversion PDF (pdfkit ou Playwright en fallback)
-    save_pdf(url, filename_base)
-
-    # Conversion Markdown (optionnel)
-    save_markdown(url, filename_base, soup)
-
-    # Exploration liens internes
-    for link in soup.find_all("a", href=True):
-        abs_url = urljoin(url, link["href"])
-        if is_internal_link(abs_url):
-            crawl(abs_url)  # Récursif
-```
-
-#### Conversion PDF (ligne 41-62)
-
-Deux méthodes avec fallback automatique :
-
-1. **pdfkit** (prioritaire) : Utilise `wkhtmltopdf` si disponible
-2. **Playwright** (fallback) : Émulation navigateur headless
-
-```python
-def save_pdf(url, filename_base):
-    if PDFKIT_AVAILABLE:
-        try:
-            pdfkit.from_url(url, filepath, configuration=config_pdfkit)
-            return
-        except Exception as e:
-            print(f"⚠️ Erreur pdfkit, tentative Playwright : {e}")
-
-    # Fallback Playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page()
-        page.goto(url)
-        page.pdf(path=filepath)
-        browser.close()
-```
-
-### Cas d'usage
-
-Documenter des sites entiers pour ingestion RAG :
-
-```bash
-# 1. Crawler et télécharger les PDFs
-python scripts/crawl.py  # Modifie START_URL dans le script
-
-# 2. Ingérer les PDFs dans le pipeline
-# (Via rad_dataframe.py ou directement via app/main.py)
-```
-
-### Dépendances
-
-```bash
-pip install requests beautifulsoup4 playwright pdfkit
-python -m playwright install chromium
-# Optionnel : installer wkhtmltopdf pour pdfkit
-```
-
-**Note** : Cet utilitaire est **indépendant** du pipeline principal. Il crée des PDFs qui peuvent ensuite être traités par `rad_dataframe.py`.
-
----
-
-## Points critiques identifiés pour l'ingestion CSV
-
-### 1. Variable pivot unique : `texteocr`
-
-| Point de création/consommation | Fichier | Ligne |
-|-------------------------------|---------|-------|
-| **Création (OCR)** | rad_dataframe.py | 508 |
-| **Consommation (chunking)** | rad_chunk.py | 199 |
-
-**Conclusion** : `texteocr` est le **seul point d'entrée** du contenu textuel dans le pipeline. Pour ingérer du CSV, il suffit de mapper une colonne CSV → `texteocr`.
-
-### 2. Métadonnées hardcodées (3 emplacements)
-
-| Emplacement | Fichier | Ligne | Impact |
-|------------|---------|-------|--------|
-| Création chunks | rad_chunk.py | 250-263 | Colonnes CSV non listées → perdues |
-| Préparation Pinecone | rad_vectordb.py | 85-95 | Impossible d'ajouter champs CSV |
-| Préparation Weaviate | rad_vectordb.py | 541-551 | Impossible d'ajouter champs CSV |
-| Préparation Qdrant | rad_vectordb.py | 636-647 | Impossible d'ajouter champs CSV |
-
-**Conclusion** : Les 3 connecteurs utilisent la **même liste hardcodée** de champs. Refactorisation nécessaire pour accepter des métadonnées dynamiques.
-
-### 3. Logique de recodage GPT liée à `texteocr_provider` ✅ **IMPLÉMENTÉ 2025-01-25**
-
-```python
-# rad_chunk.py:232-237 (MISE À JOUR)
-provider = str(row_data.get("texteocr_provider", "")).lower()
-recode_required = provider not in ("mistral", "csv")  # ✅ CSV supporté !
-```
-
-**Statut** : ✅ **RÉSOLU** - L'ingestion CSV ajoute automatiquement `source_type="csv"` et le script skip le recodage GPT, économisant des coûts API.
-
-### 4. Fonction `sanitize_metadata_value()` (ligne 242-248)
-
-Gère les types incompatibles JSON/Pinecone :
-- Convertit `pd.NA` / `np.nan` → chaîne vide
-- Assure types primitifs : str, int, float, bool
-- Fallback vers `str(value)`
-
-**Bon point** : Déjà robuste pour gérer des colonnes CSV hétérogènes !
-
----
-
-## Dépendances du pipeline
-
-### Dépendances Python critiques
-
-```txt
-# Chunking & NLP
-langchain-text-splitters  # RecursiveCharacterTextSplitter
-spacy==3.x + fr_core_news_md
-
-# Embeddings & OCR
-openai>=1.x
-mistralai
-requests
-
-# Manipulation données
-pandas
-tqdm
-python-dotenv
-
-# Bases vectorielles
-pinecone>=3.x          # SDK v3+ avec Pinecone class
-weaviate-client>=4.x   # Multi-tenancy support
-qdrant-client
-
-# Utilitaires
-python-dateutil        # Pour Weaviate RFC3339
-fitz (PyMuPDF)         # Fallback OCR legacy
-```
-
-### Modèles externes
-
-| Service | Modèle par défaut | Usage |
-|---------|------------------|-------|
-| Mistral OCR | `mistral-ocr-latest` | Extraction PDF → Markdown |
-| OpenAI vision | `gpt-4o-mini` | Fallback OCR |
-| OpenAI recodage | `gpt-4o-mini` | Nettoyage chunks OCR bruts |
-| OpenAI embeddings | `text-embedding-3-large` | Embeddings denses (3072 dim) |
-| spaCy | `fr_core_news_md` | Lemmatisation + POS tagging |
-
----
-
-## État de la refactorisation et opportunités futures
-
-### ✅ Opportunité 1 : Abstraction de la source de `texteocr` — **IMPLÉMENTÉE**
-
-**État actuel** : ✅ **RÉALISÉ** via `core/document.py` et `ingestion/csv_ingestion.py`
-
-```python
-# core/document.py - Abstraction unifiée
-@dataclass
-class Document:
-    texteocr: str
-    meta: Dict[str, Any]
-
-# ingestion/csv_ingestion.py - Implémentation CSV
-def ingest_csv(csv_path, config) -> List[Document]:
-    # Lecture CSV → mapping colonne → Document
-    pass
-
-# Workflow complet
-documents = ingest_csv("data.csv", config)
-df = pd.DataFrame([doc.to_dict() for doc in documents])
-df.to_csv("output.csv")  # Compatible rad_chunk.py
-```
-
-**Statut** : ✅ **Implémenté** - La classe `Document` et l'ingestion CSV sont opérationnelles depuis le développement récent.
-
-### Opportunité 2 : Métadonnées dynamiques
-
-**État actuel** : Liste de 10 champs hardcodée dans 4 emplacements.
-
-**Cible** : Remplacer par une **injection complète de `meta`** :
-
-```python
-# rad_chunk.py - AVANT
+# Problème: Métadonnées hardcodées limitant l'extensibilité
+# Fichier: rad_chunk.py:250-263, rad_vectordb.py (3 emplacements)
 chunk_metadata = {
     "title": row_data.get("title", ""),
     "authors": row_data.get("authors", ""),
-    # ... 8 autres champs
+    # ... 8 autres champs hardcodés
 }
-
-# rad_chunk.py - APRÈS
-chunk_metadata = {
-    "id": ...,
-    "text": ...,
-    **row_data.get("meta", {})  # Injection de toutes les métadonnées
-}
+# Impact: Colonnes CSV personnalisées perdues → Limitation CSV
 ```
 
+### 🚀 **API et endpoints**
+
+L'application FastAPI expose **16 endpoints principaux** couvrant l'intégralité du pipeline :
+
+#### **Endpoints de traitement de fichiers**
+- `POST /upload_zip` - Upload archives Zotero
+- `POST /upload_csv` - Ingestion CSV directe 
+- `POST /upload_stage_file/{stage}` - Artifacts intermédiaires
+
+#### **Pipeline de traitement**
+- `POST /process_dataframe` - Extraction PDF/OCR
+- `POST /initial_text_chunking` - Génération chunks
+- `POST /dense_embedding_generation` - Embeddings OpenAI
+- `POST /sparse_embedding_generation` - Embeddings spaCy
+- `POST /upload_db` - Insertion bases vectorielles
+
+#### **Fonctionnalités avancées**
+- **Server-Sent Events (SSE)** pour suivi temps réel
+- **Gestion de sessions** avec répertoires uniques
+- **Configuration dynamique** des credentials
+- **Intégration Zotero** bidirectionnelle
+
+#### **Sécurité actuelle**
 ```python
-# rad_vectordb.py - AVANT
-metadata = {
-    "title": chunk.get("title", ""),
-    # ... liste hardcodée
-}
-
-# rad_vectordb.py - APRÈS
-metadata = {k: v for k, v in chunk.items()
-            if k not in ("id", "embedding", "sparse_embedding", "text")}
-# Ou : metadata = chunk.get("meta", {})
+# Configuration CORS permissive (développement)
+app.add_middleware(CORSMiddleware, allow_origins=["*"])
+# Recommandation: Restreindre en production
 ```
 
-### Opportunité 3 : Configuration CSV flexible
+### 🔄 **Pipeline de traitement des données**
 
-```yaml
-# config/csv_config.yaml
-csv:
-  text_column: "text"        # Colonne source de texteocr
-  encoding: "auto"            # utf-8, latin-1, auto-detect
-  delimiter: ","
-  meta_columns: []            # Si vide : toutes sauf text_column
-  skip_empty: true            # Ignorer lignes avec texte vide
-  add_metadata:
-    source_type: "csv"
-    ingested_at: "{{timestamp}}"
+#### **Flux de données end-to-end**
+
+```mermaid
+graph TD
+    A[Sources multiples] --> B[Extraction normalisée]
+    B --> C[Document unifié]
+    C --> D[Chunking intelligent]
+    D --> E[Embeddings hybrides]
+    E --> F[Stockage vectoriel]
+    
+    A1[Zotero JSON + PDFs] --> B1[OCR Multi-provider]
+    A2[CSV Direct] --> B2[Mapping colonnes]
+    A3[Fichiers manuels] --> B3[Traitement unifié]
+    
+    B1 --> C1[output.csv]
+    B2 --> C1
+    B3 --> C1
+    
+    C1 --> D1[RecursiveTextSplitter]
+    D1 --> D2[Recodage GPT conditionnel]
+    D2 --> E1[OpenAI dense 3072D]
+    E1 --> E2[spaCy sparse 100kD]
+    E2 --> F1[Pinecone/Weaviate/Qdrant]
 ```
 
-### ✅ Opportunité 4 : Classe `Document` unifiée — **IMPLÉMENTÉE**
+#### **Transformations de données critiques**
 
-**État actuel** : ✅ **RÉALISÉ** dans `core/document.py`
+**1. Hiérarchie OCR avec fallback intelligent**
+```python
+# Ordre de priorité automatique
+Mistral OCR (Markdown) → OpenAI Vision → PyMuPDF Legacy
+     ↓                      ↓              ↓
+   Skip recodage         Recodage GPT   Recodage lourd
+   (économie 80%)       (coût standard) (coût maximum)
+```
 
+**2. Chunking adaptatif**
+- **Tokens**: 1000 (overlap 150) pour `text-embedding-3-large`
+- **Séparateurs**: `["\n\n", "#", "##", "\n", " ", ""]`
+- **Recodage conditionnel**: Skip si `texteocr_provider="mistral"` ou `"csv"`
+
+**3. Embeddings hybrides optimisés**
+```python
+# Dense: Similarité sémantique (OpenAI)
+embedding_dense = client.embeddings.create(
+    input=chunks, model="text-embedding-3-large"
+)  # 3072 dimensions
+
+# Sparse: Correspondance lexicale (spaCy français)
+sparse_features = extract_sparse_features(text)  # TF normalisé
+# Hash-based indexing: hash(lemma) % 100,000 → 100k dimensions
+```
+
+#### **Points d'intégration clés**
+
+**Classe Document unifiée** (architecture solide):
 ```python
 @dataclass
 class Document:
-    texteocr: str
-    meta: Dict[str, Any]
-
-    def __post_init__(self):
-        if not self.texteocr or not self.texteocr.strip():
-            raise ValueError("texteocr ne peut pas être vide")
-        if "source_type" not in self.meta:
-            self.meta["source_type"] = "unknown"
-
+    texteocr: str                    # Variable pivot unique
+    meta: Dict[str, Any]            # Métadonnées extensibles
+    
     def to_dict(self) -> Dict[str, Any]:
         return {"texteocr": self.texteocr, **self.meta}
 ```
 
-**Statut** : ✅ **Implémenté** - Toutes les sources d'ingestion utilisent cette classe.
-
----
-
-## Risques identifiés
-
-| Risque | Probabilité | Mitigation |
-|--------|-------------|------------|
-| Métadonnées CSV trop volumineuses pour Pinecone | Moyenne | Filtrer/tronquer les valeurs longues + warning |
-| Régression sur pipeline PDF | Faible | Suite de tests de non-régression |
-| CSV mal encodés | Élevée | Détection auto (chardet) + fallback UTF-8 |
-| Colonnes CSV avec noms invalides (espaces, spéciaux) | Moyenne | Sanitisation via `re.sub(r'[^a-zA-Z0-9_]', '_', col)` |
-| Recodage GPT activé par erreur sur CSV | Moyenne | Ajout de `texteocr_provider="csv"` automatique |
-
----
-
-## Prochaines étapes recommandées
-
-### Phase 1 : Amélioration de l'intégration CSV ✅ **PARTIELLEMENT RÉALISÉE**
-
-1. ✅ **Module `csv_ingestion.py`** — IMPLÉMENTÉ
-   - ✅ Fonction `ingest_csv()` → `List[Document]`
-   - ✅ Configuration du mapping colonnes via `CSVIngestionConfig`
-   - ✅ Validations et logging
-
-2. ✅ **Support CSV dans `rad_chunk.py`** — IMPLÉMENTÉ
-   - ✅ Condition `provider in ("mistral", "csv")` pour skip recodage
-   - ✅ Support OpenRouter pour réduction des coûts (2025-01-25)
-
-3. ⚠️ **Refactorisation de `rad_vectordb.py`** — EN ATTENTE
-   - ❌ Métadonnées toujours hardcodées dans les 3 connecteurs
-   - ❌ Injection dynamique de `meta` non implémentée
-   - Impact : Les métadonnées CSV personnalisées ne sont pas insérées dans les bases vectorielles
-
-### Phase 2 : Tests et validation
-
-1. ⚠️ **Tests de bout en bout** — PARTIELLEMENT TESTÉS
-   - ✅ Ingestion CSV → chunks → embeddings fonctionne
-   - ❌ Vérification complète de l'injection des métadonnées CSV dans Pinecone/Weaviate/Qdrant
-   - ❌ Tests de recherche avec filtres sur métadonnées CSV personnalisées
-
-### Phase 3 : Améliorations futures
-
-1. **Interface web pour CSV direct** — EN COURS
-   - ⚠️ Endpoint `/upload_csv_direct` existe dans app/main.py mais nécessite intégration UI complète
-
-2. **Configuration flexible** — À DÉVELOPPER
-   - Créer un système de configuration YAML/JSON pour le mapping CSV
-   - Permettre la configuration via l'interface web
-
----
-
-## Conclusion
-
-**État actuel (2025-01-25)** :
-
-Le pipeline RAGpy a considérablement évolué depuis sa documentation initiale :
-
-### ✅ Réalisations majeures
-
-1. **Orchestration web complète** via `app/main.py` (1042 lignes)
-   - Interface utilisateur intuitive
-   - Gestion de sessions et uploads
-   - Configuration credentials via UI
-
-2. **Ingestion multi-sources** :
-   - ✅ PDF/OCR (Mistral → OpenAI → PyMuPDF)
-   - ✅ CSV direct (`ingestion/csv_ingestion.py`)
-   - ✅ Classe `Document` unifiée (`core/document.py`)
-
-3. **Optimisation des coûts** :
-   - ✅ Support OpenRouter (économie ~75% sur recodage)
-   - ✅ Skip recodage automatique pour CSV et Mistral OCR
-
-4. **Robustesse** :
-   - ✅ Logging centralisé
-   - ✅ Gestion d'erreurs subprocess
-   - ✅ Timeouts configurables
-
-### ⚠️ Points d'attention
-
-1. **Métadonnées vectorielles** : Les 3 connecteurs (Pinecone/Weaviate/Qdrant) ont toujours des métadonnées hardcodées. Les colonnes CSV personnalisées ne sont pas injectées dans les bases vectorielles.
-
-2. **Tests E2E** : L'injection complète CSV → base vectorielle avec métadonnées personnalisées n'a pas été validée.
-
-### 🎯 Recommandation prioritaire
-
-**Refactoriser `rad_vectordb.py`** pour accepter des métadonnées dynamiques :
-
+**Gestion des providers OCR**:
 ```python
-# Au lieu de :
-metadata = {"title": chunk.get("title"), "authors": ..., ...}
+# Auto-détection et fallback
+provider_hierarchy = ["mistral", "openai", "legacy"]
+ocr_result = extract_text_with_ocr(pdf_path, return_details=True)
+# → OCRResult(text, provider) pour traçabilité complète
+```
 
-# Utiliser :
+### ⚙️ **Configuration et environnement**
+
+#### **Gestion des variables d'environnement**
+
+**Variables obligatoires**:
+```bash
+OPENAI_API_KEY=sk-...  # Embeddings + recodage
+```
+
+**Variables d'optimisation**:
+```bash
+# Réduction coûts (~75% économie)
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_DEFAULT_MODEL=openai/gemini-2.5-flash
+
+# OCR premium
+MISTRAL_API_KEY=...
+MISTRAL_OCR_MODEL=mistral-ocr-latest
+```
+
+**Bases vectorielles** (au moins une requise):
+```bash
+# Pinecone
+PINECONE_API_KEY=pcsk-...
+PINECONE_ENV=https://your-index.svc.aped.pinecone.io
+
+# Weaviate
+WEAVIATE_URL=https://your-cluster.weaviate.network
+WEAVIATE_API_KEY=...
+
+# Qdrant  
+QDRANT_URL=https://your-cluster.qdrant.tech
+QDRANT_API_KEY=...
+```
+
+**Intégration Zotero** (recherche académique):
+```bash
+ZOTERO_API_KEY=...     # Génération notes automatiques
+ZOTERO_USER_ID=...     # Auto-détecté depuis exports
+ZOTERO_GROUP_ID=...    # Support bibliothèques de groupe
+```
+
+#### **Configuration CSV flexible**
+
+```yaml
+# config/csv_config.yaml
+csv:
+  text_column: "text"           # Colonne source → texteocr
+  encoding: "auto"              # Détection chardet
+  delimiter: ","
+  meta_columns: []              # Si vide: toutes sauf text_column
+  skip_empty: true              # Ignorer lignes vides
+  add_row_index: true           # Métadonnées row_index
+  source_type: "csv"            # Type pour Document
+```
+
+#### **Patterns de déploiement**
+
+**Démarrage serveur**:
+```bash
+# Développement
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Production (via script CLI)
+./ragpy_cli.sh start  # Gestion arrière-plan + logs
+```
+
+**Structure de sessions**:
+```
+uploads/
+├── session_abc123/          # Session utilisateur unique
+│   ├── uploaded_files/      # Archives/CSV uploadés
+│   ├── output.csv          # Résultat extraction
+│   ├── output_chunks.json  # Chunks initiaux
+│   ├── output_chunks_with_embeddings.json      # + Embeddings denses
+│   ├── output_chunks_with_embeddings_sparse.json  # + Embeddings sparses
+│   └── *.log              # Logs spécifiques session
+```
+
+### 🔍 **Intégrations externes**
+
+#### **Services LLM et OCR**
+- **OpenAI**: Embeddings (`text-embedding-3-large`) + completion (`gpt-4o-mini`)
+- **OpenRouter**: Alternative économique (75% moins cher)
+- **Mistral**: OCR premium avec sortie Markdown
+- **spaCy**: NLP français (`fr_core_news_md`) pour embeddings sparse
+
+#### **Bases vectorielles supportées**
+- **Pinecone**: Hybrid search (dense + sparse), namespaces
+- **Weaviate**: Multi-tenant, hybrid search
+- **Qdrant**: Vector similarity, local/cloud
+
+#### **Recherche académique**
+- **Zotero**: Extraction métadonnées + génération notes automatiques
+- **Support PDF**: OCR multi-provider avec fallback
+- **Export bidirectionnel**: Notes générées → bibliothèque Zotero
+
+---
+
+## Points critiques pour l'ingestion CSV
+
+### 🎯 **Variable pivot unique: `texteocr`**
+
+| Point de création/consommation | Fichier | Ligne | Status |
+|-------------------------------|---------|-------|--------|
+| **Création (OCR)** | rad_dataframe.py | 508 | ✅ Stable |
+| **Création (CSV)** | csv_ingestion.py | 377 | ✅ Implémenté |
+| **Consommation (chunking)** | rad_chunk.py | 199 | ✅ Unifié |
+
+**Conclusion**: L'abstraction `texteocr` fonctionne parfaitement pour unifier toutes les sources d'ingestion.
+
+### ⚠️ **Métadonnées hardcodées (problème majeur)**
+
+| Emplacement | Fichier | Ligne | Impact | Priorité |
+|------------|---------|-------|--------|----------|
+| Création chunks | rad_chunk.py | 250-263 | Colonnes CSV perdues | **CRITIQUE** |
+| Pinecone | rad_vectordb.py | 85-95 | Pas de métadonnées CSV | **CRITIQUE** |
+| Weaviate | rad_vectordb.py | 541-551 | Pas de métadonnées CSV | **CRITIQUE** |
+| Qdrant | rad_vectordb.py | 636-647 | Pas de métadonnées CSV | **CRITIQUE** |
+
+**Impact**: Les métadonnées CSV personnalisées ne remontent pas dans les bases vectorielles, limitant sévèrement les capacités de filtrage.
+
+**Solution recommandée**:
+```python
+# Remplacer les métadonnées hardcodées par injection dynamique
 metadata = {k: v for k, v in chunk.items()
             if k not in ("id", "embedding", "sparse_embedding", "text")}
 ```
 
-Cela permettra aux métadonnées CSV de se propager jusqu'aux bases vectorielles, débloquant les cas d'usage de filtrage avancé.
+### ✅ **Optimisations de coût implémentées**
+
+```python
+# rad_chunk.py:232-237 - Logique de recodage intelligente
+provider = str(row_data.get("texteocr_provider", "")).lower()
+recode_required = provider not in ("mistral", "csv")  # ✅ CSV skip GPT
+
+# Support OpenRouter (économie ~75%)
+use_openrouter = "/" in model  # Auto-détection provider/model
+```
+
+**Résultat**: CSV et Mistral OCR évitent automatiquement le recodage GPT coûteux.
+
+---
+
+## Architecture des tests
+
+### 📋 **Couverture de tests actuelle**
+
+**Tests implémentés** (excellente qualité):
+- ✅ **CSV ingestion pipeline** - 5 scénarios détaillés
+- ✅ **Client Zotero** - Tests intégration API
+- ✅ **Génération notes LLM** - Validation contenu
+- ✅ **Classe Document** - Tests modèle de données
+- ✅ **Configuration** - Chargement settings et prompts
+
+**Lacunes identifiées**:
+- ❌ **Application FastAPI** - Pas de tests intégration endpoints
+- ❌ **Opérations bases vectorielles** - Tests limités Pinecone/Weaviate/Qdrant
+- ❌ **Pipeline PDF** - OCR et extraction non testés
+- ❌ **Cas d'erreur** - Tests négatifs insuffisants
+- ❌ **Performance** - Pas de tests charge
+
+### 🔧 **Recommandations d'amélioration**
+
+**Tests prioritaires à ajouter**:
+```python
+# 1. Tests intégration FastAPI
+@pytest.fixture
+def test_client():
+    return TestClient(app)
+
+def test_upload_csv_endpoint(test_client):
+    # Test complet upload CSV → chunking → embeddings
+    
+# 2. Tests bout-en-bout
+def test_csv_to_vectordb_complete_pipeline():
+    # CSV → Document → chunks → embeddings → insertion DB
+    
+# 3. Tests performance
+def test_large_document_processing():
+    # Benchmark 1000+ documents
+```
+
+---
+
+## Dépendances et écosystème
+
+### 📦 **Dépendances critiques**
+
+```python
+# Core pipeline
+langchain-text-splitters==0.3.x  # Chunking intelligent
+spacy==3.7.x                     # NLP français
+openai>=1.50.x                   # Embeddings + completion
+pandas>=2.0.x                    # Manipulation données
+
+# Vector databases
+pinecone>=3.x                    # SDK v3+ Pinecone class
+weaviate-client>=4.x             # Multi-tenancy support
+qdrant-client>=1.x               # Vector search
+
+# Web interface
+fastapi>=0.100.x                 # API moderne
+uvicorn>=0.24.x                  # ASGI server performant
+python-multipart>=0.0.6          # Upload fichiers
+
+# OCR et processing
+mistralai>=1.x                   # OCR premium
+pymupdf>=1.23.x                  # Fallback PDF
+requests>=2.31.x                 # HTTP client
+```
+
+### 🔒 **Considérations de sécurité**
+
+**Issues actuelles**:
+- Dépendances sans version épinglée → vulnérabilités potentielles
+- CORS permissif en développement
+- Pas d'authentification sur endpoints sensibles
+- Validation d'entrée limitée
+
+**Recommandations**:
+1. **Épingler les versions** exactes dans requirements.txt
+2. **Scan vulnérabilités** avec `pip-audit` ou `safety`
+3. **Authentification JWT** pour endpoints critiques
+4. **Validation stricte** avec Pydantic models
+5. **Rate limiting** sur endpoints API
+
+---
+
+## Roadmap et opportunités
+
+### 🎯 **Améliorations prioritaires**
+
+#### **Phase 1: Résolution métadonnées (CRITIQUE)**
+```python
+# Objectif: Permettre injection métadonnées CSV dans bases vectorielles
+# Effort: 2-3 jours développement + tests
+# Impact: Déblocage complet des cas d'usage CSV
+
+# Refactorisation rad_chunk.py
+chunk_metadata = {
+    "id": f"{doc_id}_{chunk_index}",
+    "text": cleaned_text,
+    **{k: v for k, v in row_data.items() 
+       if k not in ["texteocr", "id", "text"]}  # Injection dynamique
+}
+
+# Refactorisation rad_vectordb.py (3 connecteurs)
+metadata = {k: v for k, v in chunk.items()
+            if k not in ["embedding", "sparse_embedding"]}
+```
+
+#### **Phase 2: Refactorisation app/main.py**
+- Découpage en modules thématiques (auth, upload, processing, config)
+- Extraction logique métier vers services dédiés
+- Amélioration gestion d'erreurs et validation
+
+#### **Phase 3: Tests et sécurité**
+- Suite tests intégration FastAPI
+- Tests end-to-end pipeline complet
+- Audit sécurité et épinglage dépendances
+
+### 🚀 **Fonctionnalités futures**
+
+**Améliorations techniques**:
+- **Containerisation Docker** pour déploiement simplifié
+- **Processing distribué** pour gros corpus (Celery/RQ)
+- **Cache intelligent** pour embeddings (Redis)
+- **Monitoring observabilité** (métriques, traces)
+
+**Fonctionnalités utilisateur**:
+- **Authentification multi-utilisateurs**
+- **Gestion de projets** avec historique
+- **API REST complète** pour intégrations externes
+- **Tableau de bord** analytics et métriques
+
+---
+
+## Conclusion et recommandations
+
+### ✅ **Forces du système actuel**
+
+1. **Architecture modulaire excellente** avec séparation claire des responsabilités
+2. **Pipeline robuste** supportant sources multiples et providers multiples
+3. **Optimisation coûts avancée** (OpenRouter, skip recodage intelligent)
+4. **Interface utilisateur moderne** avec suivi temps réel (SSE)
+5. **Intégration recherche académique** sophistiquée (Zotero bidirectionnel)
+
+### ⚠️ **Limitations critiques à résoudre**
+
+1. **Métadonnées hardcodées** empêchant l'exploitation complète du CSV
+2. **Monolithe app/main.py** nécessitant refactorisation urgente
+3. **Tests d'intégration insuffisants** pour garantir la fiabilité
+4. **Sécurité** inadaptée pour usage production
+
+### 🎯 **Action immédiate recommandée**
+
+**Priorité absolue**: Résoudre le problème des métadonnées hardcodées pour débloquer complètement l'ingestion CSV. Cette refactorisation permettra aux colonnes CSV personnalisées de se propager jusqu'aux bases vectorielles, ouvrant tous les cas d'usage de filtrage avancé.
+
+**Effort estimé**: 2-3 jours de développement + 1 jour de tests
+**Impact**: Transformation RAGpy en solution complètement flexible pour tout type de données structurées
+
+Le système RAGpy démontre déjà des **fondations architecturales excellentes** et une **vision produit claire**. Avec la résolution des limitations identifiées, il peut devenir une solution RAG de référence pour la recherche académique et au-delà.

@@ -1,8 +1,13 @@
-# Agents CLI – Vibe Coding
+# RAGpy - Guide d'utilisation et architecture
 
-Ce document décrit en détail les agents en ligne de commande disponibles dans le projet `ragpy`. Il s'adresse aux utilisateurs des CLI Vibe Coding qui souhaitent orchestrer et automatiser le pipeline RAG sans passer par l'interface web.
+**Date de création** : 2025-10-21  
+**Dernière mise à jour** : 2025-11-22 (mise à jour complète avec analyse architecturale)
 
-> Astuce interface : dans l'UI FastAPI, les étapes 3.1 à 3.3 proposent un couple « Upload » / « Generate » pour réinjecter respectivement `output.csv`, `output_chunks.json` ou `output_chunks_with_embeddings.json`. Sans fichier téléversé, l'étape réutilise automatiquement le résultat précédent afin de reprendre un traitement interrompu.
+Ce document constitue le guide de référence pour le projet **RAGpy**, un pipeline sophistiqué de Retrieval-Augmented Generation conçu pour traiter des documents académiques. Il couvre l'utilisation des agents CLI, l'architecture du système et les bonnes pratiques d'implémentation.
+
+> **Note d'architecture** : RAGpy combine une interface web FastAPI moderne avec un pipeline modulaire de traitement. L'application supporte multiple sources d'ingestion (Zotero+PDFs, CSV direct, fichiers manuels) et s'intègre avec diverses bases vectorielles (Pinecone, Weaviate, Qdrant).
+
+> **Astuce interface** : dans l'UI FastAPI, les étapes 3.1 à 3.3 proposent un couple « Upload » / « Generate » pour réinjecter respectivement `output.csv`, `output_chunks.json` ou `output_chunks_with_embeddings.json`. Sans fichier téléversé, l'étape réutilise automatiquement le résultat précédent afin de reprendre un traitement interrompu.
 
 ## Vue d'ensemble des agents
 
@@ -98,11 +103,28 @@ Enrichir le CSV issu de `rad_dataframe.py` via trois phases successives:
 3. Embeddings sparses spaCy (`*_chunks_with_embeddings_sparse.json`).
 
 ### Dépendances & environnement
-- `OPENAI_API_KEY` obligatoire (saisi via `.env` ou prompt interactif).
-- Librairies: `langchain_text_splitters`, `openai`, `spacy` (`fr_core_news_md` téléchargé si absent), `tqdm`, `pandas`.
-- Concurrency: `ThreadPoolExecutor` (par défaut `os.cpu_count() - 1`).
-- Sauvegarde thread-safe avec un verrou global `SAVE_LOCK`.
-- Si `texteocr_provider` vaut `mistral`, la phase initiale saute le recodage GPT et réutilise les chunks Markdown tels quels pour éviter des appels OpenAI inutiles.
+
+**Variables d'environnement obligatoires** :
+- `OPENAI_API_KEY` - Embeddings + recodage GPT (saisi via `.env` ou prompt interactif)
+
+**Variables d'optimisation** :
+- `OPENROUTER_API_KEY` - Alternative économique (~75% économie sur recodage)
+- `OPENROUTER_DEFAULT_MODEL` - Modèle par défaut (ex: `openai/gemini-2.5-flash`)
+
+**Librairies requises** :
+- `langchain_text_splitters` - Chunking intelligent avec RecursiveTextSplitter
+- `openai` - API embeddings et completion
+- `spacy` (`fr_core_news_md`) - NLP français pour embeddings sparse
+- `tqdm`, `pandas` - Utilitaires et manipulation données
+
+**Configuration système** :
+- Concurrency: `ThreadPoolExecutor` (par défaut `os.cpu_count() - 1`)
+- Sauvegarde thread-safe avec verrou global `SAVE_LOCK`
+- Chunking optimisé pour `text-embedding-3-large` (1000 tokens, overlap 150)
+
+**Logique d'optimisation coûts** :
+- Si `texteocr_provider` vaut `mistral` ou `csv` → skip recodage GPT automatiquement
+- Support OpenRouter pour réduction drastique des coûts API
 
 ### Paramètres CLI
 ```bash
@@ -116,10 +138,26 @@ python scripts/rad_chunk.py \
 - `--phase` : `initial`, `dense`, `sparse`, ou `all` (enchaîne les trois).
 
 ### Détails par phase
-- **initial** : lit un CSV, découpe le champ `texteocr` en chunks (~2 500 tokens avec chevauchement 250), recode via GPT (`gpt-4o-mini`) uniquement si l'OCR ne provient pas de Mistral, puis sauvegarde `output_chunks.json`.
+
+- **initial** : lit un CSV, découpe le champ `texteocr` en chunks (~1 000 tokens avec chevauchement 150), recode via GPT (`gpt-4o-mini`) uniquement si l'OCR ne provient pas de Mistral ou CSV direct, puis sauvegarde `output_chunks.json`.
 - **dense** : attend un fichier `_chunks.json`, génère les embeddings denses OpenAI (`text-embedding-3-large`), écrit `_chunks_with_embeddings.json`.
 - **sparse** : attend `_chunks_with_embeddings.json`, dérive les features spaCy (POS filtrés, lemmas, TF normalisé, hachage mod 100 000), sauvegarde `_chunks_with_embeddings_sparse.json`.
 - **all** : enchaîne les trois sous-étapes avec journalisation dans `<output>/chunking.log`.
+
+### Support OpenRouter (économie coûts)
+
+Le script supporte **OpenRouter** comme alternative économique (~75% moins cher) pour le recodage GPT :
+
+```bash
+# Utiliser OpenAI (défaut)
+python scripts/rad_chunk.py --input data.csv --output ./out --phase initial
+
+# Utiliser OpenRouter (économique)
+python scripts/rad_chunk.py --input data.csv --output ./out --phase initial \
+  --model openai/gemini-2.5-flash
+```
+
+**Auto-détection** : Les modèles avec format `provider/model` utilisent automatiquement OpenRouter. Fallback vers OpenAI si OpenRouter indisponible.
 
 ### Comportement complémentaire
 - Si la clé OpenAI est absente, le script la demande et propose de la stocker via `python-dotenv`.
@@ -234,9 +272,133 @@ PY
 
 ---
 
-## Conseils opérationnels Vibe Coding
+## Interface web FastAPI
 
-- Centraliser les clés dans `.env` et utiliser `source .env` lors des sessions live.
-- Sur machine partagée, nettoyer les zip/upload dans `uploads/` après usage.
-- Capitaliser les logs (`logs/app.log`, `logs/pdf_processing.log`, `<output>/chunking.log`) pour documenter les ateliers.
-- Vérifier systématiquement la taille des lots et les quotas API avant de lancer des traitements massifs.
+### Démarrage et gestion
+```bash
+# Démarrage développement
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Gestion via script CLI
+./ragpy_cli.sh start    # Démarrage arrière-plan
+./ragpy_cli.sh close    # Arrêt propre
+./ragpy_cli.sh kill     # Arrêt forcé + nettoyage processus
+```
+
+### Endpoints principaux
+- **Upload** : `POST /upload_zip`, `POST /upload_csv` - Ingestion multi-sources
+- **Processing** : `POST /process_dataframe`, `/initial_text_chunking`, `/dense_embedding_generation`
+- **Vector DB** : `POST /upload_db` - Insertion Pinecone/Weaviate/Qdrant
+- **Zotero** : `POST /generate_zotero_notes` - Génération notes académiques automatiques
+- **Configuration** : `GET/POST /get_credentials`, `/save_credentials` - Gestion API keys
+
+### Fonctionnalités avancées
+- **Server-Sent Events (SSE)** pour suivi temps réel des traitements longs
+- **Gestion de sessions** avec répertoires uniques par utilisateur
+- **Upload artifacts intermédiaires** pour reprendre traitements interrompus
+- **Interface credentials** pour configuration API keys via UI
+
+---
+
+## Ingestion CSV directe
+
+### Module csv_ingestion.py
+
+Permet d'injecter des fichiers CSV dans le pipeline en **contournant l'OCR** :
+
+```python
+from ingestion.csv_ingestion import ingest_csv, CSVIngestionConfig
+
+# Configuration flexible
+config = CSVIngestionConfig(
+    text_column="description",      # Colonne source du texte
+    encoding="auto",                # Détection automatique encoding
+    skip_empty=True,                # Ignorer lignes vides
+    add_row_index=True              # Ajouter métadonnées row_index
+)
+
+# Ingestion
+documents = ingest_csv("data.csv", config)
+df = pd.DataFrame([doc.to_dict() for doc in documents])
+df.to_csv("output.csv", index=False)  # Compatible pipeline
+```
+
+### Avantages
+- **Économie API** : Pas de recodage GPT (texteocr_provider="csv")
+- **Métadonnées préservées** : Toutes colonnes CSV conservées
+- **Validation robuste** : Gestion encoding, erreurs, lignes vides
+- **Flexibilité** : Configuration mapping colonnes via YAML
+
+---
+
+## Architecture et points critiques
+
+### Problème métadonnées hardcodées ⚠️
+
+**Issue majeure** : Les métadonnées sont hardcodées dans 4 emplacements du pipeline :
+
+```python
+# rad_chunk.py:250-263 & rad_vectordb.py (3 connecteurs)
+chunk_metadata = {
+    "title": row_data.get("title", ""),
+    "authors": row_data.get("authors", ""),
+    # ... 8 autres champs hardcodés
+}
+# Impact: Colonnes CSV personnalisées perdues → Limitation filtrage vectoriel
+```
+
+**Solution recommandée** :
+```python
+# Injection dynamique de toutes les métadonnées
+metadata = {k: v for k, v in chunk.items()
+            if k not in ("id", "embedding", "sparse_embedding", "text")}
+```
+
+### Forces architecturales ✅
+
+- **Modularité excellente** : Séparation claire des responsabilités
+- **Classe Document unifiée** : Abstraction robuste pour toutes sources
+- **Pipeline flexible** : Support multi-sources et multi-providers
+- **Optimisation coûts** : OpenRouter, skip recodage intelligent
+- **Intégration académique** : Zotero bidirectionnel sophistiqué
+
+### Dépendances critiques
+
+```python
+# Pipeline core
+langchain-text-splitters==0.3.x  # Chunking intelligent
+openai>=1.50.x                   # Embeddings + completion
+spacy==3.7.x                     # NLP français
+pandas>=2.0.x                    # Manipulation données
+
+# Vector databases
+pinecone>=3.x                    # Hybrid search
+weaviate-client>=4.x             # Multi-tenancy
+qdrant-client>=1.x               # Vector similarity
+
+# Web interface
+fastapi>=0.100.x                 # API moderne
+uvicorn>=0.24.x                  # ASGI server
+```
+
+---
+
+## Conseils opérationnels et bonnes pratiques
+
+### Développement et debugging
+- **Centraliser les clés** dans `.env` et utiliser `source .env` lors des sessions
+- **Contrôler les logs** : `logs/app.log`, `logs/pdf_processing.log`, `<output>/chunking.log`
+- **Valider par étapes** : Lancer `initial` seul avant `dense`/`sparse` pour valider coûts
+- **Optimiser concurrence** : Ajuster `DEFAULT_MAX_WORKERS` selon quotas API
+
+### Production et sécurité
+- **Épingler versions** dans requirements.txt pour éviter vulnérabilités
+- **Restreindre CORS** : Modifier configuration permissive développement
+- **Authentification** : Ajouter JWT pour endpoints sensibles
+- **Validation stricte** : Implémenter Pydantic models pour validation entrées
+
+### Optimisation performances
+- **Session cleanup** : Nettoyer `uploads/` après usage sur machines partagées
+- **Batch sizing** : Vérifier tailles lots et quotas API avant traitements massifs
+- **Monitoring** : Surveiller usage mémoire et temps traitement par phase
+- **Cache embeddings** : Considérer Redis pour éviter recalculs
