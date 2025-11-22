@@ -423,35 +423,167 @@ def ingest_csv(
     return documents
 
 
+# Colonnes canoniques du pipeline RAGpy (format output.csv)
+CANONICAL_COLUMNS = [
+    "itemKey", "type", "title", "abstract", "date", "url", "doi",
+    "authors", "filename", "path", "attachment_title", "texteocr", "texteocr_provider"
+]
+
+# Mapping des noms de colonnes courants vers les colonnes canoniques
+COLUMN_MAPPING = {
+    # texteocr alternatives
+    "text": "texteocr",
+    "content": "texteocr",
+    "body": "texteocr",
+    "description": "texteocr",
+    "texte": "texteocr",
+    "contenu": "texteocr",
+    # title alternatives
+    "titre": "title",
+    "name": "title",
+    "nom": "title",
+    # authors alternatives
+    "author": "authors",
+    "auteur": "authors",
+    "auteurs": "authors",
+    # date alternatives
+    "publication_date": "date",
+    "date_publication": "date",
+    "year": "date",
+    "annee": "date",
+    # abstract alternatives
+    "resume": "abstract",
+    "summary": "abstract",
+    # url alternatives
+    "link": "url",
+    "lien": "url",
+    # type alternatives
+    "document_type": "type",
+    "item_type": "type",
+}
+
+
 def ingest_csv_to_dataframe(
     csv_path: Union[str, Path],
     config: Optional[CSVIngestionConfig] = None,
 ) -> pd.DataFrame:
     """
-    Ingère un CSV et retourne un DataFrame compatible avec rad_chunk.py.
+    Ingère un CSV et retourne un DataFrame au format canonique RAGpy.
 
-    Utile pour intégration avec le pipeline existant qui attend un CSV
-    avec colonne 'texteocr'.
+    Crée un output.csv standardisé avec toutes les colonnes canoniques,
+    même si certaines sont vides. Filtre les lignes sans contenu texte.
 
     Args:
         csv_path: Chemin du fichier CSV
         config: Configuration d'ingestion
 
     Returns:
-        DataFrame avec colonnes 'texteocr' + métadonnées aplaties
+        DataFrame au format canonique avec toutes les colonnes standard
 
     Exemples:
         >>> df = ingest_csv_to_dataframe("data/docs.csv")
-        >>> # Peut ensuite être sauvegardé en CSV pour rad_chunk.py
-        >>> df.to_csv("output/processed.csv", index=False, encoding="utf-8-sig")
+        >>> df.to_csv("output/output.csv", index=False, encoding="utf-8-sig")
     """
-    documents = ingest_csv(csv_path, config=config)
+    config = config or CSVIngestionConfig()
+    csv_path = Path(csv_path)
 
-    # Convertir les Documents en dictionnaires
-    records = [doc.to_dict() for doc in documents]
+    if not csv_path.exists():
+        raise CSVIngestionError(f"Fichier CSV introuvable: {csv_path}")
 
-    df = pd.DataFrame(records)
+    # Détection d'encodage
+    encoding = config.encoding
+    if encoding == "auto":
+        encoding = detect_encoding(str(csv_path))
+        logger.info(f"Encodage détecté: {encoding}")
 
-    logger.info(f"DataFrame créé: {len(df)} lignes, colonnes: {list(df.columns)}")
+    # Chargement du CSV
+    try:
+        df_input = pd.read_csv(csv_path, encoding=encoding, delimiter=config.delimiter,
+                               dtype=str, keep_default_na=False)
+        logger.info(f"CSV chargé: {len(df_input)} lignes, colonnes: {list(df_input.columns)}")
+    except Exception as e:
+        raise CSVIngestionError(f"Erreur lecture CSV: {e}")
 
-    return df
+    # Normaliser les noms de colonnes (lowercase pour le mapping)
+    original_columns = list(df_input.columns)
+    df_input.columns = [col.lower().strip() for col in df_input.columns]
+    col_mapping_applied = dict(zip(original_columns, df_input.columns))
+    logger.info(f"Colonnes normalisées: {col_mapping_applied}")
+
+    # Créer le DataFrame canonique vide
+    df_output = pd.DataFrame(columns=CANONICAL_COLUMNS)
+
+    # Détecter la colonne de contenu (texteocr)
+    text_column = None
+    TEXT_CANDIDATES = ["texteocr", "text", "content", "body", "description", "texte", "contenu"]
+    for candidate in TEXT_CANDIDATES:
+        if candidate in df_input.columns:
+            text_column = candidate
+            logger.info(f"Colonne de contenu détectée: '{candidate}'")
+            break
+
+    if not text_column:
+        raise CSVIngestionError(
+            f"Aucune colonne de contenu trouvée. Colonnes attendues: {TEXT_CANDIDATES}. "
+            f"Colonnes disponibles: {list(df_input.columns)}"
+        )
+
+    # Mapper les colonnes de l'input vers le format canonique
+    for input_col in df_input.columns:
+        # Vérifier si c'est une colonne canonique directe
+        if input_col in CANONICAL_COLUMNS:
+            df_output[input_col] = df_input[input_col]
+        # Vérifier le mapping
+        elif input_col in COLUMN_MAPPING:
+            canonical_col = COLUMN_MAPPING[input_col]
+            # Ne pas écraser si déjà rempli (priorité aux colonnes canoniques directes)
+            if canonical_col not in df_output.columns or df_output[canonical_col].isna().all():
+                df_output[canonical_col] = df_input[input_col]
+                logger.info(f"Mapping: '{input_col}' → '{canonical_col}'")
+
+    # S'assurer que texteocr est rempli depuis la colonne de contenu détectée
+    if text_column and text_column != "texteocr":
+        df_output["texteocr"] = df_input[text_column]
+
+    # Ajouter texteocr_provider = "csv" pour toutes les lignes
+    df_output["texteocr_provider"] = "csv"
+
+    # Générer itemKey si absent (basé sur l'index)
+    if "itemKey" not in df_output.columns or df_output["itemKey"].isna().all() or (df_output["itemKey"] == "").all():
+        df_output["itemKey"] = [f"csv_{i}" for i in range(len(df_output))]
+
+    # S'assurer que toutes les colonnes canoniques existent
+    for col in CANONICAL_COLUMNS:
+        if col not in df_output.columns:
+            df_output[col] = ""
+
+    # Réordonner les colonnes dans l'ordre canonique
+    df_output = df_output[CANONICAL_COLUMNS]
+
+    # Filtrer les lignes avec texteocr vide
+    initial_count = len(df_output)
+    empty_mask = df_output["texteocr"].str.strip().str.len() == 0
+    removed_count = empty_mask.sum()
+
+    if removed_count > 0:
+        # Collecter les infos des lignes supprimées
+        removed_rows = df_output[empty_mask]
+        removed_info = []
+        for idx, row in removed_rows.iterrows():
+            row_id = row.get("title") or row.get("itemKey") or f"Row {idx + 1}"
+            removed_info.append(str(row_id))
+        logger.warning(
+            f"Suppression de {removed_count} ligne(s) avec contenu vide: {removed_info[:10]}"
+            + (f"... et {len(removed_info) - 10} autres" if len(removed_info) > 10 else "")
+        )
+
+        # Supprimer les lignes vides
+        df_output = df_output[~empty_mask].reset_index(drop=True)
+
+    logger.info(
+        f"DataFrame canonique créé: {len(df_output)} lignes "
+        f"(supprimées: {removed_count}, total initial: {initial_count})"
+    )
+    logger.info(f"Colonnes finales: {list(df_output.columns)}")
+
+    return df_output
