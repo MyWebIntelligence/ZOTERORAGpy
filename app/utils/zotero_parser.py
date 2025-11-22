@@ -117,7 +117,7 @@ def extract_library_info_from_session(session_dir: str) -> Dict:
     if not json_path:
         return {
             "success": False,
-            "error": "No Zotero JSON file found in session directory"
+            "error": "The file you uploaded is not a BibTeX JSON export. You cannot populate your Zotero references without a valid Zotero JSON file."
         }
 
     # Parse the JSON
