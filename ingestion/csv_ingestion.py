@@ -305,7 +305,7 @@ def ingest_csv(
         raise CSVIngestionError(f"Fichier CSV vide: {csv_path}")
 
     logger.info(f"Début de l'ingestion CSV: {csv_path}")
-    logger.info(f"Configuration: text_column='{config.text_column}', encoding='{config.encoding}'")
+    logger.info(f"Configuration initiale: text_column='{config.text_column}', encoding='{config.encoding}'")
 
     # Détection d'encodage si nécessaire
     encoding = config.encoding
@@ -339,12 +339,34 @@ def ingest_csv(
     except Exception as e:
         raise CSVIngestionError(f"Erreur lors de la lecture du CSV: {e}")
 
-    # Validation de la présence de la colonne texte
+    # Auto-détection de la colonne texte : priorité à 'texteocr' si présente
+    # Cela permet d'accepter des CSV avec contenu déjà préparé
+    TEXT_COLUMN_CANDIDATES = ["texteocr", "text", "content", "body", "description"]
+
     if config.text_column not in df.columns:
-        raise ValueError(
-            f"Colonne texte '{config.text_column}' absente du CSV. "
-            f"Colonnes disponibles: {list(df.columns)}"
-        )
+        # Chercher une colonne candidate (case-insensitive)
+        df_columns_lower = {col.lower(): col for col in df.columns}
+        detected_column = None
+
+        for candidate in TEXT_COLUMN_CANDIDATES:
+            if candidate in df_columns_lower:
+                detected_column = df_columns_lower[candidate]
+                break
+
+        if detected_column:
+            logger.info(
+                f"Colonne texte '{config.text_column}' non trouvée, "
+                f"auto-détection: utilisation de '{detected_column}'"
+            )
+            config.text_column = detected_column
+        else:
+            raise ValueError(
+                f"Colonne texte '{config.text_column}' absente du CSV et aucune "
+                f"colonne candidate trouvée ({TEXT_COLUMN_CANDIDATES}). "
+                f"Colonnes disponibles: {list(df.columns)}"
+            )
+    else:
+        logger.info(f"Colonne texte trouvée: '{config.text_column}'")
 
     # Nettoyage des noms de colonnes
     original_columns = list(df.columns)
