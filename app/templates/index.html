@@ -218,6 +218,21 @@
     <section id="dataframe-section" class="step-locked">
       <h2>2. Extract Text & Metadata</h2>
       <button id="processDataframeBtn">Generate CSV</button>
+
+      <!-- Progress bar for Generate CSV -->
+      <div id="csvProgress" style="display:none; margin-top: 15px;">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+          <span id="csvProgressCount" style="font-weight: bold; min-width: 60px;">0/0</span>
+          <span id="csvProgressStatus" style="color: #666; font-size: 0.9em;">Processing...</span>
+        </div>
+        <div style="background: #e0e0e0; border-radius: 4px; height: 24px; overflow: hidden; display: flex;">
+          <div id="csvProgressBar" style="background: linear-gradient(90deg, #1976d2 0%, #42a5f5 100%); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center;">
+            <!-- Brick pattern -->
+            <div style="width: 100%; height: 100%; background: repeating-linear-gradient(90deg, transparent, transparent 8px, rgba(255,255,255,0.3) 8px, rgba(255,255,255,0.3) 10px);"></div>
+          </div>
+        </div>
+      </div>
+
       <div id="dataframeResult" class="result"></div>
     </section>
 
@@ -353,10 +368,17 @@
               </button>
 
               <div id="zoteroProgress" style="display:none; margin-top: 15px;">
-                <div style="background: #e0e0e0; border-radius: 4px; height: 24px; overflow: hidden;">
-                  <div id="zoteroProgressBar" style="background: #9c27b0; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+                  <span id="zoteroProgressCount" style="font-weight: bold; min-width: 60px;">0/0</span>
+                  <span id="zoteroProgressStatus" style="color: #666; font-size: 0.9em;">Processing...</span>
                 </div>
-                <p id="zoteroProgressText" style="margin-top: 5px; font-size: 0.9em; color: #666;">0/0 items processed</p>
+                <div style="background: #e0e0e0; border-radius: 4px; height: 24px; overflow: hidden; display: flex;">
+                  <div id="zoteroProgressBar" style="background: linear-gradient(90deg, #9c27b0 0%, #ba68c8 100%); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center;">
+                    <!-- Brick pattern -->
+                    <div style="width: 100%; height: 100%; background: repeating-linear-gradient(90deg, transparent, transparent 8px, rgba(255,255,255,0.3) 8px, rgba(255,255,255,0.3) 10px);"></div>
+                  </div>
+                </div>
+                <p id="zoteroProgressText" style="margin-top: 5px; font-size: 0.85em; color: #666;"></p>
               </div>
 
               <div id="zoteroLog" class="result" style="max-height: 400px; overflow-y: auto;"></div>
@@ -774,37 +796,82 @@
       }
     });
 
-    // Step 2: Process DataFrame
+    // Step 2: Process DataFrame with SSE Progress
     document.getElementById('processDataframeBtn').addEventListener('click', async () => {
       const resultDiv = document.getElementById('dataframeResult');
+      const progressDiv = document.getElementById('csvProgress');
+      const progressBar = document.getElementById('csvProgressBar');
+      const progressCount = document.getElementById('csvProgressCount');
+      const progressStatus = document.getElementById('csvProgressStatus');
+
       if (!ensureSessionPath(resultDiv)) {
         return;
       }
-      resultDiv.textContent = 'Processing...';
-      const form = new URLSearchParams();
-      form.append('path', currentPath);
+
+      // Reset and show progress
+      resultDiv.innerHTML = '';
+      progressDiv.style.display = 'block';
+      progressBar.style.width = '0%';
+      progressCount.textContent = '0/0';
+      progressStatus.textContent = 'Starting...';
+
+      const formData = new FormData();
+      formData.append('path', currentPath);
 
       try {
-        const res = await fetch('/process_dataframe', {
+        const response = await fetch('/process_dataframe_sse', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: form.toString()
+          body: formData
         });
-        const json = await res.json();
-        if (res.ok) {
-          const fileName = json.csv.split('/').pop();
-          const downloadLink = buildDownloadLink(fileName);
-          resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p>`;
 
-          // Update UI
-          completeStep('extraction', fileName);
-          markSectionCompleted('dataframe-section');
-          unlockDecisionTree();
-        } else {
-          resultDiv.textContent = 'Error: ' + (json.error || res.statusText);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop(); // Keep incomplete data
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.substring(6));
+
+                if (data.type === 'init') {
+                  progressCount.textContent = `0/${data.total}`;
+                  progressStatus.textContent = data.message || 'Processing...';
+                } else if (data.type === 'progress') {
+                  const percent = Math.round((data.current / data.total) * 100);
+                  progressBar.style.width = `${percent}%`;
+                  progressCount.textContent = `${data.current}/${data.total}`;
+                  progressStatus.textContent = `Processing item ${data.current}...`;
+                } else if (data.type === 'complete') {
+                  progressBar.style.width = '100%';
+                  progressStatus.textContent = 'Complete!';
+                  const downloadLink = buildDownloadLink('output.csv');
+                  resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p>`;
+
+                  // Update UI
+                  completeStep('extraction', 'output.csv');
+                  markSectionCompleted('dataframe-section');
+                  unlockDecisionTree();
+                } else if (data.type === 'error') {
+                  progressStatus.textContent = 'Error';
+                  resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+                }
+              } catch (e) {
+                console.error('Failed to parse SSE data:', e);
+              }
+            }
+          }
         }
       } catch (err) {
-        resultDiv.textContent = 'Processing failed: ' + err;
+        progressStatus.textContent = 'Failed';
+        resultDiv.innerHTML = `<p class="error-text">Processing failed: ${err}</p>`;
       }
     });
 
@@ -1095,11 +1162,13 @@
       }
     });
 
-    // Zotero Notes - Generation
+    // Zotero Notes - Generation with SSE Progress
     document.getElementById('generateZoteroNotesBtn').addEventListener('click', async () => {
       const resultDiv = document.getElementById('zoteroLog');
       const progressDiv = document.getElementById('zoteroProgress');
       const progressBar = document.getElementById('zoteroProgressBar');
+      const progressCount = document.getElementById('zoteroProgressCount');
+      const progressStatus = document.getElementById('zoteroProgressStatus');
       const progressText = document.getElementById('zoteroProgressText');
 
       if (!ensureSessionPath(resultDiv)) {
@@ -1110,93 +1179,126 @@
       resultDiv.innerHTML = '';
       progressDiv.style.display = 'block';
       progressBar.style.width = '0%';
-      progressText.textContent = 'Starting...';
+      progressCount.textContent = '0/0';
+      progressStatus.textContent = 'Starting...';
+      progressText.textContent = '';
 
       const modelInput = document.getElementById('zoteroModelInput').value.trim();
-      const model = modelInput || ''; // Send empty string to use server default (OPENROUTER_DEFAULT_MODEL)
+      const model = modelInput || '';
       const extendedAnalysis = document.getElementById('extendedAnalysisCheckbox').checked;
-      const form = new URLSearchParams();
-      form.append('session', currentPath);
-      form.append('model', model);
-      form.append('extended_analysis', extendedAnalysis ? 'true' : 'false');
+
+      const formData = new FormData();
+      formData.append('session', currentPath);
+      formData.append('model', model);
+      formData.append('extended_analysis', extendedAnalysis ? 'true' : 'false');
+
+      // Track items for final display
+      const processedItems = [];
 
       try {
-        const res = await fetch('/generate_zotero_notes', {
+        const response = await fetch('/generate_zotero_notes_sse', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: form.toString()
+          body: formData
         });
 
-        const json = await res.json();
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-        if (!res.ok) {
-          resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || res.statusText}</p>`;
-          progressDiv.style.display = 'none';
-          return;
-        }
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        // Display summary
-        const summary = json.summary;
-        progressBar.style.width = '100%';
-        progressText.textContent = `${summary.total}/${summary.total} items processed`;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop();
 
-        let summaryHTML = `<div style="background: #e8f5e9; border-radius: 4px; padding: 10px; margin-bottom: 15px;">
-          <strong>Summary:</strong><br>
-          ✅ Created: ${summary.created}<br>
-          ℹ️ Already exists: ${summary.exists}<br>
-          ⏭️ Skipped: ${summary.skipped}<br>
-          ❌ Errors: ${summary.errors}
-        </div>`;
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.substring(6));
 
-        // Display detailed results
-        let detailsHTML = '<div style="font-size: 0.9em;"><strong>Details:</strong><br>';
+                if (data.type === 'init') {
+                  progressCount.textContent = `0/${data.total}`;
+                  progressStatus.textContent = data.message || 'Processing...';
+                } else if (data.type === 'progress') {
+                  const percent = Math.round((data.current / data.total) * 100);
+                  progressBar.style.width = `${percent}%`;
+                  progressCount.textContent = `${data.current}/${data.total}`;
 
-        json.items.forEach((item, idx) => {
-          let statusIcon = '';
-          let statusColor = '';
+                  // Status icon based on result
+                  let statusIcon = '';
+                  switch (data.status) {
+                    case 'created': statusIcon = '✅'; break;
+                    case 'exists': statusIcon = 'ℹ️'; break;
+                    case 'skipped': statusIcon = '⏭️'; break;
+                    case 'error': statusIcon = '❌'; break;
+                    default: statusIcon = '⏳';
+                  }
 
-          switch (item.status) {
-            case 'created':
-              statusIcon = '✅';
-              statusColor = '#4caf50';
-              break;
-            case 'exists':
-              statusIcon = 'ℹ️';
-              statusColor = '#2196f3';
-              break;
-            case 'skipped':
-              statusIcon = '⏭️';
-              statusColor = '#ff9800';
-              break;
-            case 'error':
-              statusIcon = '❌';
-              statusColor = '#f44336';
-              break;
-            default:
-              statusIcon = '❓';
-              statusColor = '#9e9e9e';
+                  progressStatus.textContent = `${statusIcon} ${data.item || 'Processing...'}`;
+                  progressText.textContent = data.status ? `Status: ${data.status}` : '';
+
+                  // Track for final display
+                  if (data.item) {
+                    processedItems.push(data);
+                  }
+                } else if (data.type === 'complete') {
+                  progressBar.style.width = '100%';
+                  progressStatus.textContent = 'Complete!';
+
+                  const summary = data.summary;
+                  let summaryHTML = `<div style="background: #e8f5e9; border-radius: 4px; padding: 10px; margin-bottom: 15px;">
+                    <strong>Summary:</strong><br>
+                    ✅ Created: ${summary.created}<br>
+                    ℹ️ Already exists: ${summary.exists}<br>
+                    ⏭️ Skipped: ${summary.skipped}<br>
+                    ❌ Errors: ${summary.errors}
+                  </div>`;
+
+                  // Display detailed results
+                  let detailsHTML = '<div style="font-size: 0.9em;"><strong>Details:</strong><br>';
+
+                  processedItems.forEach((item) => {
+                    let statusIcon = '';
+                    let statusColor = '';
+
+                    switch (item.status) {
+                      case 'created': statusIcon = '✅'; statusColor = '#4caf50'; break;
+                      case 'exists': statusIcon = 'ℹ️'; statusColor = '#2196f3'; break;
+                      case 'skipped': statusIcon = '⏭️'; statusColor = '#ff9800'; break;
+                      case 'error': statusIcon = '❌'; statusColor = '#f44336'; break;
+                      default: statusIcon = '❓'; statusColor = '#9e9e9e';
+                    }
+
+                    detailsHTML += `<div style="margin: 8px 0; padding: 8px; background: #f5f5f5; border-left: 4px solid ${statusColor};">
+                      ${statusIcon} <strong>${item.item}</strong><br>
+                      <small style="color: #666;">Status: ${item.status}</small>
+                      ${item.message ? `<br><small style="color: #666;">${item.message}</small>` : ''}
+                    </div>`;
+                  });
+
+                  detailsHTML += '</div>';
+                  resultDiv.innerHTML = summaryHTML + detailsHTML;
+
+                  // Update UI
+                  completeStep('zoteroNotes', null);
+                  markSectionCompleted('zotero-notes-section');
+                  updateStepTracker('zoteroNotes', 'completed');
+
+                } else if (data.type === 'error') {
+                  progressStatus.textContent = 'Error';
+                  resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+                }
+              } catch (e) {
+                console.error('Failed to parse SSE data:', e);
+              }
+            }
           }
-
-          detailsHTML += `<div style="margin: 8px 0; padding: 8px; background: #f5f5f5; border-left: 4px solid ${statusColor};">
-            ${statusIcon} <strong>${item.title}</strong> (${item.itemKey})<br>
-            <small style="color: #666;">Status: ${item.status}</small>
-            ${item.message ? `<br><small style="color: #666;">${item.message}</small>` : ''}
-            ${item.zotero_url ? `<br><a href="${item.zotero_url}" style="font-size: 0.85em;">Open in Zotero</a>` : ''}
-          </div>`;
-        });
-
-        detailsHTML += '</div>';
-
-        resultDiv.innerHTML = summaryHTML + detailsHTML;
-
-        // Update UI
-        completeStep('zoteroNotes', null);
-        markSectionCompleted('zotero-notes-section');
-        updateStepTracker('zoteroNotes', 'completed');
-
+        }
       } catch (err) {
+        progressStatus.textContent = 'Failed';
         resultDiv.innerHTML = `<p class="error-text">Request failed: ${err.message}</p>`;
-        progressDiv.style.display = 'none';
         console.error("Zotero notes generation error:", err);
       }
     });

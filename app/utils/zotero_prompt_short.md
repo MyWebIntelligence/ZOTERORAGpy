@@ -124,4 +124,10 @@ Utilise **uniquement** les balises HTML suivantes (compatibles Zotero) :
 
 ## CONSIGNE FINALE
 
-Commence directement par le contenu HTML des 4 chapitres, sans introduction ni commentaire méta. Adopte un style rédactionnel fluide qui forme le lecteur à la pensée scientifique de l'article.
+**IMPORTANT : La première ligne de ta réponse doit TOUJOURS être :**
+```
+[SHORT] {TITLE}
+```
+(remplace `{TITLE}` par le titre réel de l'article)
+
+Ensuite, commence directement par le contenu HTML des 4 chapitres, sans introduction ni commentaire méta. Adopte un style rédactionnel fluide qui forme le lecteur à la pensée scientifique de l'article.
