@@ -1,6 +1,6 @@
 body { background: #fff !important; font-family: 'Segoe UI', 'Arial', sans-serif; margin: 0; padding: 0; }
 .container {
-  max-width: 900px;
+  max-width: 1200px;
   margin: 36px auto 0 auto;
   background: #fff;
   border-radius: 14px;
@@ -293,7 +293,9 @@ input[type="file"], input[type="text"], input[type="password"], select {
 
 .branches-container {
   display: flex;
+  flex-direction: row;
   gap: 24px;
+  width: 100%;
 }
 
 @media (max-width: 768px) {
@@ -303,7 +305,8 @@ input[type="file"], input[type="text"], input[type="password"], select {
 }
 
 .branch {
-  flex: 1;
+  flex: 1 1 45%;
+  min-width: 0;
   background: #fff;
   border-radius: 12px;
   padding: 0;
@@ -413,6 +416,40 @@ section.step-locked::before {
   border-radius: 4px;
   font-size: 0.9rem;
   margin-bottom: 12px;
+}
+
+/* Decision tree locked state - different from section */
+.decision-tree.step-locked {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.decision-tree.step-locked::before {
+  content: "Complete l'etape precedente pour debloquer";
+  display: block;
+  background: #f5f5f5;
+  color: #999;
+  padding: 12px 20px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+/* Sections inside branches should not have locked styling */
+.branch-content section {
+  border-bottom: none;
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+}
+
+.branch-content section:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.branch-content section.step-locked::before {
+  content: none;
 }
 
 section.step-available {
