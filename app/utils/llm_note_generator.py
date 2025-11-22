@@ -21,25 +21,37 @@ logger = logging.getLogger(__name__)
 # Sentinel prefix for idempotence
 SENTINEL_PREFIX = "ragpy-note-id:"
 
-# Load environment variables
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
 
-# Initialize clients
-openai_client = None
-openrouter_client = None
+def _get_llm_clients():
+    """
+    Get LLM clients by loading API keys fresh from environment.
+    This ensures that keys added after server start are picked up.
 
-if OPENAI_API_KEY:
-    openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    logger.info("OpenAI client initialized for note generation")
+    Returns:
+        Tuple of (openai_client, openrouter_client, default_model)
+    """
+    # Reload .env to pick up any changes
+    load_dotenv(override=True)
 
-if OPENROUTER_API_KEY:
-    openrouter_client = OpenAI(
-        api_key=OPENROUTER_API_KEY,
-        base_url="https://openrouter.ai/api/v1"
-    )
-    logger.info("OpenRouter client initialized for note generation")
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+    default_model = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
+
+    openai_client = None
+    openrouter_client = None
+
+    if openai_api_key:
+        openai_client = OpenAI(api_key=openai_api_key)
+        logger.debug("OpenAI client initialized for note generation")
+
+    if openrouter_api_key:
+        openrouter_client = OpenAI(
+            api_key=openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1"
+        )
+        logger.debug("OpenRouter client initialized for note generation")
+
+    return openai_client, openrouter_client, default_model
 
 
 def _detect_language(metadata: Dict) -> str:
@@ -225,9 +237,12 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2,
         ValueError: If no LLM client is available
         Exception: If the API call fails
     """
-    # Use OPENROUTER_DEFAULT_MODEL if no model specified
+    # Get fresh clients from environment
+    openai_client, openrouter_client, default_model = _get_llm_clients()
+
+    # Use default model if no model specified
     if not model:
-        model = OPENROUTER_DEFAULT_MODEL
+        model = default_model
         logger.info(f"No model specified, using default: {model}")
 
     # Detect which client to use based on model format
@@ -237,7 +252,7 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2,
         if not openrouter_client:
             logger.warning(f"OpenRouter model '{model}' requested but client not initialized. Falling back to OpenAI.")
             if not openai_client:
-                raise ValueError("No LLM client available (neither OpenAI nor OpenRouter)")
+                raise ValueError("No LLM client available (neither OpenAI nor OpenRouter). Check your API keys in Settings.")
             active_client = openai_client
             model = "gpt-4o-mini"
         else:
@@ -245,7 +260,7 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2,
             logger.info(f"Using OpenRouter with model: {model}")
     else:
         if not openai_client:
-            raise ValueError("OpenAI client not initialized (OPENAI_API_KEY missing)")
+            raise ValueError("OpenAI client not initialized (OPENAI_API_KEY missing). Check your API keys in Settings.")
         active_client = openai_client
         logger.info(f"Using OpenAI with model: {model}")
 
@@ -385,9 +400,12 @@ def build_note_html(
         >>> print(sentinel)
         ragpy-note-id:abc123...
     """
-    # Use OPENROUTER_DEFAULT_MODEL if no model specified
+    # Get fresh clients from environment
+    openai_client, openrouter_client, default_model = _get_llm_clients()
+
+    # Use default model if no model specified
     if not model:
-        model = OPENROUTER_DEFAULT_MODEL
+        model = default_model
         logger.info(f"No model specified, using default: {model}")
 
     # Detect target language
