@@ -265,9 +265,10 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
         out_csv = os.path.join(absolute_processing_path, 'output.csv')
 
         # Check if output.csv already exists with texteocr content
-        # Determine OCR mode: "full", "partial", or "skip"
+        # Determine OCR mode: "full", "skip", or "csv_cleanup"
         ocr_mode = "full"  # Default: run full OCR via rad_dataframe.py
-        missing_ocr_indices = []
+        existing_df = None
+        removed_rows_info = []  # Info about removed rows for user feedback
 
         if os.path.exists(out_csv):
             try:
@@ -287,14 +288,31 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
                             f"Skipping OCR extraction."
                         )
                     elif non_empty_count > 0:
-                        # Some rows have texteocr, some don't → partial OCR
-                        ocr_mode = "partial"
-                        missing_ocr_indices = existing_df[empty_mask].index.tolist()
+                        # Some rows have texteocr, some don't → remove empty rows
+                        ocr_mode = "csv_cleanup"
+
+                        # Collect info about rows to be removed
+                        empty_rows = existing_df[empty_mask]
+                        for idx, row in empty_rows.iterrows():
+                            # Try to get identifying info (title, id, or row index)
+                            row_id = row.get('title', row.get('id', f"Row {idx + 1}"))
+                            removed_rows_info.append(str(row_id))
+
+                        # Remove empty rows
+                        existing_df = existing_df[~empty_mask].reset_index(drop=True)
+                        existing_df.to_csv(out_csv, index=False, encoding='utf-8-sig')
+
                         logger.info(
-                            f"output.csv has partial 'texteocr': {non_empty_count}/{total_count} rows filled, "
-                            f"{empty_count} rows need OCR."
+                            f"CSV cleanup: removed {empty_count} rows with empty 'texteocr'. "
+                            f"Kept {non_empty_count} rows."
                         )
-                    # else: all empty → full OCR needed
+                    else:
+                        # All texteocr empty → CSV is unusable
+                        logger.error("CSV file has 'texteocr' column but all values are empty.")
+                        return JSONResponse(status_code=400, content={
+                            "error": "Your CSV file has no text content. All 'texteocr' values are empty. "
+                                     "Please upload a CSV with text content in a column named 'texteocr', 'text', 'content', 'body', or 'description'."
+                        })
             except Exception as e:
                 logger.warning(f"Could not check existing output.csv: {e}. Proceeding with full OCR.")
 
@@ -312,65 +330,8 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
 
         if ocr_mode == "skip":
             logger.info("OCR skipped - using existing output.csv with complete texteocr content")
-        elif ocr_mode == "partial":
-            # Partial OCR: process only rows with missing texteocr
-            logger.info(f"Starting partial OCR for {len(missing_ocr_indices)} rows...")
-            try:
-                # Import OCR function from rad_dataframe
-                import sys
-                if RAGPY_DIR not in sys.path:
-                    sys.path.insert(0, RAGPY_DIR)
-                from scripts.rad_dataframe import extract_text_with_ocr
-
-                # Check if 'path' column exists for PDF paths
-                if 'path' not in existing_df.columns:
-                    logger.warning("No 'path' column found. Cannot perform partial OCR without PDF paths.")
-                    return JSONResponse(status_code=400, content={
-                        "error": "Cannot perform partial OCR: 'path' column missing. "
-                                 "Please add a 'path' column with PDF file paths for rows needing OCR."
-                    })
-
-                updated_count = 0
-                for idx in missing_ocr_indices:
-                    pdf_path = str(existing_df.loc[idx, 'path']).strip()
-                    if not pdf_path:
-                        logger.warning(f"Row {idx}: empty 'path', skipping OCR")
-                        continue
-
-                    # Resolve relative paths
-                    if not os.path.isabs(pdf_path):
-                        pdf_path = os.path.join(absolute_processing_path, pdf_path)
-
-                    if not os.path.exists(pdf_path):
-                        logger.warning(f"Row {idx}: PDF not found at '{pdf_path}', skipping OCR")
-                        continue
-
-                    try:
-                        logger.info(f"Row {idx}: Processing OCR for '{os.path.basename(pdf_path)}'...")
-                        text, provider = extract_text_with_ocr(pdf_path)
-                        existing_df.loc[idx, 'texteocr'] = text
-                        existing_df.loc[idx, 'texteocr_provider'] = provider
-                        updated_count += 1
-                        logger.info(f"Row {idx}: OCR completed ({provider}), {len(text)} chars")
-                    except Exception as ocr_err:
-                        logger.error(f"Row {idx}: OCR failed for '{pdf_path}': {ocr_err}")
-
-                # Save updated CSV
-                existing_df.to_csv(out_csv, index=False, encoding='utf-8-sig')
-                logger.info(f"Partial OCR completed: {updated_count}/{len(missing_ocr_indices)} rows updated")
-
-            except ImportError as e:
-                logger.error(f"Failed to import OCR module: {e}")
-                return JSONResponse(status_code=500, content={
-                    "error": "Server configuration error: OCR module not found.",
-                    "details": str(e)
-                })
-            except Exception as e:
-                logger.error(f"Partial OCR failed: {e}", exc_info=True)
-                return JSONResponse(status_code=500, content={
-                    "error": "Partial OCR processing failed.",
-                    "details": str(e)
-                })
+        elif ocr_mode == "csv_cleanup":
+            logger.info(f"CSV cleanup completed - removed {len(removed_rows_info)} rows with empty content")
         else:
             # Run extraction script with improved error handling
             try:
@@ -466,7 +427,16 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
                 safer_preview.append(safer_record)
             preview = safer_preview
             
-        return JSONResponse({"csv": out_csv, "preview": preview})
+        # Build response with optional removed rows info
+        response_data = {"csv": out_csv, "preview": preview}
+
+        if removed_rows_info:
+            response_data["warning"] = (
+                f"{len(removed_rows_info)} row(s) with empty text content were removed from the CSV."
+            )
+            response_data["removed_rows"] = removed_rows_info
+
+        return JSONResponse(response_data)
     except Exception as e: # Catch-all for any other unexpected error in this block
         logger.error(f"General error in processing/previewing CSV {out_csv}: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "CSV read or preview failed.", "details": str(e)})
