@@ -375,7 +375,7 @@ def update_item_abstract(
     item_key: str,
     new_abstract: str,
     api_key: str,
-    separator: str = "\n\n---\n[Résumé enrichi par RAGpy]\n\n"
+    separator: str = "\n\n---\n\n"
 ) -> Dict:
     """
     Update an item's abstractNote field by appending new content.
