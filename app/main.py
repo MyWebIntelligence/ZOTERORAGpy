@@ -14,7 +14,7 @@ except OverflowError:
     csv.field_size_limit(2**31 - 1)
 import pandas as pd
 from fastapi import FastAPI, Request, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from logging.handlers import RotatingFileHandler
@@ -1240,6 +1240,245 @@ async def upload_db(
     except Exception as e:
         logger.error(f"An unexpected error occurred during DB upload for {db_choice}: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": f"An unexpected error occurred during {db_choice} upload.", "details": str(e)})
+
+import asyncio
+
+# ========================================
+# SSE Endpoints for Progress Tracking
+# ========================================
+
+@app.post("/process_dataframe_sse")
+async def process_dataframe_sse(path: str = Form(...)):
+    """
+    Process DataFrame with Server-Sent Events for progress tracking.
+    Returns SSE stream with progress updates.
+    """
+    absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
+    logger.info(f"SSE: Processing dataframe for path: '{absolute_processing_path}'")
+
+    async def event_generator():
+        try:
+            # Find JSON file
+            if not os.path.isdir(absolute_processing_path):
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Directory not found: {path}'})}\n\n"
+                return
+
+            json_files = [f for f in os.listdir(absolute_processing_path) if f.lower().endswith('.json')]
+            if not json_files:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'No JSON file found'})}\n\n"
+                return
+
+            json_path = os.path.join(absolute_processing_path, json_files[0])
+
+            # Count items in JSON
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                if isinstance(data, list):
+                    total_items = len(data)
+                elif isinstance(data, dict) and "items" in data:
+                    total_items = len(data["items"])
+                else:
+                    total_items = 0
+
+                yield f"data: {json.dumps({'type': 'init', 'total': total_items, 'message': f'Found {total_items} items to process'})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to read JSON: {str(e)}'})}\n\n"
+                return
+
+            # Start subprocess
+            out_csv = os.path.join(absolute_processing_path, 'output.csv')
+            script_path = os.path.abspath(os.path.join(RAGPY_DIR, "scripts", "rad_dataframe.py"))
+
+            process = await asyncio.create_subprocess_exec(
+                "python3", script_path,
+                "--json", json_path,
+                "--dir", absolute_processing_path,
+                "--output", out_csv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+
+            current_progress = 0
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+
+                line_text = line.decode('utf-8', errors='replace').strip()
+
+                # Parse progress from tqdm output or log lines
+                if "Processing Zotero items:" in line_text or "it/s" in line_text:
+                    # Extract progress from tqdm format like "10%|█|1/10"
+                    import re
+                    match = re.search(r'(\d+)/(\d+)', line_text)
+                    if match:
+                        current = int(match.group(1))
+                        total = int(match.group(2))
+                        yield f"data: {json.dumps({'type': 'progress', 'current': current, 'total': total})}\n\n"
+                elif "Item " in line_text and " saved" in line_text:
+                    current_progress += 1
+                    yield f"data: {json.dumps({'type': 'progress', 'current': current_progress, 'total': total_items})}\n\n"
+                elif "✓" in line_text:
+                    current_progress += 1
+                    yield f"data: {json.dumps({'type': 'progress', 'current': current_progress, 'total': total_items})}\n\n"
+
+            await process.wait()
+
+            if process.returncode == 0 and os.path.exists(out_csv):
+                yield f"data: {json.dumps({'type': 'complete', 'file': 'output.csv', 'message': 'Processing complete'})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Process failed with code {process.returncode}'})}\n\n"
+
+        except Exception as e:
+            logger.error(f"SSE error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/generate_zotero_notes_sse")
+async def generate_zotero_notes_sse(
+    session: str = Form(...),
+    model: str = Form(""),
+    extended_analysis: str = Form("true")
+):
+    """
+    Generate Zotero notes with Server-Sent Events for progress tracking.
+    """
+    use_extended = extended_analysis.lower() == "true"
+    session_dir = os.path.join(UPLOAD_DIR, session)
+
+    async def event_generator():
+        try:
+            if not os.path.exists(session_dir):
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Session not found: {session}'})}\n\n"
+                return
+
+            # Extract library info
+            library_info = zotero_parser.extract_library_info_from_session(session_dir)
+            if not library_info.get("success"):
+                yield f"data: {json.dumps({'type': 'error', 'message': library_info.get('error')})}\n\n"
+                return
+
+            library_type = library_info["library_type"]
+            library_id = library_info["library_id"]
+
+            # Get API key
+            zotero_api_key = os.getenv("ZOTERO_API_KEY")
+            if not zotero_api_key:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'ZOTERO_API_KEY not configured'})}\n\n"
+                return
+
+            # Verify API key
+            try:
+                zotero_client.verify_api_key(zotero_api_key)
+            except zotero_client.ZoteroAPIError as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Invalid API key: {e.message}'})}\n\n"
+                return
+
+            # Read CSV
+            csv_path = os.path.join(session_dir, "output.csv")
+            if not os.path.exists(csv_path):
+                yield f"data: {json.dumps({'type': 'error', 'message': 'output.csv not found'})}\n\n"
+                return
+
+            df = pd.read_csv(csv_path, encoding="utf-8-sig")
+
+            # Find itemKey column
+            itemkey_column = None
+            for col in ["itemKey", "item_key", "key"]:
+                if col in df.columns:
+                    itemkey_column = col
+                    break
+
+            if not itemkey_column:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'No itemKey column found'})}\n\n"
+                return
+
+            df_items = df[df[itemkey_column].notna()].copy()
+            total_items = len(df_items)
+
+            yield f"data: {json.dumps({'type': 'init', 'total': total_items, 'message': f'Found {total_items} items'})}\n\n"
+
+            results = {"created": 0, "exists": 0, "skipped": 0, "errors": 0}
+
+            for idx, (row_idx, row) in enumerate(df_items.iterrows()):
+                item_key = str(row[itemkey_column])
+                title = row.get("title", "Untitled")
+
+                try:
+                    metadata = {
+                        "title": title,
+                        "authors": row.get("authors", "N/A"),
+                        "date": row.get("date", "N/A"),
+                        "abstract": row.get("abstractNote", row.get("abstract", "")),
+                        "doi": row.get("doi", ""),
+                        "url": row.get("url", ""),
+                        "language": row.get("language", "")
+                    }
+
+                    text_content = row.get("texteocr", "")
+
+                    if not text_content and not metadata.get("abstract"):
+                        results["skipped"] += 1
+                        yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'skipped'})}\n\n"
+                        continue
+
+                    llm_model = model if model else None
+                    sentinel, note_html = llm_note_generator.build_note_html(
+                        metadata=metadata,
+                        text_content=text_content,
+                        model=llm_model,
+                        use_llm=True,
+                        extended_analysis=use_extended
+                    )
+
+                    note_exists = zotero_client.check_note_exists(
+                        library_type=library_type,
+                        library_id=library_id,
+                        item_key=item_key,
+                        sentinel=sentinel,
+                        api_key=zotero_api_key
+                    )
+
+                    if note_exists:
+                        results["exists"] += 1
+                        yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'exists'})}\n\n"
+                        continue
+
+                    create_result = zotero_client.create_child_note(
+                        library_type=library_type,
+                        library_id=library_id,
+                        item_key=item_key,
+                        note_html=note_html,
+                        tags=["ragpy", "fiche-lecture"],
+                        api_key=zotero_api_key
+                    )
+
+                    if create_result.get("success"):
+                        results["created"] += 1
+                        yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'created'})}\n\n"
+                    else:
+                        results["errors"] += 1
+                        yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'error', 'message': create_result.get('message', '')})}\n\n"
+
+                except Exception as e:
+                    results["errors"] += 1
+                    yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'error', 'message': str(e)})}\n\n"
+
+                # Small delay to avoid overwhelming the client
+                await asyncio.sleep(0.1)
+
+            yield f"data: {json.dumps({'type': 'complete', 'summary': results})}\n\n"
+
+        except Exception as e:
+            logger.error(f"SSE Zotero error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 @app.get("/download_file")
 async def download_file(session_path: str = Query(...), filename: str = Query(...)):

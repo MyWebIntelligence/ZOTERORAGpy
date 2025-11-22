@@ -347,6 +347,14 @@ Terminer chaque analyse par une section bibliographique rédigée :
 
 ## CONSIGNES FINALES
 
+**IMPORTANT : La première ligne de ta réponse doit TOUJOURS être :**
+```
+[LONG] {TITLE}
+```
+(remplace `{TITLE}` par le titre réel de l'article)
+
+Ensuite :
+
 - **Précision** : être rigoureux sur les variables, heuristiques, algorithmes et traitements de données
 - **Clarté académique** : langage clair, phrases complètes, transitions explicites, définitions au premier usage
 - **Exhaustivité raisonnée** : ne pas se censurer sur la longueur si cela sert la clarté et la complétude
