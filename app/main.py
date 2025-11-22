@@ -770,58 +770,95 @@ async def generate_zotero_notes(
                 results.append(item_result)
                 continue
 
-            # Generate the note
-            logger.info(f"Generating note for item {item_key} (extended: {use_extended})")
             # Convert empty string to None to use default model
             llm_model = model if model else None
-            sentinel, note_html = llm_note_generator.build_note_html(
-                metadata=metadata,
-                text_content=text_content,
-                model=llm_model,
-                use_llm=True,
-                extended_analysis=use_extended
-            )
 
-            # Check if note already exists
-            logger.info(f"Checking if note exists for item {item_key}")
-            note_exists = zotero_client.check_note_exists(
-                library_type=library_type,
-                library_id=library_id,
-                item_key=item_key,
-                sentinel=sentinel,
-                api_key=zotero_api_key
-            )
+            if use_extended:
+                # EXTENDED MODE: Generate a full reading note (HTML) as child note
+                logger.info(f"Generating extended note for item {item_key}")
+                sentinel, note_html = llm_note_generator.build_note_html(
+                    metadata=metadata,
+                    text_content=text_content,
+                    model=llm_model,
+                    use_llm=True,
+                    extended_analysis=True
+                )
 
-            if note_exists:
-                item_result["status"] = "exists"
-                item_result["message"] = "Note already exists (idempotent)"
-                item_result["sentinel"] = sentinel
-                logger.info(f"Note already exists for item {item_key}")
-                results.append(item_result)
-                continue
+                # Check if note already exists
+                logger.info(f"Checking if note exists for item {item_key}")
+                note_exists = zotero_client.check_note_exists(
+                    library_type=library_type,
+                    library_id=library_id,
+                    item_key=item_key,
+                    sentinel=sentinel,
+                    api_key=zotero_api_key
+                )
 
-            # Create the note
-            logger.info(f"Creating note for item {item_key}")
-            create_result = zotero_client.create_child_note(
-                library_type=library_type,
-                library_id=library_id,
-                item_key=item_key,
-                note_html=note_html,
-                tags=["ragpy", "fiche-lecture"],
-                api_key=zotero_api_key
-            )
+                if note_exists:
+                    item_result["status"] = "exists"
+                    item_result["message"] = "Note already exists (idempotent)"
+                    item_result["sentinel"] = sentinel
+                    logger.info(f"Note already exists for item {item_key}")
+                    results.append(item_result)
+                    continue
 
-            if create_result.get("success"):
-                item_result["status"] = "created"
-                item_result["message"] = "Note created successfully"
-                item_result["noteKey"] = create_result.get("note_key")
-                item_result["sentinel"] = sentinel
-                item_result["zotero_url"] = f"zotero://select/library/items/{create_result.get('note_key')}"
-                logger.info(f"Successfully created note for item {item_key}")
+                # Create the note
+                logger.info(f"Creating note for item {item_key}")
+                create_result = zotero_client.create_child_note(
+                    library_type=library_type,
+                    library_id=library_id,
+                    item_key=item_key,
+                    note_html=note_html,
+                    tags=["ragpy", "fiche-lecture"],
+                    api_key=zotero_api_key
+                )
+
+                if create_result.get("success"):
+                    item_result["status"] = "created"
+                    item_result["message"] = "Note created successfully"
+                    item_result["noteKey"] = create_result.get("note_key")
+                    item_result["sentinel"] = sentinel
+                    item_result["zotero_url"] = f"zotero://select/library/items/{create_result.get('note_key')}"
+                    logger.info(f"Successfully created note for item {item_key}")
+                else:
+                    item_result["status"] = "error"
+                    item_result["message"] = create_result.get("message", "Unknown error")
+                    logger.error(f"Failed to create note for item {item_key}: {item_result['message']}")
+
             else:
-                item_result["status"] = "error"
-                item_result["message"] = create_result.get("message", "Unknown error")
-                logger.error(f"Failed to create note for item {item_key}: {item_result['message']}")
+                # SHORT MODE: Generate abstract summary and update abstractNote field
+                logger.info(f"Generating abstract summary for item {item_key}")
+                try:
+                    abstract_text = llm_note_generator.build_abstract_text(
+                        metadata=metadata,
+                        text_content=text_content,
+                        model=llm_model
+                    )
+
+                    # Update the item's abstractNote in Zotero
+                    logger.info(f"Updating abstractNote for item {item_key}")
+                    update_result = zotero_client.update_item_abstract(
+                        library_type=library_type,
+                        library_id=library_id,
+                        item_key=item_key,
+                        new_abstract=abstract_text,
+                        api_key=zotero_api_key
+                    )
+
+                    if update_result.get("success"):
+                        item_result["status"] = "updated"
+                        item_result["message"] = "Abstract enriched successfully"
+                        item_result["new_abstract_length"] = update_result.get("new_abstract_length", 0)
+                        logger.info(f"Successfully updated abstract for item {item_key}")
+                    else:
+                        item_result["status"] = "error"
+                        item_result["message"] = update_result.get("message", "Unknown error")
+                        logger.error(f"Failed to update abstract for item {item_key}: {item_result['message']}")
+
+                except ValueError as e:
+                    item_result["status"] = "error"
+                    item_result["message"] = str(e)
+                    logger.error(f"Abstract generation error for item {item_key}: {e}")
 
         except zotero_client.ZoteroAPIError as e:
             item_result["status"] = "error"
@@ -838,6 +875,7 @@ async def generate_zotero_notes(
     summary = {
         "total": len(results),
         "created": sum(1 for r in results if r["status"] == "created"),
+        "updated": sum(1 for r in results if r["status"] == "updated"),
         "exists": sum(1 for r in results if r["status"] == "exists"),
         "skipped": sum(1 for r in results if r["status"] == "skipped"),
         "errors": sum(1 for r in results if r["status"] == "error")
@@ -1439,42 +1477,68 @@ async def generate_zotero_notes_sse(
                         continue
 
                     llm_model = model if model else None
-                    sentinel, note_html = llm_note_generator.build_note_html(
-                        metadata=metadata,
-                        text_content=text_content,
-                        model=llm_model,
-                        use_llm=True,
-                        extended_analysis=use_extended
-                    )
 
-                    note_exists = zotero_client.check_note_exists(
-                        library_type=library_type,
-                        library_id=library_id,
-                        item_key=item_key,
-                        sentinel=sentinel,
-                        api_key=zotero_api_key
-                    )
+                    if use_extended:
+                        # EXTENDED MODE: Generate full reading note
+                        sentinel, note_html = llm_note_generator.build_note_html(
+                            metadata=metadata,
+                            text_content=text_content,
+                            model=llm_model,
+                            use_llm=True,
+                            extended_analysis=True
+                        )
 
-                    if note_exists:
-                        results["exists"] += 1
-                        yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'exists'})}\n\n"
-                        continue
+                        note_exists = zotero_client.check_note_exists(
+                            library_type=library_type,
+                            library_id=library_id,
+                            item_key=item_key,
+                            sentinel=sentinel,
+                            api_key=zotero_api_key
+                        )
 
-                    create_result = zotero_client.create_child_note(
-                        library_type=library_type,
-                        library_id=library_id,
-                        item_key=item_key,
-                        note_html=note_html,
-                        tags=["ragpy", "fiche-lecture"],
-                        api_key=zotero_api_key
-                    )
+                        if note_exists:
+                            results["exists"] += 1
+                            yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'exists'})}\n\n"
+                            continue
 
-                    if create_result.get("success"):
-                        results["created"] += 1
-                        yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'created'})}\n\n"
+                        create_result = zotero_client.create_child_note(
+                            library_type=library_type,
+                            library_id=library_id,
+                            item_key=item_key,
+                            note_html=note_html,
+                            tags=["ragpy", "fiche-lecture"],
+                            api_key=zotero_api_key
+                        )
+
+                        if create_result.get("success"):
+                            results["created"] += 1
+                            yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'created'})}\n\n"
+                        else:
+                            results["errors"] += 1
+                            yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'error', 'message': create_result.get('message', '')})}\n\n"
+
                     else:
-                        results["errors"] += 1
-                        yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'error', 'message': create_result.get('message', '')})}\n\n"
+                        # SHORT MODE: Generate abstract summary and update abstractNote
+                        abstract_text = llm_note_generator.build_abstract_text(
+                            metadata=metadata,
+                            text_content=text_content,
+                            model=llm_model
+                        )
+
+                        update_result = zotero_client.update_item_abstract(
+                            library_type=library_type,
+                            library_id=library_id,
+                            item_key=item_key,
+                            new_abstract=abstract_text,
+                            api_key=zotero_api_key
+                        )
+
+                        if update_result.get("success"):
+                            results["updated"] = results.get("updated", 0) + 1
+                            yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'updated'})}\n\n"
+                        else:
+                            results["errors"] += 1
+                            yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total_items, 'item': title, 'status': 'error', 'message': update_result.get('message', '')})}\n\n"
 
                 except Exception as e:
                     results["errors"] += 1

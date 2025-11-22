@@ -369,6 +369,154 @@ def create_child_note(
     }
 
 
+def update_item_abstract(
+    library_type: str,
+    library_id: str,
+    item_key: str,
+    new_abstract: str,
+    api_key: str,
+    separator: str = "\n\n---\n[Résumé enrichi par RAGpy]\n\n"
+) -> Dict:
+    """
+    Update an item's abstractNote field by appending new content.
+
+    This function retrieves the existing abstract and appends the new content,
+    preserving any existing abstract text.
+
+    Args:
+        library_type: "users" or "groups"
+        library_id: The library ID
+        item_key: The item key to update
+        new_abstract: New abstract text to append
+        api_key: Zotero API key
+        separator: Separator between existing and new abstract (default: markdown divider)
+
+    Returns:
+        Dictionary with response data including:
+        - success: bool
+        - message: str
+        - new_version: str (if successful)
+        - previous_abstract: str (the abstract before update)
+
+    Raises:
+        ZoteroAPIError: If the request fails
+    """
+    prefix = _build_library_prefix(library_type, library_id)
+
+    # First, get the current item to retrieve existing abstract and version
+    try:
+        item_data = get_item(library_type, library_id, item_key, api_key)
+    except ZoteroAPIError as e:
+        logger.error(f"Failed to retrieve item {item_key}: {e}")
+        raise
+
+    # Extract current abstract and version
+    current_data = item_data.get("data", {})
+    current_abstract = current_data.get("abstractNote", "")
+    item_version = str(item_data.get("version", "0"))
+
+    logger.info(f"Current abstract length: {len(current_abstract)} chars, version: {item_version}")
+
+    # Build new abstract by appending
+    if current_abstract and current_abstract.strip():
+        updated_abstract = current_abstract + separator + new_abstract
+    else:
+        updated_abstract = new_abstract
+
+    # Build the PATCH payload (only update abstractNote)
+    patch_payload = {
+        "abstractNote": updated_abstract
+    }
+
+    url = f"{ZOTERO_API_BASE}/{prefix}/items/{item_key}"
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Build headers with version control
+            additional_headers = {
+                "If-Unmodified-Since-Version": item_version
+            }
+            headers = _build_headers(api_key, additional_headers)
+
+            # Make PATCH request
+            response = requests.patch(
+                url,
+                headers=headers,
+                json=patch_payload,
+                timeout=30
+            )
+
+            # Handle response
+            if response.status_code in (200, 204):
+                new_version = response.headers.get("Last-Modified-Version", item_version)
+                logger.info(f"Successfully updated abstract for item {item_key}")
+                return {
+                    "success": True,
+                    "message": "Abstract updated successfully",
+                    "new_version": new_version,
+                    "previous_abstract": current_abstract,
+                    "new_abstract_length": len(updated_abstract)
+                }
+
+            elif response.status_code == 412:
+                # Version conflict - refresh item and retry
+                logger.warning(f"Version conflict (412), refreshing item (attempt {attempt + 1}/{MAX_RETRIES})")
+                try:
+                    item_data = get_item(library_type, library_id, item_key, api_key)
+                    current_data = item_data.get("data", {})
+                    current_abstract = current_data.get("abstractNote", "")
+                    item_version = str(item_data.get("version", "0"))
+
+                    # Rebuild abstract with fresh data
+                    if current_abstract and current_abstract.strip():
+                        updated_abstract = current_abstract + separator + new_abstract
+                    else:
+                        updated_abstract = new_abstract
+                    patch_payload["abstractNote"] = updated_abstract
+
+                except ZoteroAPIError:
+                    pass
+                time.sleep(RETRY_DELAY)
+                continue
+
+            elif response.status_code == 429:
+                # Rate limit
+                retry_after = int(response.headers.get("Retry-After", RETRY_DELAY))
+                logger.warning(f"Rate limit (429), waiting {retry_after}s")
+                time.sleep(retry_after)
+                continue
+
+            elif response.status_code == 404:
+                raise ZoteroAPIError(404, f"Item {item_key} not found", response)
+
+            elif response.status_code in (401, 403):
+                raise ZoteroAPIError(
+                    response.status_code,
+                    "Invalid API key or insufficient permissions",
+                    response
+                )
+
+            else:
+                raise ZoteroAPIError(
+                    response.status_code,
+                    f"Failed to update abstract: {response.text}",
+                    response
+                )
+
+        except requests.RequestException as e:
+            logger.error(f"Network error on attempt {attempt + 1}: {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+                continue
+            else:
+                raise ZoteroAPIError(0, f"Network error after {MAX_RETRIES} attempts: {str(e)}")
+
+    return {
+        "success": False,
+        "message": f"Failed to update abstract after {MAX_RETRIES} attempts"
+    }
+
+
 def get_item(
     library_type: str,
     library_id: str,

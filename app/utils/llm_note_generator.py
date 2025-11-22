@@ -442,6 +442,81 @@ def build_note_html(
     return sentinel, note_html
 
 
+def build_abstract_text(
+    metadata: Dict,
+    text_content: Optional[str] = None,
+    model: Optional[str] = None
+) -> str:
+    """
+    Build an abstract/summary text to enrich Zotero's abstractNote field.
+
+    This function generates a plain text summary (not HTML) that can be
+    appended to the existing abstract in Zotero.
+
+    Args:
+        metadata: Dictionary with item metadata (title, authors, abstract, etc.)
+        text_content: Full text content (texteocr). If None, will use abstract only.
+        model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
+
+    Returns:
+        Plain text summary string (200-350 words)
+
+    Example:
+        >>> metadata = {
+        ...     "title": "Machine Learning for NLP",
+        ...     "authors": "Smith, J.",
+        ...     "date": "2024",
+        ...     "abstract": "This paper presents...",
+        ...     "language": "en"
+        ... }
+        >>> summary = build_abstract_text(metadata, text_content="Full text...")
+        >>> print(summary)
+        This study investigates...
+    """
+    # Get fresh clients from environment
+    openai_client, openrouter_client, default_model = _get_llm_clients()
+
+    # Use default model if no model specified
+    if not model:
+        model = default_model
+        logger.info(f"No model specified, using default: {model}")
+
+    # Detect target language
+    language = _detect_language(metadata)
+    logger.info(f"Generating abstract summary in language: {language}")
+
+    # Check if LLM is available
+    if not (openai_client or openrouter_client):
+        logger.error("No LLM client available for abstract generation")
+        raise ValueError("No LLM client available (neither OpenAI nor OpenRouter). Check your API keys in Settings.")
+
+    # Use text_content if available, otherwise use abstract
+    content = text_content or metadata.get("abstract", "")
+
+    if not content:
+        logger.warning("No text content or abstract available for summary generation")
+        raise ValueError("No text content available to generate summary")
+
+    try:
+        # Build prompt using the short template (extended_analysis=False)
+        prompt = _build_prompt(metadata, content, language, extended_analysis=False)
+
+        # Generate with LLM (use smaller max_tokens for plain text summary)
+        summary = _generate_with_llm(prompt, model=model, extended_analysis=False)
+
+        # Clean up the response - remove any HTML tags that might have slipped through
+        import re
+        summary = re.sub(r'<[^>]+>', '', summary)
+        summary = summary.strip()
+
+        logger.info(f"Generated abstract summary (length: {len(summary)} chars)")
+        return summary
+
+    except Exception as e:
+        logger.error(f"Abstract generation failed: {e}")
+        raise
+
+
 def sentinel_in_html(html_text: str) -> bool:
     """
     Check if a sentinel is present in HTML text.
