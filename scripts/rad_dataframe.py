@@ -3,7 +3,14 @@ import json
 import re
 import unicodedata
 import base64
+import time
+import csv
 import pandas as pd
+from typing import Optional, List, NamedTuple, Dict, Any
+
+# Constants for retry logic
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2  # Exponential backoff: 2^attempt seconds
 
 def strip_accents(s):
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
@@ -33,7 +40,6 @@ def levenshtein(a, b):
 import fitz  # PyMuPDF
 from tqdm import tqdm
 import logging
-from typing import Optional, List, NamedTuple
 import argparse
 import requests
 from dotenv import load_dotenv
@@ -106,6 +112,173 @@ OPENAI_OCR_PROMPT = os.getenv(
 OPENAI_OCR_MAX_PAGES = _env_int("OPENAI_OCR_MAX_PAGES", 10)
 OPENAI_OCR_MAX_TOKENS = _env_int("OPENAI_OCR_MAX_TOKENS", 2048)
 OPENAI_OCR_RENDER_SCALE = _env_float("OPENAI_OCR_RENDER_SCALE", 2.0)
+
+
+# ============================================================================
+# PROGRESS TRACKING & INCREMENTAL SAVE UTILITIES
+# ============================================================================
+
+def get_progress_file_path(output_csv: str) -> str:
+    """Get the path to the progress tracking file."""
+    base = os.path.splitext(output_csv)[0]
+    return f"{base}.progress.json"
+
+
+def get_errors_file_path(output_csv: str) -> str:
+    """Get the path to the errors tracking file."""
+    base = os.path.splitext(output_csv)[0]
+    return f"{base}_errors.json"
+
+
+def load_progress(output_csv: str) -> set:
+    """
+    Load the set of already processed itemKeys from progress file.
+
+    Args:
+        output_csv: Path to the output CSV file
+
+    Returns:
+        Set of itemKeys that have been successfully processed
+    """
+    progress_file = get_progress_file_path(output_csv)
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                processed = set(data.get("processed_keys", []))
+                logger.info(f"Loaded progress: {len(processed)} items already processed")
+                return processed
+        except Exception as e:
+            logger.warning(f"Failed to load progress file: {e}")
+    return set()
+
+
+def save_progress(output_csv: str, processed_keys: set):
+    """
+    Save the set of processed itemKeys to progress file.
+
+    Args:
+        output_csv: Path to the output CSV file
+        processed_keys: Set of successfully processed itemKeys
+    """
+    progress_file = get_progress_file_path(output_csv)
+    try:
+        with open(progress_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                "processed_keys": list(processed_keys),
+                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
+            }, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save progress file: {e}")
+
+
+def append_record_to_csv(output_csv: str, record: Dict[str, Any], fieldnames: List[str]):
+    """
+    Append a single record to the CSV file.
+    Creates the file with headers if it doesn't exist.
+
+    Args:
+        output_csv: Path to the output CSV file
+        record: Dictionary containing the record data
+        fieldnames: List of column names
+    """
+    file_exists = os.path.exists(output_csv)
+
+    try:
+        with open(output_csv, 'a', newline='', encoding='utf-8-sig') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, escapechar='\\', quoting=csv.QUOTE_MINIMAL)
+
+            if not file_exists:
+                writer.writeheader()
+
+            writer.writerow(record)
+    except Exception as e:
+        logger.error(f"Failed to append record to CSV: {e}")
+        raise
+
+
+def save_errors(output_csv: str, errors: List[Dict[str, Any]]):
+    """
+    Save the list of errors to an errors file.
+
+    Args:
+        output_csv: Path to the output CSV file
+        errors: List of error dictionaries
+    """
+    errors_file = get_errors_file_path(output_csv)
+    try:
+        with open(errors_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                "total_errors": len(errors),
+                "errors": errors,
+                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
+            }, f, indent=2, ensure_ascii=False)
+        if errors:
+            logger.info(f"Saved {len(errors)} errors to {errors_file}")
+    except Exception as e:
+        logger.warning(f"Failed to save errors file: {e}")
+
+
+def extract_text_with_ocr_retry(
+    pdf_path: str,
+    max_pages: Optional[int] = None,
+    *,
+    return_details: bool = False,
+    max_retries: int = MAX_RETRIES,
+):
+    """
+    Attempt OCR extraction with retry logic for transient failures.
+
+    Args:
+        pdf_path: Path to the PDF file
+        max_pages: Maximum number of pages to process
+        return_details: Whether to return OCRResult with provider info
+        max_retries: Maximum number of retry attempts
+
+    Returns:
+        OCR result (text or OCRResult depending on return_details)
+
+    Raises:
+        OCRExtractionError: If all retries fail
+    """
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            return extract_text_with_ocr(
+                pdf_path,
+                max_pages=max_pages,
+                return_details=return_details
+            )
+        except OCRExtractionError:
+            # Don't retry for permanent failures (like missing API keys)
+            raise
+        except (requests.RequestException, requests.Timeout, ConnectionError) as e:
+            # Retry for network-related errors
+            last_error = e
+            if attempt < max_retries - 1:
+                wait_time = RETRY_BACKOFF_BASE ** attempt
+                logger.warning(
+                    f"OCR attempt {attempt + 1}/{max_retries} failed for {pdf_path}: {e}. "
+                    f"Retrying in {wait_time}s..."
+                )
+                time.sleep(wait_time)
+            else:
+                logger.error(f"All {max_retries} OCR attempts failed for {pdf_path}")
+        except Exception as e:
+            # For other errors, log and retry
+            last_error = e
+            if attempt < max_retries - 1:
+                wait_time = RETRY_BACKOFF_BASE ** attempt
+                logger.warning(
+                    f"OCR attempt {attempt + 1}/{max_retries} failed for {pdf_path}: {e}. "
+                    f"Retrying in {wait_time}s..."
+                )
+                time.sleep(wait_time)
+            else:
+                logger.error(f"All {max_retries} OCR attempts failed for {pdf_path}")
+
+    raise OCRExtractionError(f"OCR extraction failed after {max_retries} attempts: {last_error}")
 
 
 class OCRExtractionError(Exception):
@@ -394,12 +567,247 @@ def extract_text_with_ocr(
     )
     raise OCRExtractionError(error_message)
 
-def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
+def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, output_csv: str) -> pd.DataFrame:
     """
     Charge les métadonnées Zotero depuis un JSON vers un DataFrame
     avec extraction OCR du texte complet pour chaque PDF.
-    Les chemins PDF relatifs dans le JSON sont résolus par rapport à pdf_base_dir.
+
+    VERSION INCRÉMENTALE:
+    - Sauvegarde chaque item immédiatement après traitement
+    - Supporte la reprise après interruption (checkpoint)
+    - Retry avec backoff exponentiel pour les erreurs réseau
+    - Fichier d'erreurs séparé pour diagnostic
+
+    Args:
+        json_path: Chemin vers le fichier JSON Zotero
+        pdf_base_dir: Répertoire de base pour résoudre les chemins PDF relatifs
+        output_csv: Chemin vers le fichier CSV de sortie
+
+    Returns:
+        DataFrame pandas avec les enregistrements traités
     """
+    # CSV column order (consistent with original)
+    CSV_FIELDNAMES = [
+        "itemKey", "type", "title", "abstract", "date", "url", "doi",
+        "authors", "filename", "path", "attachment_title", "texteocr", "texteocr_provider"
+    ]
+
+    # Load progress (items already processed)
+    processed_keys = load_progress(output_csv)
+    errors = []
+    records_count = 0
+
+    try:
+        logger.info(f"Chargement du fichier JSON Zotero depuis : {json_path}")
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Support both Zotero export formats
+        if isinstance(data, list):
+            items = data
+            logger.info(f"Detected Zotero JSON format: direct array with {len(items)} items")
+        elif isinstance(data, dict) and "items" in data:
+            items = data["items"]
+            logger.info(f"Detected Zotero JSON format: object with 'items' key, {len(items)} items")
+        else:
+            logger.error(f"Invalid Zotero JSON format: expected array or object with 'items' key")
+            return pd.DataFrame()
+
+        # Calculate how many are already done
+        total_items = len(items)
+        already_done = len(processed_keys)
+        if already_done > 0:
+            logger.info(f"Resuming: {already_done}/{total_items} items already processed")
+
+        for item in tqdm(items, desc="Processing Zotero items"):
+            item_key = item.get("key") or item.get("itemKey", "")
+
+            # Skip if already processed (checkpoint)
+            if item_key and item_key in processed_keys:
+                logger.debug(f"Skipping already processed item: {item_key}")
+                continue
+
+            try:
+                # Extraction des métadonnées de base
+                metadata = {
+                    "itemKey": item_key,
+                    "type": item.get("itemType", ""),
+                    "title": item.get("title", ""),
+                    "abstract": item.get("abstractNote", ""),
+                    "date": item.get("date", ""),
+                    "url": item.get("url", ""),
+                    "doi": item.get("DOI", ""),
+                    "authors": ", ".join([
+                        f"{c.get('lastName', '').strip()} {c.get('firstName', '').strip()}"
+                        for c in item.get("creators", [])
+                        if c.get('lastName') or c.get('firstName')
+                    ])
+                }
+
+                # Traitement des attachments PDF
+                item_has_pdf = False
+                for attachment in item.get("attachments", []):
+                    path_from_json = attachment.get("path", "").strip()
+                    if path_from_json and path_from_json.lower().endswith(".pdf"):
+
+                        # Résoudre le chemin du PDF
+                        if os.path.isabs(path_from_json):
+                            actual_pdf_path = path_from_json
+                        else:
+                            actual_pdf_path = os.path.join(pdf_base_dir, path_from_json)
+
+                        if not os.path.exists(actual_pdf_path):
+                            # Recherche fuzzy avancée
+                            actual_pdf_path = _find_pdf_fuzzy(actual_pdf_path, path_from_json, pdf_base_dir)
+                            if actual_pdf_path is None:
+                                logger.warning(f"PDF non trouvé: {path_from_json}")
+                                errors.append({
+                                    "itemKey": item_key,
+                                    "title": metadata.get("title", ""),
+                                    "error_type": "PDF_NOT_FOUND",
+                                    "error_message": f"PDF not found: {path_from_json}",
+                                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                                })
+                                continue
+
+                        logger.info(f"Traitement du PDF : {actual_pdf_path}")
+                        try:
+                            # Use retry version for OCR
+                            ocr_payload = extract_text_with_ocr_retry(
+                                actual_pdf_path,
+                                return_details=True,
+                            )
+                        except OCRExtractionError as ocr_error:
+                            logger.error(
+                                "Échec OCR pour %s (%s): %s",
+                                actual_pdf_path,
+                                path_from_json,
+                                ocr_error,
+                            )
+                            errors.append({
+                                "itemKey": item_key,
+                                "title": metadata.get("title", ""),
+                                "error_type": "OCR_FAILED",
+                                "error_message": str(ocr_error),
+                                "pdf_path": actual_pdf_path,
+                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                            })
+                            continue
+
+                        # Build record
+                        record = {
+                            **metadata,
+                            "filename": os.path.basename(path_from_json),
+                            "path": actual_pdf_path,
+                            "attachment_title": attachment.get("title", ""),
+                            "texteocr": ocr_payload.text,
+                            "texteocr_provider": ocr_payload.provider,
+                        }
+
+                        # INCREMENTAL SAVE: Write immediately to CSV
+                        append_record_to_csv(output_csv, record, CSV_FIELDNAMES)
+                        records_count += 1
+                        item_has_pdf = True
+
+                        logger.info(f"✓ Item {item_key} saved ({records_count} total)")
+
+                # Mark item as processed (even if no PDF found, to avoid re-processing)
+                if item_key:
+                    processed_keys.add(item_key)
+                    # Save progress after each item
+                    save_progress(output_csv, processed_keys)
+
+            except Exception as item_error:
+                logger.error(f"Error processing item {item_key}: {item_error}")
+                errors.append({
+                    "itemKey": item_key,
+                    "title": item.get("title", ""),
+                    "error_type": "PROCESSING_ERROR",
+                    "error_message": str(item_error),
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                })
+                # Mark as processed to avoid infinite retry loop
+                if item_key:
+                    processed_keys.add(item_key)
+                    save_progress(output_csv, processed_keys)
+                continue
+
+    except Exception as e:
+        logger.error(f"Failed to load Zotero JSON: {e}")
+
+    # Save errors to file
+    save_errors(output_csv, errors)
+
+    # Return DataFrame from CSV (for compatibility)
+    if os.path.exists(output_csv):
+        try:
+            return pd.read_csv(output_csv, encoding='utf-8-sig', escapechar='\\')
+        except Exception as e:
+            logger.error(f"Failed to read output CSV: {e}")
+
+    return pd.DataFrame()
+
+
+def _find_pdf_fuzzy(actual_pdf_path: str, path_from_json: str, pdf_base_dir: str) -> Optional[str]:
+    """
+    Recherche fuzzy pour trouver un PDF avec différentes normalisations.
+
+    Returns:
+        Le chemin du PDF trouvé, ou None si non trouvé
+    """
+    base_dir = os.path.dirname(actual_pdf_path)
+    candidates = []
+
+    if os.path.exists(base_dir):
+        for root, dirs, files in os.walk(base_dir):
+            for f in files:
+                candidates.append(f)
+
+    if not candidates:
+        return None
+
+    target_names = [
+        unicodedata.normalize('NFC', os.path.basename(path_from_json)).lower(),
+        unicodedata.normalize('NFD', os.path.basename(path_from_json)).lower(),
+        strip_accents(unicodedata.normalize('NFC', os.path.basename(path_from_json))).lower(),
+        strip_accents(unicodedata.normalize('NFD', os.path.basename(path_from_json))).lower(),
+        ascii_flat(os.path.basename(path_from_json)),
+        alphanum_only(os.path.basename(path_from_json))
+    ]
+
+    for f in candidates:
+        f_forms = [
+            unicodedata.normalize('NFC', f).lower(),
+            unicodedata.normalize('NFD', f).lower(),
+            strip_accents(unicodedata.normalize('NFC', f)).lower(),
+            strip_accents(unicodedata.normalize('NFD', f)).lower(),
+            ascii_flat(f),
+            alphanum_only(f)
+        ]
+
+        # Fuzzy match (Levenshtein)
+        t_alpha = alphanum_only(os.path.basename(path_from_json))
+        f_alpha = alphanum_only(f)
+        lev = levenshtein(t_alpha, f_alpha)
+        fuzzy_match = lev <= 2 and min(len(t_alpha), len(f_alpha)) > 0
+
+        if any(t == ff for t in target_names for ff in f_forms) or fuzzy_match:
+            found_path = os.path.join(base_dir, f)
+            logger.info(f"Correspondance fuzzy trouvée: {path_from_json} -> {found_path}")
+            return found_path
+
+    return None
+
+
+# Keep the old function for backward compatibility (non-incremental)
+def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
+    """
+    DEPRECATED: Use load_zotero_to_dataframe_incremental instead.
+
+    Cette version batch est conservée pour compatibilité mais n'est plus recommandée
+    car elle ne supporte pas la reprise après interruption.
+    """
+    logger.warning("Using deprecated batch mode. Consider using incremental mode for better resilience.")
     records = []
     try:
         logger.info(f"Chargement du fichier JSON Zotero depuis : {json_path}")
@@ -408,11 +816,9 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
 
         # Support both Zotero export formats
         if isinstance(data, list):
-            # Format 1: Direct array [{item1}, {item2}, ...]
             items = data
             logger.info(f"Detected Zotero JSON format: direct array with {len(items)} items")
         elif isinstance(data, dict) and "items" in data:
-            # Format 2: Object with items key {"items": [{item1}, {item2}, ...]}
             items = data["items"]
             logger.info(f"Detected Zotero JSON format: object with 'items' key, {len(items)} items")
         else:
@@ -423,10 +829,10 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
             try:
                 # Extraction des métadonnées de base
                 metadata = {
-                    "itemKey": item.get("key") or item.get("itemKey", ""),  # Support modern ("key") and legacy ("itemKey")
+                    "itemKey": item.get("key") or item.get("itemKey", ""),
                     "type": item.get("itemType", ""),
                     "title": item.get("title", ""),
-                    "abstract": item.get("abstractNote", ""),  # Extract abstract for reading notes
+                    "abstract": item.get("abstractNote", ""),
                     "date": item.get("date", ""),
                     "url": item.get("url", ""),
                     "doi": item.get("DOI", ""),
@@ -436,69 +842,23 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
                         if c.get('lastName') or c.get('firstName')
                     ])
                 }
-                
+
                 # Traitement des attachments PDF
                 for attachment in item.get("attachments", []):
                     path_from_json = attachment.get("path", "").strip()
                     if path_from_json and path_from_json.lower().endswith(".pdf"):
-                        
+
                         # Résoudre le chemin du PDF
                         if os.path.isabs(path_from_json):
                             actual_pdf_path = path_from_json
                         else:
                             actual_pdf_path = os.path.join(pdf_base_dir, path_from_json)
-                        
+
                         if not os.path.exists(actual_pdf_path):
-                            # Recherche fuzzy avancée : NFC, NFD, sans accents, insensible à la casse
-                            base_dir, rel_path = os.path.split(actual_pdf_path)
-                            candidates = []
-                            for root, dirs, files in os.walk(os.path.dirname(actual_pdf_path)):
-                                for f in files:
-                                    candidates.append(f)
-                            logger.info(f"Fichiers candidats dans {os.path.dirname(actual_pdf_path)} : {candidates}")
-                            target_names = [
-                                unicodedata.normalize('NFC', os.path.basename(path_from_json)).lower(),
-                                unicodedata.normalize('NFD', os.path.basename(path_from_json)).lower(),
-                                strip_accents(unicodedata.normalize('NFC', os.path.basename(path_from_json))).lower(),
-                                strip_accents(unicodedata.normalize('NFD', os.path.basename(path_from_json))).lower(),
-                                ascii_flat(os.path.basename(path_from_json)),
-                                alphanum_only(os.path.basename(path_from_json))
-                            ]
-                            found = False
-                            for f in candidates:
-                                f_forms = [
-                                    unicodedata.normalize('NFC', f).lower(),
-                                    unicodedata.normalize('NFD', f).lower(),
-                                    strip_accents(unicodedata.normalize('NFC', f)).lower(),
-                                    strip_accents(unicodedata.normalize('NFD', f)).lower(),
-                                    ascii_flat(f),
-                                    alphanum_only(f)
-                                ]
-                                # Log détaillé pour debug
-                                logger.info(f"Comparaison pour {path_from_json} :")
-                                logger.info(f"  target_names = {target_names}")
-                                logger.info(f"  f = {f}")
-                                logger.info(f"  f_forms = {f_forms}")
-                                for t in target_names:
-                                    for ff in f_forms:
-                                        if t == ff:
-                                            logger.info(f"  MATCH: t='{t}' == ff='{ff}'")
-                                # Fuzzy match (Levenshtein) sur la forme alphanumérique only
-                                fuzzy_match = False
-                                t_alpha = alphanum_only(os.path.basename(path_from_json))
-                                f_alpha = alphanum_only(f)
-                                lev = levenshtein(t_alpha, f_alpha)
-                                if lev <= 2 and min(len(t_alpha), len(f_alpha)) > 0:
-                                    logger.info(f"  FUZZY MATCH (levenshtein={lev}): t_alpha='{t_alpha}' vs f_alpha='{f_alpha}'")
-                                    fuzzy_match = True
-                                if any(t == ff for t in target_names for ff in f_forms) or fuzzy_match:
-                                    actual_pdf_path = os.path.join(os.path.dirname(actual_pdf_path), f)
-                                    logger.info(f"Correspondance fuzzy avancée trouvée pour {path_from_json} : {actual_pdf_path}")
-                                    found = True
-                                    break
-                            if not found:
-                                logger.warning(f"PDF non trouvé au chemin résolu : {actual_pdf_path} (chemin original: {path_from_json}, base: {pdf_base_dir})")
-                                continue # Passer au prochain attachment si le PDF n'est pas trouvé
+                            actual_pdf_path = _find_pdf_fuzzy(actual_pdf_path, path_from_json, pdf_base_dir)
+                            if actual_pdf_path is None:
+                                logger.warning(f"PDF non trouvé: {path_from_json}")
+                                continue
 
                         logger.info(f"Traitement du PDF : {actual_pdf_path}")
                         try:
@@ -517,8 +877,8 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
 
                         records.append({
                             **metadata,
-                            "filename": os.path.basename(path_from_json), # Conserve le nom de fichier original du JSON
-                            "path": actual_pdf_path, # Stocke le chemin résolu et existant
+                            "filename": os.path.basename(path_from_json),
+                            "path": actual_pdf_path,
                             "attachment_title": attachment.get("title", ""),
                             "texteocr": ocr_payload.text,
                             "texteocr_provider": ocr_payload.provider,
@@ -526,10 +886,10 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
             except Exception as item_error:
                 logger.error(f"Error processing item: {item_error}")
                 continue
-                
+
     except Exception as e:
         logger.error(f"Failed to load Zotero JSON: {e}")
-    
+
     return pd.DataFrame(records)
 
 def extract_pdf_metadata_to_dataframe(pdf_directory: str) -> pd.DataFrame:
@@ -617,35 +977,64 @@ if __name__ == "__main__":
     parser.add_argument("--json", required=True, help="Path to the Zotero JSON file.")
     parser.add_argument("--dir", required=True, help="Base directory for resolving relative PDF paths from the JSON.")
     parser.add_argument("--output", required=True, help="Path to save the output CSV file.")
-    
+    parser.add_argument("--batch", action="store_true", help="Use deprecated batch mode (not recommended)")
+
     args = parser.parse_args()
 
     logger.info(f"Starting Zotero data processing for JSON: {args.json} with PDF base directory: {args.dir}")
 
-    # Charger les données Zotero et extraire le texte des PDF
-    df_zotero = load_zotero_to_dataframe(args.json, args.dir)
-
-    if not df_zotero.empty:
-        # S'assurer que le répertoire de sortie existe
-        output_dir = os.path.dirname(args.output)
-        if output_dir and not os.path.exists(output_dir):
-            try:
-                os.makedirs(output_dir, exist_ok=True)
-                logger.info(f"Created output directory: {output_dir}")
-            except Exception as e:
-                logger.error(f"Failed to create output directory {output_dir}: {e}")
-                print(f"Error creating output directory {output_dir}: {e}")
-                # Quitter si le répertoire ne peut pas être créé, car la sauvegarde échouera
-                exit()
-
-        # Sauvegarder le DataFrame en CSV
+    # S'assurer que le répertoire de sortie existe
+    output_dir = os.path.dirname(args.output)
+    if output_dir and not os.path.exists(output_dir):
         try:
-            df_zotero.to_csv(args.output, index=False, encoding='utf-8-sig', escapechar='\\')
-            logger.info(f"DataFrame successfully saved to {args.output}")
-            print(f"Output CSV saved to: {args.output}")
+            os.makedirs(output_dir, exist_ok=True)
+            logger.info(f"Created output directory: {output_dir}")
         except Exception as e:
-            logger.error(f"Failed to save DataFrame to CSV: {e}")
-            print(f"Error saving CSV: {e}")
+            logger.error(f"Failed to create output directory {output_dir}: {e}")
+            print(f"Error creating output directory {output_dir}: {e}")
+            exit(1)
+
+    if args.batch:
+        # Use deprecated batch mode
+        logger.warning("Using deprecated batch mode. Use incremental mode for better resilience.")
+        df_zotero = load_zotero_to_dataframe(args.json, args.dir)
+
+        if not df_zotero.empty:
+            try:
+                df_zotero.to_csv(args.output, index=False, encoding='utf-8-sig', escapechar='\\')
+                logger.info(f"DataFrame successfully saved to {args.output}")
+                print(f"Output CSV saved to: {args.output}")
+            except Exception as e:
+                logger.error(f"Failed to save DataFrame to CSV: {e}")
+                print(f"Error saving CSV: {e}")
+                exit(1)
+        else:
+            logger.warning("No data processed from Zotero JSON. Output CSV will not be created.")
+            print("No data processed. Output CSV not created.")
     else:
-        logger.warning("No data processed from Zotero JSON. Output CSV will not be created.")
-        print("No data processed. Output CSV not created.")
+        # Use new incremental mode (default)
+        logger.info("Using incremental mode with checkpoint support")
+        df_zotero = load_zotero_to_dataframe_incremental(args.json, args.dir, args.output)
+
+        if os.path.exists(args.output):
+            logger.info(f"Processing complete. Output CSV: {args.output}")
+            print(f"Output CSV saved to: {args.output}")
+
+            # Show summary
+            progress_file = get_progress_file_path(args.output)
+            errors_file = get_errors_file_path(args.output)
+
+            if os.path.exists(progress_file):
+                with open(progress_file, 'r') as f:
+                    progress = json.load(f)
+                    print(f"  - Items processed: {len(progress.get('processed_keys', []))}")
+
+            if os.path.exists(errors_file):
+                with open(errors_file, 'r') as f:
+                    errors = json.load(f)
+                    error_count = errors.get('total_errors', 0)
+                    if error_count > 0:
+                        print(f"  - Errors: {error_count} (see {errors_file})")
+        else:
+            logger.warning("No data processed from Zotero JSON. Output CSV will not be created.")
+            print("No data processed. Output CSV not created.")
