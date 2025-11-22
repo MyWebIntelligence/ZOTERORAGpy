@@ -196,8 +196,10 @@ async def upload_csv_endpoint(file: UploadFile = File(...)):
         df.to_csv(output_csv_path, index=False, encoding="utf-8-sig")
         logger.info(f"DataFrame saved as output.csv: {output_csv_path}")
 
-        # Delete temporary CSV
-        os.remove(temp_csv_path)
+        # Delete temporary CSV only if it's different from output.csv
+        if os.path.abspath(temp_csv_path) != os.path.abspath(output_csv_path):
+            os.remove(temp_csv_path)
+            logger.info(f"Temporary CSV deleted: {temp_csv_path}")
 
         # Build file tree
         tree = ["output.csv"]
