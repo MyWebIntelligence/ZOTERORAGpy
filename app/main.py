@@ -262,63 +262,163 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
             logger.error(f"Processing directory does not exist: {absolute_processing_path}")
             return JSONResponse(status_code=400, content={"error": f"Processing directory not found: {path}"})
 
-        json_files = [f for f in os.listdir(absolute_processing_path) if f.lower().endswith('.json')]
-        if not json_files:
-            logger.error(f"No JSON file found in {absolute_processing_path}")
-            return JSONResponse(status_code=400, content={"error": "No JSON file found."})
-        json_path = os.path.join(absolute_processing_path, json_files[0])
         out_csv = os.path.join(absolute_processing_path, 'output.csv')
-        
-        logger.info(f"Processing dataframe with JSON: {json_path}, output: {out_csv}")
-        
-        # Run extraction script with improved error handling
-        try:
-            # Construct absolute path to the script using RAGPY_DIR
-            # RAGPY_DIR is /.../ragpy
-            project_scripts_dir = os.path.join(RAGPY_DIR, "scripts") # Scripts are in ragpy/scripts
-            script_path = os.path.join(project_scripts_dir, "rad_dataframe.py")
-            # Ensure it's absolute and normalized (though it should be already if RAGPY_DIR was derived from abspath)
-            script_path = os.path.abspath(script_path)
 
-            logger.info(f"  APP_DIR: {APP_DIR}")
-            logger.info(f"  RAGPY_DIR: {RAGPY_DIR}")
-            logger.info(f"  Calculated project_scripts_dir: {project_scripts_dir}")
-            logger.info(f"  Calculated script_path (final for subprocess): {script_path}")
-            
-            # Log the exact command and arguments being used
-            cmd_to_run = [
-                "python3", script_path,
-                "--json", os.path.abspath(json_path), 
-                "--dir", os.path.abspath(absolute_processing_path), 
-                "--output", os.path.abspath(out_csv)
-            ]
-            logger.info(f"Executing rad_dataframe.py with command: {' '.join(cmd_to_run)}")
-            logger.info(f"  Resolved --json path: {os.path.abspath(json_path)}")
-            logger.info(f"  Resolved --dir path: {os.path.abspath(absolute_processing_path)}")
-            logger.info(f"  Resolved --output path: {os.path.abspath(out_csv)}")
-            logger.info(f"  Existence check for --json ({os.path.abspath(json_path)}): {os.path.exists(os.path.abspath(json_path))}")
-            logger.info(f"  Existence check for --dir ({os.path.abspath(absolute_processing_path)}): {os.path.exists(os.path.abspath(absolute_processing_path))}")
+        # Check if output.csv already exists with texteocr content
+        # Determine OCR mode: "full", "partial", or "skip"
+        ocr_mode = "full"  # Default: run full OCR via rad_dataframe.py
+        missing_ocr_indices = []
 
+        if os.path.exists(out_csv):
+            try:
+                existing_df = pd.read_csv(out_csv, dtype=str, keep_default_na=False)
+                if 'texteocr' in existing_df.columns:
+                    # Check which rows have empty texteocr
+                    empty_mask = existing_df['texteocr'].str.strip().str.len() == 0
+                    empty_count = empty_mask.sum()
+                    total_count = len(existing_df)
+                    non_empty_count = total_count - empty_count
 
-            # Use shell=False for better security and explicit argument passing
-            result = subprocess.run([
-                "python3", script_path,
-                "--json", json_path, # Already absolute
-                "--dir", absolute_processing_path, # Pass absolute path to script
-                "--output", out_csv # Already absolute
-            ], check=False, capture_output=True, text=True)  # Don't use check=True, handle ourselves
-            
-            # Manually check the return code and handle
-            if result.returncode != 0:
-                logger.error(f"Extraction script failed with code {result.returncode}. stderr: {result.stderr}")
-                return JSONResponse(status_code=500, content={
-                    "error": f"Extraction script failed with code {result.returncode}.", 
-                    "details": result.stderr,
-                    "stdout": result.stdout[:500]  # Include first part of stdout for debugging
+                    if empty_count == 0:
+                        # All rows have texteocr → skip OCR entirely
+                        ocr_mode = "skip"
+                        logger.info(
+                            f"output.csv contains 'texteocr' for all {total_count} rows. "
+                            f"Skipping OCR extraction."
+                        )
+                    elif non_empty_count > 0:
+                        # Some rows have texteocr, some don't → partial OCR
+                        ocr_mode = "partial"
+                        missing_ocr_indices = existing_df[empty_mask].index.tolist()
+                        logger.info(
+                            f"output.csv has partial 'texteocr': {non_empty_count}/{total_count} rows filled, "
+                            f"{empty_count} rows need OCR."
+                        )
+                    # else: all empty → full OCR needed
+            except Exception as e:
+                logger.warning(f"Could not check existing output.csv: {e}. Proceeding with full OCR.")
+
+        # Find JSON file only if full OCR is needed
+        json_path = None
+        if ocr_mode == "full":
+            json_files = [f for f in os.listdir(absolute_processing_path) if f.lower().endswith('.json')]
+            if not json_files:
+                logger.error(f"No JSON file found in {absolute_processing_path} and no existing texteocr content")
+                return JSONResponse(status_code=400, content={
+                    "error": "No JSON file found and output.csv does not contain texteocr content."
                 })
-        except Exception as e:
-            logger.error(f"An unexpected error occurred during dataframe processing: {str(e)}", exc_info=True)
-            return JSONResponse(status_code=500, content={"error": "An unexpected error occurred.", "details": str(e)})
+            json_path = os.path.join(absolute_processing_path, json_files[0])
+            logger.info(f"Processing dataframe with JSON: {json_path}, output: {out_csv}")
+
+        if ocr_mode == "skip":
+            logger.info("OCR skipped - using existing output.csv with complete texteocr content")
+        elif ocr_mode == "partial":
+            # Partial OCR: process only rows with missing texteocr
+            logger.info(f"Starting partial OCR for {len(missing_ocr_indices)} rows...")
+            try:
+                # Import OCR function from rad_dataframe
+                import sys
+                if RAGPY_DIR not in sys.path:
+                    sys.path.insert(0, RAGPY_DIR)
+                from scripts.rad_dataframe import extract_text_with_ocr
+
+                # Check if 'path' column exists for PDF paths
+                if 'path' not in existing_df.columns:
+                    logger.warning("No 'path' column found. Cannot perform partial OCR without PDF paths.")
+                    return JSONResponse(status_code=400, content={
+                        "error": "Cannot perform partial OCR: 'path' column missing. "
+                                 "Please add a 'path' column with PDF file paths for rows needing OCR."
+                    })
+
+                updated_count = 0
+                for idx in missing_ocr_indices:
+                    pdf_path = str(existing_df.loc[idx, 'path']).strip()
+                    if not pdf_path:
+                        logger.warning(f"Row {idx}: empty 'path', skipping OCR")
+                        continue
+
+                    # Resolve relative paths
+                    if not os.path.isabs(pdf_path):
+                        pdf_path = os.path.join(absolute_processing_path, pdf_path)
+
+                    if not os.path.exists(pdf_path):
+                        logger.warning(f"Row {idx}: PDF not found at '{pdf_path}', skipping OCR")
+                        continue
+
+                    try:
+                        logger.info(f"Row {idx}: Processing OCR for '{os.path.basename(pdf_path)}'...")
+                        text, provider = extract_text_with_ocr(pdf_path)
+                        existing_df.loc[idx, 'texteocr'] = text
+                        existing_df.loc[idx, 'texteocr_provider'] = provider
+                        updated_count += 1
+                        logger.info(f"Row {idx}: OCR completed ({provider}), {len(text)} chars")
+                    except Exception as ocr_err:
+                        logger.error(f"Row {idx}: OCR failed for '{pdf_path}': {ocr_err}")
+
+                # Save updated CSV
+                existing_df.to_csv(out_csv, index=False, encoding='utf-8-sig')
+                logger.info(f"Partial OCR completed: {updated_count}/{len(missing_ocr_indices)} rows updated")
+
+            except ImportError as e:
+                logger.error(f"Failed to import OCR module: {e}")
+                return JSONResponse(status_code=500, content={
+                    "error": "Server configuration error: OCR module not found.",
+                    "details": str(e)
+                })
+            except Exception as e:
+                logger.error(f"Partial OCR failed: {e}", exc_info=True)
+                return JSONResponse(status_code=500, content={
+                    "error": "Partial OCR processing failed.",
+                    "details": str(e)
+                })
+        else:
+            # Run extraction script with improved error handling
+            try:
+                # Construct absolute path to the script using RAGPY_DIR
+                # RAGPY_DIR is /.../ragpy
+                project_scripts_dir = os.path.join(RAGPY_DIR, "scripts") # Scripts are in ragpy/scripts
+                script_path = os.path.join(project_scripts_dir, "rad_dataframe.py")
+                # Ensure it's absolute and normalized (though it should be already if RAGPY_DIR was derived from abspath)
+                script_path = os.path.abspath(script_path)
+
+                logger.info(f"  APP_DIR: {APP_DIR}")
+                logger.info(f"  RAGPY_DIR: {RAGPY_DIR}")
+                logger.info(f"  Calculated project_scripts_dir: {project_scripts_dir}")
+                logger.info(f"  Calculated script_path (final for subprocess): {script_path}")
+
+                # Log the exact command and arguments being used
+                cmd_to_run = [
+                    "python3", script_path,
+                    "--json", os.path.abspath(json_path),
+                    "--dir", os.path.abspath(absolute_processing_path),
+                    "--output", os.path.abspath(out_csv)
+                ]
+                logger.info(f"Executing rad_dataframe.py with command: {' '.join(cmd_to_run)}")
+                logger.info(f"  Resolved --json path: {os.path.abspath(json_path)}")
+                logger.info(f"  Resolved --dir path: {os.path.abspath(absolute_processing_path)}")
+                logger.info(f"  Resolved --output path: {os.path.abspath(out_csv)}")
+                logger.info(f"  Existence check for --json ({os.path.abspath(json_path)}): {os.path.exists(os.path.abspath(json_path))}")
+                logger.info(f"  Existence check for --dir ({os.path.abspath(absolute_processing_path)}): {os.path.exists(os.path.abspath(absolute_processing_path))}")
+
+                # Use shell=False for better security and explicit argument passing
+                result = subprocess.run([
+                    "python3", script_path,
+                    "--json", json_path, # Already absolute
+                    "--dir", absolute_processing_path, # Pass absolute path to script
+                    "--output", out_csv # Already absolute
+                ], check=False, capture_output=True, text=True)  # Don't use check=True, handle ourselves
+
+                # Manually check the return code and handle
+                if result.returncode != 0:
+                    logger.error(f"Extraction script failed with code {result.returncode}. stderr: {result.stderr}")
+                    return JSONResponse(status_code=500, content={
+                        "error": f"Extraction script failed with code {result.returncode}.",
+                        "details": result.stderr,
+                        "stdout": result.stdout[:500]  # Include first part of stdout for debugging
+                    })
+            except Exception as e:
+                logger.error(f"An unexpected error occurred during dataframe processing: {str(e)}", exc_info=True)
+                return JSONResponse(status_code=500, content={"error": "An unexpected error occurred.", "details": str(e)})
 
         # Load and preview CSV
         if not os.path.exists(out_csv):
