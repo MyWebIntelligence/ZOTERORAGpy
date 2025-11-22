@@ -148,6 +148,33 @@
   <div class="container">
     <h1>RAGpy Data Processing Pipeline</h1>
 
+    <!-- Step Tracker - Barre de progression -->
+    <div class="step-tracker" id="stepTracker">
+      <div class="step-item active" data-step="upload">
+        <span class="step-number">1</span>
+        <span class="step-title">Upload</span>
+        <a class="step-file-link" style="display:none"></a>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item locked" data-step="extraction">
+        <span class="step-number">2</span>
+        <span class="step-title">Extraction</span>
+        <a class="step-file-link" style="display:none"></a>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item locked" data-step="processing">
+        <span class="step-number">3</span>
+        <span class="step-title">Traitement</span>
+        <a class="step-file-link" style="display:none"></a>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item locked" data-step="destination">
+        <span class="step-number">4</span>
+        <span class="step-title">Destination</span>
+        <a class="step-file-link" style="display:none"></a>
+      </div>
+    </div>
+
     <div id="global-controls" style="text-align: center; margin-bottom: 20px;">
       <button id="stopAllScriptsBtn" class="danger-btn">Stop All Running Scripts</button>
       <div id="stopScriptsResult" class="result" style="display: none; margin-top:10px;"></div>
@@ -188,141 +215,303 @@
     </section>
 
     <!-- Step 2: Process DataFrame -->
-    <section id="dataframe-section" style="display:none;">
+    <section id="dataframe-section" class="step-locked">
       <h2>2. Extract Text & Metadata</h2>
       <button id="processDataframeBtn">Generate CSV</button>
       <div id="dataframeResult" class="result"></div>
     </section>
 
-    <!-- Step 3.1: Initial Text Chunking -->
-    <section id="initial-chunk-section" style="display:none;">
-      <h2>3.1 Initial Text Chunking</h2>
-      <p style="color: black; font-size: 0.9em;">Warning: This process can take a long time depending on your file. Do not close your browser. We recommend processing a maximum of 10 articles or one book at a time.</p>
-      <form id="initialChunkUploadForm" enctype="multipart/form-data" class="stage-upload-form">
-        <input type="file" id="initialChunkUploadInput" name="file" accept=".csv" />
-        <button type="submit">Upload output.csv</button>
-      </form>
-      <label for="recodingModelInput" style="margin-top: 10px; display: block;">Recoding Model (optional):</label>
-      <input type="text" id="recodingModelInput" placeholder="openai/gemini-2.5-flash" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;" />
-      <p style="font-size: 0.85em; color: #666; margin-top: -5px;">Leave empty to use default from Settings. Format: "openai/gemini-2.5-flash" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
-      <button id="runInitialChunkBtn">Generate Chunks</button>
-      <div id="initialChunkResult" class="result"></div>
-    </section>
+    <!-- ========================================
+         ARBRE DE DECISION - Bifurcation POST-CSV
+         ======================================== -->
+    <div class="decision-tree step-locked" id="decision-tree">
+      <h2>3. Choisissez votre destination</h2>
+      <p class="tree-subtitle">Vous pouvez selectionner l'une ou les deux options</p>
 
-    <!-- Step 3.2: Dense Embedding Generation -->
-    <section id="dense-embedding-section" style="display:none;">
-      <h2>3.2 Dense Embedding Generation</h2>
-      <form id="denseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
-        <input type="file" id="denseUploadInput" name="file" accept=".json" />
-        <button type="submit">Upload output_chunks.json</button>
-      </form>
-      <button id="runDenseEmbeddingBtn">Generate Dense Embeddings</button>
-      <div id="denseEmbeddingResult" class="result"></div>
-    </section>
-
-    <!-- Step 3.3: Sparse Embedding Generation -->
-    <section id="sparse-embedding-section" style="display:none;">
-      <h2>3.3 Sparse Embedding Generation</h2>
-      <form id="sparseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
-        <input type="file" id="sparseUploadInput" name="file" accept=".json" />
-        <button type="submit">Upload output_chunks_with_embeddings.json</button>
-      </form>
-      <button id="runSparseEmbeddingBtn">Generate Sparse Embeddings</button>
-      <div id="sparseEmbeddingResult" class="result"></div>
-    </section>
-
-    <!-- Step 4: Choose Output Destination(s) -->
-    <section id="output-choice-section" style="display:none;">
-      <h2>4. Choose Output Destination(s)</h2>
-      <p style="color: #555; margin-bottom: 15px;">Select where to send your processed data (you can choose both):</p>
-
-      <!-- Option A: Vector Database -->
-      <div style="border: 2px solid #1976d2; border-radius: 8px; padding: 15px; margin-bottom: 15px; background: #f0f7ff;">
-        <div style="display: flex; align-items: center; margin-bottom: 10px;">
-          <input type="checkbox" id="vectorDbCheckbox" checked style="margin-right: 10px; width: 20px; height: 20px;" />
-          <h3 style="margin: 0; color: #1976d2;">📊 Option A: Vector Database</h3>
-        </div>
-        <p style="font-size: 0.9em; color: #555; margin-bottom: 10px;">
-          Store embeddings for semantic search and RAG applications.
-        </p>
-
-        <div id="vectorDbOptions" style="margin-top: 10px;">
-          <label for="dbChoice">Choose Database:</label>
-          <select id="dbChoice">
-            <option value="pinecone">Pinecone</option>
-            <option value="weaviate">Weaviate</option>
-            <option value="qdrant">Qdrant</option>
-          </select>
-
-          <div id="pineconeParams" class="db-params" style="margin-top:10px;">
-            <label for="pineconeIndexName">Pinecone Index Name:</label>
-            <input type="text" id="pineconeIndexName" name="pinecone_index_name" value="articles" placeholder="e.g., articles">
-            <br>
-            <label for="pineconeNamespace" style="margin-top:5px; display:inline-block;">Pinecone Namespace (optional):</label>
-            <input type="text" id="pineconeNamespace" name="pinecone_namespace" placeholder="e.g., workshop" />
-          </div>
-          <div id="weaviateParams" class="db-params" style="display:none; margin-top:10px;">
-            <label for="weaviateClassName">Weaviate Class Name:</label>
-            <input type="text" id="weaviateClassName" name="weaviate_class_name" value="Article" placeholder="e.g., Article">
-            <br>
-            <label for="weaviateTenantName" style="margin-top:5px; display:inline-block;">Weaviate Tenant Name:</label>
-            <input type="text" id="weaviateTenantName" name="weaviate_tenant_name" value="alakel" placeholder="e.g., alakel">
-          </div>
-          <div id="qdrantParams" class="db-params" style="display:none; margin-top:10px;">
-            <label for="qdrantCollectionName">Qdrant Collection Name:</label>
-            <input type="text" id="qdrantCollectionName" name="qdrant_collection_name" placeholder="e.g., my_documents" required>
-          </div>
-
-          <button id="uploadDbBtn" style="margin-top:15px;">Upload to Vector DB</button>
-          <div id="dbResult" class="result"></div>
-        </div>
-      </div>
-
-      <!-- Option B: Zotero Notes -->
-      <div style="border: 2px solid #9c27b0; border-radius: 8px; padding: 15px; background: #f3e5f5;">
-        <div style="display: flex; align-items: center; margin-bottom: 10px;">
-          <input type="checkbox" id="zoteroNotesCheckbox" style="margin-right: 10px; width: 20px; height: 20px;" />
-          <h3 style="margin: 0; color: #9c27b0;">📝 Option B: Zotero Reading Notes</h3>
-        </div>
-        <p style="font-size: 0.9em; color: #555; margin-bottom: 10px;">
-          Generate AI-powered reading notes and add them to your Zotero library.
-          <strong>Only available for Zotero exports.</strong>
-        </p>
-
-        <div id="zoteroOptions" style="display:none; margin-top: 10px;">
-          <div style="margin-bottom: 15px;">
-            <label style="display: flex; align-items: center; cursor: pointer;">
-              <input type="checkbox" id="extendedAnalysisCheckbox" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;" />
-              <span style="font-weight: 500;">Extended Analysis (8000-12000 mots)</span>
+      <div class="branches-container">
+        <!-- ========== BRANCHE GAUCHE : RAG ========== -->
+        <div class="branch branch-rag selected" id="rag-branch">
+          <div class="branch-header">
+            <input type="checkbox" id="rag-checkbox" checked>
+            <label for="rag-checkbox">
+              <span class="branch-icon">🔍</span>
+              <span class="branch-title">Nourrir un RAG</span>
             </label>
-            <p style="font-size: 0.85em; color: #666; margin-top: 5px; margin-left: 26px;">
-              Uncheck for quick summary (200-300 words). Extended analysis includes detailed methodology, evaluation tables, and bibliography.
-            </p>
           </div>
+          <div class="branch-content">
+            <!-- Step 3.1: Initial Text Chunking -->
+            <section id="initial-chunk-section">
+              <h2>3.1 Initial Text Chunking</h2>
+              <p style="color: black; font-size: 0.9em;">Warning: This process can take a long time depending on your file. Do not close your browser. We recommend processing a maximum of 10 articles or one book at a time.</p>
+              <form id="initialChunkUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+                <input type="file" id="initialChunkUploadInput" name="file" accept=".csv" />
+                <button type="submit">Upload output.csv</button>
+              </form>
+              <label for="recodingModelInput" style="margin-top: 10px; display: block;">Recoding Model (optional):</label>
+              <input type="text" id="recodingModelInput" placeholder="openai/gemini-2.5-flash" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;" />
+              <p style="font-size: 0.85em; color: #666; margin-top: -5px;">Leave empty to use default from Settings. Format: "openai/gemini-2.5-flash" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
+              <button id="runInitialChunkBtn">Generate Chunks</button>
+              <div id="initialChunkResult" class="result"></div>
+            </section>
 
-          <label for="zoteroModelInput" style="display: block; margin-bottom: 5px;">LLM Model (optional):</label>
-          <input type="text" id="zoteroModelInput" placeholder="openai/gemini-2.5-flash or gpt-4o-mini" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;" />
-          <p style="font-size: 0.85em; color: #666; margin-top: -5px;">Leave empty to use default (gpt-4o-mini). Format: "openai/gemini-2.5-flash" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
+            <!-- Step 3.2: Dense Embedding Generation -->
+            <section id="dense-embedding-section" class="step-locked">
+              <h2>3.2 Dense Embedding Generation</h2>
+              <form id="denseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+                <input type="file" id="denseUploadInput" name="file" accept=".json" />
+                <button type="submit">Upload output_chunks.json</button>
+              </form>
+              <button id="runDenseEmbeddingBtn">Generate Dense Embeddings</button>
+              <div id="denseEmbeddingResult" class="result"></div>
+            </section>
 
-          <button id="generateZoteroNotesBtn" style="margin-top: 10px; background: #9c27b0;">
-            Generate Zotero Notes
-          </button>
+            <!-- Step 3.3: Sparse Embedding Generation -->
+            <section id="sparse-embedding-section" class="step-locked">
+              <h2>3.3 Sparse Embedding Generation</h2>
+              <form id="sparseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+                <input type="file" id="sparseUploadInput" name="file" accept=".json" />
+                <button type="submit">Upload output_chunks_with_embeddings.json</button>
+              </form>
+              <button id="runSparseEmbeddingBtn">Generate Sparse Embeddings</button>
+              <div id="sparseEmbeddingResult" class="result"></div>
+            </section>
 
-          <div id="zoteroProgress" style="display:none; margin-top: 15px;">
-            <div style="background: #e0e0e0; border-radius: 4px; height: 24px; overflow: hidden;">
-              <div id="zoteroProgressBar" style="background: #9c27b0; height: 100%; width: 0%; transition: width 0.3s;"></div>
-            </div>
-            <p id="zoteroProgressText" style="margin-top: 5px; font-size: 0.9em; color: #666;">0/0 items processed</p>
+            <!-- Step 4: Vector Database Upload -->
+            <section id="db-section" class="step-locked">
+              <h2>4. Upload to Vector Database</h2>
+              <p style="font-size: 0.9em; color: #555; margin-bottom: 10px;">
+                Store embeddings for semantic search and RAG applications.
+              </p>
+
+              <div id="vectorDbOptions" style="margin-top: 10px;">
+                <label for="dbChoice">Choose Database:</label>
+                <select id="dbChoice">
+                  <option value="pinecone">Pinecone</option>
+                  <option value="weaviate">Weaviate</option>
+                  <option value="qdrant">Qdrant</option>
+                </select>
+
+                <div id="pineconeParams" class="db-params" style="margin-top:10px;">
+                  <label for="pineconeIndexName">Pinecone Index Name:</label>
+                  <input type="text" id="pineconeIndexName" name="pinecone_index_name" value="articles" placeholder="e.g., articles">
+                  <br>
+                  <label for="pineconeNamespace" style="margin-top:5px; display:inline-block;">Pinecone Namespace (optional):</label>
+                  <input type="text" id="pineconeNamespace" name="pinecone_namespace" placeholder="e.g., workshop" />
+                </div>
+                <div id="weaviateParams" class="db-params" style="display:none; margin-top:10px;">
+                  <label for="weaviateClassName">Weaviate Class Name:</label>
+                  <input type="text" id="weaviateClassName" name="weaviate_class_name" value="Article" placeholder="e.g., Article">
+                  <br>
+                  <label for="weaviateTenantName" style="margin-top:5px; display:inline-block;">Weaviate Tenant Name:</label>
+                  <input type="text" id="weaviateTenantName" name="weaviate_tenant_name" value="alakel" placeholder="e.g., alakel">
+                </div>
+                <div id="qdrantParams" class="db-params" style="display:none; margin-top:10px;">
+                  <label for="qdrantCollectionName">Qdrant Collection Name:</label>
+                  <input type="text" id="qdrantCollectionName" name="qdrant_collection_name" placeholder="e.g., my_documents" required>
+                </div>
+
+                <button id="uploadDbBtn" style="margin-top:15px;">Upload to Vector DB</button>
+                <div id="dbResult" class="result"></div>
+              </div>
+            </section>
           </div>
+        </div>
 
-          <div id="zoteroLog" class="result" style="max-height: 400px; overflow-y: auto;"></div>
+        <!-- ========== BRANCHE DROITE : ZOTERO NOTES ========== -->
+        <div class="branch branch-zotero" id="zotero-branch">
+          <div class="branch-header">
+            <input type="checkbox" id="zotero-checkbox">
+            <label for="zotero-checkbox">
+              <span class="branch-icon">📝</span>
+              <span class="branch-title">Notes Zotero</span>
+            </label>
+          </div>
+          <div class="branch-content">
+            <section id="zotero-notes-section">
+              <h2>3. Generate Zotero Reading Notes</h2>
+              <p style="font-size: 0.9em; color: #555; margin-bottom: 15px;">
+                Generate AI-powered reading notes and add them to your Zotero library.
+                <strong>Only available for Zotero exports.</strong>
+              </p>
+
+              <div style="margin-bottom: 15px;">
+                <label style="display: flex; align-items: center; cursor: pointer;">
+                  <input type="checkbox" id="extendedAnalysisCheckbox" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;" />
+                  <span style="font-weight: 500;">Extended Analysis (8000-12000 mots)</span>
+                </label>
+                <p style="font-size: 0.85em; color: #666; margin-top: 5px; margin-left: 26px;">
+                  Uncheck for quick summary (200-300 words). Extended analysis includes detailed methodology, evaluation tables, and bibliography.
+                </p>
+              </div>
+
+              <label for="zoteroModelInput" style="display: block; margin-bottom: 5px;">LLM Model (optional):</label>
+              <input type="text" id="zoteroModelInput" placeholder="openai/gemini-2.5-flash or gpt-4o-mini" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;" />
+              <p style="font-size: 0.85em; color: #666; margin-top: -5px;">Leave empty to use default (gpt-4o-mini). Format: "openai/gemini-2.5-flash" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
+
+              <button id="generateZoteroNotesBtn" style="margin-top: 10px; background: #9c27b0;">
+                Generate Zotero Notes
+              </button>
+
+              <div id="zoteroProgress" style="display:none; margin-top: 15px;">
+                <div style="background: #e0e0e0; border-radius: 4px; height: 24px; overflow: hidden;">
+                  <div id="zoteroProgressBar" style="background: #9c27b0; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                </div>
+                <p id="zoteroProgressText" style="margin-top: 5px; font-size: 0.9em; color: #666;">0/0 items processed</p>
+              </div>
+
+              <div id="zoteroLog" class="result" style="max-height: 400px; overflow-y: auto;"></div>
+            </section>
+          </div>
         </div>
       </div>
-    </section>
+    </div>
   </div>
 
   <script>
+    // ========================================
+    // STATE MANAGEMENT
+    // ========================================
+    const appState = {
+      currentPath: '',
+      steps: {
+        upload: { completed: false, file: null },
+        extraction: { completed: false, file: 'output.csv' },
+        chunking: { completed: false, file: 'output_chunks.json' },
+        denseEmbed: { completed: false, file: 'output_chunks_with_embeddings.json' },
+        sparseEmbed: { completed: false, file: 'output_chunks_with_embeddings_sparse.json' },
+        vectorDb: { completed: false, file: null },
+        zoteroNotes: { completed: false, file: null }
+      },
+      selectedBranches: {
+        rag: true,
+        zotero: false
+      },
+      isZoteroExport: false // Track if current upload is from Zotero
+    };
+
+    // ========================================
+    // STEP TRACKER FUNCTIONS
+    // ========================================
+    function updateStepTracker(stepName, status) {
+      const stepMapping = {
+        'upload': 'upload',
+        'extraction': 'extraction',
+        'chunking': 'processing',
+        'denseEmbed': 'processing',
+        'sparseEmbed': 'processing',
+        'vectorDb': 'destination',
+        'zoteroNotes': 'destination'
+      };
+
+      const trackerStep = stepMapping[stepName];
+      if (!trackerStep) return;
+
+      const stepEl = document.querySelector(`.step-item[data-step="${trackerStep}"]`);
+      if (!stepEl) return;
+
+      // Update connector before this step
+      const allSteps = ['upload', 'extraction', 'processing', 'destination'];
+      const stepIndex = allSteps.indexOf(trackerStep);
+
+      if (status === 'completed') {
+        stepEl.classList.remove('active', 'locked');
+        stepEl.classList.add('completed');
+
+        // Update connector
+        const connectors = document.querySelectorAll('.step-connector');
+        if (stepIndex > 0 && connectors[stepIndex - 1]) {
+          connectors[stepIndex - 1].classList.add('completed');
+        }
+
+        // Activate next step
+        if (stepIndex < allSteps.length - 1) {
+          const nextStepEl = document.querySelector(`.step-item[data-step="${allSteps[stepIndex + 1]}"]`);
+          if (nextStepEl && nextStepEl.classList.contains('locked')) {
+            nextStepEl.classList.remove('locked');
+            nextStepEl.classList.add('active');
+          }
+        }
+
+        // Show file link if available
+        const fileLink = stepEl.querySelector('.step-file-link');
+        const stepData = appState.steps[stepName];
+        if (fileLink && stepData && stepData.file && appState.currentPath) {
+          fileLink.href = `/download_file?session_path=${encodeURIComponent(appState.currentPath)}&filename=${encodeURIComponent(stepData.file)}`;
+          fileLink.textContent = `📎 ${stepData.file}`;
+          fileLink.style.display = 'inline-flex';
+        }
+      } else if (status === 'active') {
+        stepEl.classList.remove('completed', 'locked');
+        stepEl.classList.add('active');
+      }
+    }
+
+    function completeStep(stepName, fileName) {
+      appState.steps[stepName].completed = true;
+      if (fileName) {
+        appState.steps[stepName].file = fileName;
+      }
+      updateStepTracker(stepName, 'completed');
+    }
+
+    // ========================================
+    // SECTION UNLOCK FUNCTIONS
+    // ========================================
+    function unlockSection(sectionId) {
+      const section = document.getElementById(sectionId);
+      if (section) {
+        section.classList.remove('step-locked');
+        section.classList.add('step-available', 'fade-in');
+      }
+    }
+
+    function lockSection(sectionId) {
+      const section = document.getElementById(sectionId);
+      if (section) {
+        section.classList.remove('step-available', 'fade-in');
+        section.classList.add('step-locked');
+      }
+    }
+
+    function markSectionCompleted(sectionId) {
+      const section = document.getElementById(sectionId);
+      if (section) {
+        section.classList.add('step-completed');
+      }
+    }
+
+    function unlockDecisionTree() {
+      const tree = document.getElementById('decision-tree');
+      if (tree) {
+        tree.classList.remove('step-locked');
+        tree.classList.add('fade-in');
+        updateStepTracker('extraction', 'completed');
+      }
+    }
+
+    // ========================================
+    // BRANCH TOGGLE FUNCTIONS
+    // ========================================
+    function toggleBranch(branchName, enabled) {
+      appState.selectedBranches[branchName] = enabled;
+      const branch = document.getElementById(`${branchName}-branch`);
+      if (branch) {
+        branch.classList.toggle('selected', enabled);
+      }
+    }
+
+    // Branch checkbox listeners
+    document.getElementById('rag-checkbox').addEventListener('change', (e) => {
+      toggleBranch('rag', e.target.checked);
+    });
+
+    document.getElementById('zotero-checkbox').addEventListener('change', (e) => {
+      toggleBranch('zotero', e.target.checked);
+    });
+
+    // ========================================
     // Settings modal logic
+    // ========================================
     const settingsBtn = document.getElementById('settingsBtn');
     const settingsModal = document.getElementById('settingsModal');
     const closeSettingsModal = document.getElementById('closeSettingsModal');
@@ -431,12 +620,17 @@
         settingsSaveStatus.textContent = "Request failed: " + err;
       }
     };
-    let currentPath = '';
+    // Use appState.currentPath instead of separate variable
+    let currentPath = ''; // Keep for backward compatibility
 
     function ensureSessionPath(resultDiv) {
-      if (!currentPath) {
-        resultDiv.textContent = 'Session path not initialised. Upload a ZIP archive first.';
+      if (!appState.currentPath && !currentPath) {
+        resultDiv.textContent = 'Session path not initialised. Upload a ZIP archive or CSV first.';
         return false;
+      }
+      // Sync currentPath with appState
+      if (appState.currentPath) {
+        currentPath = appState.currentPath;
       }
       return true;
     }
@@ -520,8 +714,16 @@
         const json = await res.json();
         if (res.ok) {
           currentPath = json.path;
+          appState.currentPath = json.path;
+          appState.isZoteroExport = true;
+
           uploadResult.innerHTML = `<p>✅ ZIP uploaded: <strong>${currentPath}</strong></p><p style="color: #1976d2;">Next: Extract Text & Metadata (Step 2)</p>`;
-          document.getElementById('dataframe-section').style.display = 'block';
+
+          // Update UI using new functions
+          completeStep('upload', null);
+          markSectionCompleted('upload-section');
+          unlockSection('dataframe-section');
+          updateStepTracker('upload', 'completed');
         } else {
           uploadResult.textContent = 'Error: ' + (json.error || res.statusText);
         }
@@ -545,10 +747,22 @@
         const json = await res.json();
         if (res.ok) {
           currentPath = json.path;
-          uploadResult.innerHTML = `<p>✅ CSV ingested: <strong>${currentPath}</strong></p><p>${json.message || ''}</p><p style="color: #2e7d32;">CSV processed! Next: Text Chunking (Step 3.1)</p>`;
-          // Skip dataframe section for CSV (already processed)
-          document.getElementById('dataframe-section').style.display = 'none';
-          document.getElementById('initial-chunk-section').style.display = 'block';
+          appState.currentPath = json.path;
+          appState.isZoteroExport = false; // CSV is not a Zotero export
+
+          uploadResult.innerHTML = `<p>✅ CSV ingested: <strong>${currentPath}</strong></p><p>${json.message || ''}</p><p style="color: #2e7d32;">CSV processed! Choose your destination below.</p>`;
+
+          // Update UI - skip extraction, go directly to decision tree
+          completeStep('upload', null);
+          completeStep('extraction', 'output.csv');
+          markSectionCompleted('upload-section');
+          lockSection('dataframe-section'); // Hide extraction step for CSV
+
+          // Unlock the decision tree
+          unlockDecisionTree();
+
+          // Activate processing step in tracker
+          updateStepTracker('extraction', 'completed');
         } else {
           uploadResult.textContent = 'Error: ' + (json.error || res.statusText);
           if (json.details) {
@@ -580,8 +794,12 @@
         if (res.ok) {
           const fileName = json.csv.split('/').pop();
           const downloadLink = buildDownloadLink(fileName);
-          resultDiv.innerHTML = `<p>Fichier généré : ${downloadLink}</p>`;
-          document.getElementById('initial-chunk-section').style.display = 'block';
+          resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p>`;
+
+          // Update UI
+          completeStep('extraction', fileName);
+          markSectionCompleted('dataframe-section');
+          unlockDecisionTree();
         } else {
           resultDiv.textContent = 'Error: ' + (json.error || res.statusText);
         }
@@ -618,8 +836,13 @@
         if (res.ok && json.status === "success") {
           const fileName = json.file.split('/').pop();
           const downloadLink = buildDownloadLink(fileName);
-          resultDiv.innerHTML = `<p>Fichier généré : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
-          document.getElementById('dense-embedding-section').style.display = 'block';
+          resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
+
+          // Update UI
+          completeStep('chunking', fileName);
+          markSectionCompleted('initial-chunk-section');
+          unlockSection('dense-embedding-section');
+          updateStepTracker('chunking', 'completed');
         } else {
           resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}. Details: ${json.details || json.file || 'N/A'}</p>`;
         }
@@ -638,9 +861,12 @@
       }
       const downloadLink = buildDownloadLink(response.filename);
       const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>CSV uploaded: ${downloadLink}</p>${summary}`;
+      resultDiv.innerHTML = `<p>✅ CSV uploaded: ${downloadLink}</p>${summary}`;
       fileInput.value = '';
-      document.getElementById('dense-embedding-section').style.display = 'block';
+
+      // Update UI
+      markSectionCompleted('initial-chunk-section');
+      unlockSection('dense-embedding-section');
     });
 
     // Step 3.2: Dense Embedding Generation
@@ -663,8 +889,12 @@
         if (res.ok && json.status === "success") {
           const fileName = json.file.split('/').pop();
           const downloadLink = buildDownloadLink(fileName);
-          resultDiv.innerHTML = `<p>Fichier généré : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
-          document.getElementById('sparse-embedding-section').style.display = 'block';
+          resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
+
+          // Update UI
+          completeStep('denseEmbed', fileName);
+          markSectionCompleted('dense-embedding-section');
+          unlockSection('sparse-embedding-section');
         } else {
           resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}. Details: ${json.details || json.file || 'N/A'}</p>`;
         }
@@ -683,9 +913,12 @@
       }
       const downloadLink = buildDownloadLink(response.filename);
       const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>Chunks JSON uploaded: ${downloadLink}</p>${summary}`;
+      resultDiv.innerHTML = `<p>✅ Chunks JSON uploaded: ${downloadLink}</p>${summary}`;
       fileInput.value = '';
-      document.getElementById('sparse-embedding-section').style.display = 'block';
+
+      // Update UI
+      markSectionCompleted('dense-embedding-section');
+      unlockSection('sparse-embedding-section');
     });
 
     // Step 3.3: Sparse Embedding Generation
@@ -708,8 +941,13 @@
         if (res.ok && json.status === "success") {
           const fileName = json.file.split('/').pop();
           const downloadLink = buildDownloadLink(fileName);
-          resultDiv.innerHTML = `<p>Fichier généré : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
-          document.getElementById('output-choice-section').style.display = 'block';
+          resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
+
+          // Update UI
+          completeStep('sparseEmbed', fileName);
+          markSectionCompleted('sparse-embedding-section');
+          unlockSection('db-section');
+          updateStepTracker('sparseEmbed', 'completed');
         } else {
           resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}. Details: ${json.details || json.file || 'N/A'}</p>`;
         }
@@ -728,9 +966,12 @@
       }
       const downloadLink = buildDownloadLink(response.filename);
       const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>Dense embeddings JSON uploaded: ${downloadLink}</p>${summary}`;
+      resultDiv.innerHTML = `<p>✅ Dense embeddings JSON uploaded: ${downloadLink}</p>${summary}`;
       fileInput.value = '';
-      document.getElementById('db-section').style.display = 'block';
+
+      // Update UI
+      markSectionCompleted('sparse-embedding-section');
+      unlockSection('db-section');
     });
 
     // Step 4: Upload to DB
@@ -811,7 +1052,7 @@
           if (json && typeof json.status === 'string' && json.status.trim() !== '') { // More robust check for status
             let messageText = json.message || 'Operation completed.';
             let countText = (json.inserted_count !== undefined) ? `Items processed/inserted: ${json.inserted_count}` : '';
-            resultDiv.innerHTML = `<p>Status: <strong>${String(json.status)}</strong>. Message: ${String(messageText)}</p>`;
+            resultDiv.innerHTML = `<p>✅ Status: <strong>${String(json.status)}</strong>. Message: ${String(messageText)}</p>`;
             if (countText) {
                  resultDiv.innerHTML += `<p>${String(countText)}</p>`;
             }
@@ -819,6 +1060,11 @@
               const nsLabel = json.namespace ? String(json.namespace) : '(default namespace)';
               resultDiv.innerHTML += `<p>Pinecone namespace: <strong>${nsLabel}</strong></p>`;
             }
+
+            // Update UI
+            completeStep('vectorDb', null);
+            markSectionCompleted('db-section');
+            updateStepTracker('vectorDb', 'completed');
           } else {
             // This case means res.ok was true, but json is null or lacks a status.
             // This indicates an issue with the server sending a 2xx response with unexpected/empty JSON.
@@ -847,12 +1093,6 @@
         resultDiv.textContent = 'DB upload request failed: ' + err.message;
         console.error("Fetch request error:", err);
       }
-    });
-
-    // Zotero Notes - Checkbox toggle
-    document.getElementById('zoteroNotesCheckbox').addEventListener('change', (e) => {
-      const zoteroOptions = document.getElementById('zoteroOptions');
-      zoteroOptions.style.display = e.target.checked ? 'block' : 'none';
     });
 
     // Zotero Notes - Generation
@@ -948,6 +1188,11 @@
         detailsHTML += '</div>';
 
         resultDiv.innerHTML = summaryHTML + detailsHTML;
+
+        // Update UI
+        completeStep('zoteroNotes', null);
+        markSectionCompleted('zotero-notes-section');
+        updateStepTracker('zoteroNotes', 'completed');
 
       } catch (err) {
         resultDiv.innerHTML = `<p class="error-text">Request failed: ${err.message}</p>`;
