@@ -202,7 +202,8 @@
       <div style="border: 2px solid #2e7d32; border-radius: 8px; padding: 15px; background: #f1f8f4;">
         <h3 style="margin-top: 0; color: #2e7d32;">📄 Option B: CSV File (Direct Text)</h3>
         <p style="font-size: 0.9em; color: #555;">
-          For CSV files with a text column (e.g., "text", "description", "content").
+          For CSV files with canonical columns (itemKey, type, title, abstract, date, url, doi, authors, filename, path, attachment_title)
+          and a text column: <strong>"texteocr"</strong> OR <strong>"text"</strong> OR <strong>"content"</strong> OR <strong>"description"</strong>.
           <strong>Skips OCR</strong> - faster and cheaper (no GPT recodage).
         </p>
         <form id="uploadCsvForm" enctype="multipart/form-data">
