@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}Connexion - MyDoc Intelligence{% endblock %}
+
+{% block content %}
+<div class="auth-container">
+    <h1>Connexion</h1>
+
+    {% if error %}
+    <div class="alert alert-danger" role="alert">
+        {{ error }}
+    </div>
+    {% endif %}
+
+    {% if verified %}
+    <div class="alert alert-success" role="alert">
+        Votre email a &eacute;t&eacute; v&eacute;rifi&eacute; avec succ&egrave;s. Vous pouvez maintenant vous connecter.
+    </div>
+    {% endif %}
+
+    <form id="loginForm" method="post">
+        <div class="mb-3">
+            <label for="email" class="form-label">E-mail</label>
+            <input type="email" class="form-control" id="email" name="email" required
+                   placeholder="votre@email.com" value="{{ email or '' }}">
+        </div>
+
+        <div class="mb-3">
+            <label for="password" class="form-label">Mot de passe</label>
+            <input type="password" class="form-control" id="password" name="password" required>
+        </div>
+
+        <div class="mb-3 form-check">
+            <input type="checkbox" class="form-check-input" id="remember_me" name="remember_me">
+            <label class="form-check-label" for="remember_me">Rester connect&eacute;</label>
+        </div>
+
+        <div class="mb-3">
+            <a href="/forgot-password" class="text-decoration-none">Mot de passe oubli&eacute;</a>
+        </div>
+
+        <button type="submit" class="btn btn-primary w-100">Connexion</button>
+    </form>
+
+    <div class="mt-3 text-center">
+        <span class="text-muted">Pas encore de compte ?</span>
+        <a href="/register" class="text-decoration-none">Cr&eacute;er un compte</a>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.getElementById('loginForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    const formData = {
+        email: document.getElementById('email').value,
+        password: document.getElementById('password').value,
+        remember_me: document.getElementById('remember_me').checked
+    };
+
+    try {
+        const response = await fetch('/auth/login', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(formData)
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            // Store token if needed for API calls
+            if (data.access_token) {
+                localStorage.setItem('access_token', data.access_token);
+            }
+            // Redirect to home or dashboard
+            window.location.href = '/';
+        } else {
+            // Show error
+            const alertDiv = document.createElement('div');
+            alertDiv.className = 'alert alert-danger';
+            alertDiv.textContent = data.detail || 'Erreur de connexion';
+
+            const existingAlert = document.querySelector('.auth-container .alert-danger');
+            if (existingAlert) {
+                existingAlert.remove();
+            }
+
+            document.querySelector('.auth-container h1').after(alertDiv);
+        }
+    } catch (error) {
+        console.error('Login error:', error);
+        alert('Erreur de connexion. Veuillez r&eacute;essayer.');
+    }
+});
+</script>
+{% endblock %}
