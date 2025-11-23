@@ -217,3 +217,35 @@ async def project_detail_page(
         user_role=user_role or "admin"
     )
     return templates.TemplateResponse("user/project_detail.html", context)
+
+
+@router.get("/pipeline", response_class=HTMLResponse)
+async def pipeline_page(
+    request: Request,
+    project: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_user)
+):
+    """
+    Pipeline RAG page - the main processing interface.
+    If project_id is provided, links uploads to that project.
+    """
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=302)
+
+    project_data = None
+    if project:
+        project_data = db.query(Project).filter(Project.id == project).first()
+        if project_data:
+            # Check access
+            user_role = project_data.get_user_role(current_user.id)
+            if not user_role and not current_user.is_admin:
+                return RedirectResponse(url="/my-projects", status_code=302)
+
+    context = get_template_context(
+        request,
+        current_user,
+        project=project_data,
+        project_id=project
+    )
+    return templates.TemplateResponse("pipeline.html", context)
