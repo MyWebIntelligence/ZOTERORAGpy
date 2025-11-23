@@ -223,12 +223,14 @@ async def project_detail_page(
 async def pipeline_page(
     request: Request,
     project: Optional[int] = Query(None),
+    session: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_user)
 ):
     """
     Pipeline RAG page - the main processing interface.
     If project_id is provided, links uploads to that project.
+    If session is provided, loads existing session to resume.
     """
     if not current_user:
         return RedirectResponse(url="/login", status_code=302)
@@ -246,6 +248,7 @@ async def pipeline_page(
         request,
         current_user,
         project=project_data,
-        project_id=project
+        project_id=project,
+        session_folder=session
     )
     return templates.TemplateResponse("index.html", context)

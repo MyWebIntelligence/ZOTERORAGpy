@@ -69,6 +69,21 @@
         </div>
     </div>
 
+    <!-- Pipeline Sessions section -->
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0"><i class="bi bi-diagram-3"></i> Sessions de pipeline</h5>
+            <a href="/pipeline?project={{ project.id }}" class="btn btn-sm btn-primary">
+                <i class="bi bi-plus-lg"></i> Nouvelle session
+            </a>
+        </div>
+        <div class="card-body">
+            <div id="sessionsList">
+                <p class="text-muted">Chargement...</p>
+            </div>
+        </div>
+    </div>
+
     <!-- Members section -->
     <div class="card mb-4">
         <div class="card-header d-flex justify-content-between align-items-center">
@@ -315,7 +330,149 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// Load members on page load
+// --- Sessions Management ---
+
+async function loadSessions() {
+    try {
+        const response = await fetch(`/api/pipeline/projects/${projectId}/sessions`, {
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            renderSessions(data.sessions);
+        } else {
+            document.getElementById('sessionsList').innerHTML =
+                '<p class="text-muted">Impossible de charger les sessions</p>';
+        }
+    } catch (error) {
+        console.error('Error loading sessions:', error);
+        document.getElementById('sessionsList').innerHTML =
+            '<p class="text-muted">Erreur de chargement</p>';
+    }
+}
+
+function getStatusBadge(status) {
+    const statusMap = {
+        'created': { class: 'bg-secondary', label: 'Créé' },
+        'extracting': { class: 'bg-info', label: 'Extraction...' },
+        'extracted': { class: 'bg-primary', label: 'Extrait' },
+        'chunking': { class: 'bg-info', label: 'Chunking...' },
+        'chunked': { class: 'bg-primary', label: 'Chunké' },
+        'embedding': { class: 'bg-info', label: 'Embeddings...' },
+        'embedded': { class: 'bg-primary', label: 'Embeddings OK' },
+        'uploading': { class: 'bg-info', label: 'Upload...' },
+        'completed': { class: 'bg-success', label: 'Terminé' },
+        'error': { class: 'bg-danger', label: 'Erreur' }
+    };
+    const info = statusMap[status] || { class: 'bg-secondary', label: status };
+    return `<span class="badge ${info.class}">${info.label}</span>`;
+}
+
+function renderSessions(sessions) {
+    const container = document.getElementById('sessionsList');
+
+    if (!sessions || sessions.length === 0) {
+        container.innerHTML = `
+            <div class="text-center py-4">
+                <i class="bi bi-inbox text-muted" style="font-size: 3rem;"></i>
+                <p class="text-muted mt-2">Aucune session de pipeline</p>
+                <a href="/pipeline?project=${projectId}" class="btn btn-primary">
+                    <i class="bi bi-play-circle"></i> Démarrer un pipeline
+                </a>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = `
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>Session</th>
+                        <th>Source</th>
+                        <th>Statut</th>
+                        <th>Documents</th>
+                        <th>Créé le</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${sessions.map(s => `
+                        <tr>
+                            <td>
+                                <code class="small">${escapeHtml(s.session_folder)}</code>
+                                ${s.original_filename ? `<br><small class="text-muted">${escapeHtml(s.original_filename)}</small>` : ''}
+                            </td>
+                            <td>
+                                ${s.source_type === 'zip' ? '<i class="bi bi-file-zip text-warning"></i> ZIP' : ''}
+                                ${s.source_type === 'csv' ? '<i class="bi bi-filetype-csv text-success"></i> CSV' : ''}
+                            </td>
+                            <td>${getStatusBadge(s.status)}</td>
+                            <td>
+                                ${s.row_count ? `<span class="badge bg-light text-dark">${s.row_count} docs</span>` : '-'}
+                                ${s.chunk_count ? `<span class="badge bg-light text-dark">${s.chunk_count} chunks</span>` : ''}
+                            </td>
+                            <td><small>${formatDate(s.created_at)}</small></td>
+                            <td>
+                                <a href="/pipeline?project=${projectId}&session=${encodeURIComponent(s.session_folder)}"
+                                   class="btn btn-sm btn-outline-primary" title="Reprendre">
+                                    <i class="bi bi-play-circle"></i>
+                                </a>
+                                <button class="btn btn-sm btn-outline-danger"
+                                        onclick="deleteSession(${s.id})" title="Supprimer">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+function formatDate(dateStr) {
+    if (!dateStr) return '-';
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('fr-FR', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+async function deleteSession(sessionId) {
+    if (!confirm('Supprimer cette session et tous ses fichiers ?')) return;
+
+    try {
+        const response = await fetch(`/api/pipeline/sessions/${sessionId}`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            loadSessions();
+            showFlash('Session supprimée', 'success');
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur', 'danger');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showFlash('Erreur lors de la suppression', 'danger');
+    }
+}
+
+// Load data on page load
 loadMembers();
+loadSessions();
 </script>
 {% endblock %}
