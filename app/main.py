@@ -31,6 +31,7 @@ from app.routes.users import router as users_router
 from app.routes.admin import router as admin_router
 from app.routes.projects import router as projects_router
 from app.routes.pages import router as pages_router
+from app.routes.pipeline import router as pipeline_router
 from app.middleware.auth import get_optional_user
 from app.database.session import get_db
 
@@ -112,6 +113,7 @@ app.include_router(users_router)
 app.include_router(admin_router)
 app.include_router(projects_router)
 app.include_router(pages_router)
+app.include_router(pipeline_router)
 
 @app.get("/", response_class=HTMLResponse)
 async def homepage(request: Request):

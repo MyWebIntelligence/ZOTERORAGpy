@@ -50,6 +50,12 @@ class Project(Base, TimestampMixin):
         back_populates="project",
         cascade="all, delete-orphan"
     )
+    sessions = relationship(
+        "PipelineSession",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="desc(PipelineSession.created_at)"
+    )
 
     def __repr__(self):
         return f"<Project {self.name}>"

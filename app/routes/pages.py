@@ -248,4 +248,4 @@ async def pipeline_page(
         project=project_data,
         project_id=project
     )
-    return templates.TemplateResponse("pipeline.html", context)
+    return templates.TemplateResponse("index.html", context)
