@@ -51,9 +51,9 @@
                             </a>
                         </li>
                         <li class="sidebar-nav-item">
-                            <a href="/projects" class="sidebar-nav-link {% if '/projects' in request.url.path %}active{% endif %}">
+                            <a href="/my-projects" class="sidebar-nav-link {% if '/project' in request.url.path or request.url.path == '/my-projects' %}active{% endif %}">
                                 <i class="bi bi-folder sidebar-nav-icon"></i>
-                                <span class="sidebar-nav-text">Projets</span>
+                                <span class="sidebar-nav-text">Mes projets</span>
                             </a>
                         </li>
                     </ul>
@@ -155,7 +155,7 @@
                                 <i class="bi bi-person-circle"></i>
                                 Mon profil
                             </a>
-                            <a href="/projects" class="dropdown-item">
+                            <a href="/my-projects" class="dropdown-item">
                                 <i class="bi bi-folder"></i>
                                 Mes projets
                             </a>
