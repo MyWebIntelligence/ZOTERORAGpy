@@ -56,10 +56,11 @@
         </div>
     </div>
 
-    <!-- Recent Activity Section -->
+    <!-- Pipeline Sessions Section -->
     <div class="section">
         <div class="section-header">
-            <h2 class="section-title">Activite recente</h2>
+            <h2 class="section-title">Sessions de pipeline</h2>
+            <span class="section-badge" id="sessionsCount">-</span>
         </div>
 
         <div class="card">
@@ -68,18 +69,21 @@
                     <thead>
                         <tr>
                             <th>Utilisateur</th>
-                            <th>Action</th>
+                            <th>Projet</th>
+                            <th>Session</th>
+                            <th>Statut</th>
                             <th>Date</th>
+                            <th class="table-actions-col">Actions</th>
                         </tr>
                     </thead>
-                    <tbody id="recentActivity">
+                    <tbody id="sessionsTable">
                         <tr>
-                            <td colspan="3">
+                            <td colspan="6">
                                 <div class="table-empty">
                                     <div class="table-empty-icon">
                                         <i class="bi bi-clock-history"></i>
                                     </div>
-                                    <p class="table-empty-text">Chargement de l'activite...</p>
+                                    <p class="table-empty-text">Chargement des sessions...</p>
                                 </div>
                             </td>
                         </tr>
@@ -242,6 +246,15 @@
         color: var(--color-text-primary);
     }
 
+    .section-badge {
+        background: var(--color-brand-bg);
+        color: var(--color-brand-primary);
+        padding: var(--space-1) var(--space-3);
+        border-radius: var(--radius-full);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+    }
+
     /* Table Styles */
     .table-empty {
         text-align: center;
@@ -258,6 +271,80 @@
         color: var(--color-text-secondary);
         font-size: var(--font-size-sm);
     }
+
+    .table-actions-col {
+        width: 100px;
+        text-align: center;
+    }
+
+    .table-actions {
+        display: flex;
+        gap: var(--space-2);
+        justify-content: center;
+    }
+
+    .session-user {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .session-user-email {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+    }
+
+    .session-user-name {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+    }
+
+    .session-project {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+    }
+
+    .session-project:hover {
+        color: var(--color-brand-primary);
+    }
+
+    .session-folder {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .session-date {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+    }
+
+    /* Status badges */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-1);
+        padding: 2px 8px;
+        border-radius: var(--radius-full);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+    }
+
+    .status-created { background: var(--color-info-bg); color: var(--color-info); }
+    .status-extracting, .status-chunking, .status-embedding, .status-uploading {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+    }
+    .status-extracted, .status-chunked, .status-embedded {
+        background: var(--color-brand-bg);
+        color: var(--color-brand-primary);
+    }
+    .status-completed { background: var(--color-success-bg); color: var(--color-success); }
+    .status-error { background: var(--color-danger-bg); color: var(--color-danger); }
 
     /* Quick Actions */
     .quick-actions-grid {
@@ -350,27 +437,150 @@ async function loadStats() {
     }
 }
 
-async function loadRecentActivity() {
-    const tbody = document.getElementById('recentActivity');
+async function loadSessions() {
+    const tbody = document.getElementById('sessionsTable');
+    const countBadge = document.getElementById('sessionsCount');
 
-    // For now, show a placeholder message
-    // This would be replaced with actual API call
-    tbody.innerHTML = `
-        <tr>
-            <td colspan="3">
-                <div class="table-empty">
-                    <div class="table-empty-icon">
-                        <i class="bi bi-check-circle"></i>
+    try {
+        const response = await fetch('/admin/sessions?per_page=50', {
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            countBadge.textContent = data.total;
+
+            if (data.sessions.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6">
+                            <div class="table-empty">
+                                <div class="table-empty-icon">
+                                    <i class="bi bi-inbox"></i>
+                                </div>
+                                <p class="table-empty-text">Aucune session de pipeline</p>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = data.sessions.map(session => `
+                <tr>
+                    <td>
+                        <div class="session-user">
+                            <span class="session-user-email">${escapeHtml(session.owner_email)}</span>
+                            ${session.owner_name ? `<span class="session-user-name">${escapeHtml(session.owner_name)}</span>` : ''}
+                        </div>
+                    </td>
+                    <td>
+                        <a href="/project/${session.project_id}" class="session-project">
+                            ${escapeHtml(session.project_name)}
+                        </a>
+                    </td>
+                    <td>
+                        <span class="session-folder" title="${escapeHtml(session.session_folder)}">
+                            ${escapeHtml(session.original_filename || session.session_folder)}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="status-badge status-${session.status}">
+                            ${getStatusLabel(session.status)}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="session-date">${formatDate(session.created_at)}</span>
+                    </td>
+                    <td>
+                        <div class="table-actions">
+                            <a href="/pipeline?project=${session.project_id}&session=${encodeURIComponent(session.session_folder)}"
+                               class="btn btn-ghost btn-sm" title="Voir">
+                                <i class="bi bi-box-arrow-up-right"></i>
+                            </a>
+                            <button class="btn btn-ghost btn-sm btn-icon-danger"
+                                    onclick="confirmDeleteSession(${session.id}, '${escapeHtml(session.session_folder)}')"
+                                    title="Supprimer">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        } else if (response.status === 401 || response.status === 403) {
+            window.location.href = '/login';
+        }
+    } catch (error) {
+        console.error('Error loading sessions:', error);
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="6">
+                    <div class="table-empty">
+                        <div class="table-empty-icon">
+                            <i class="bi bi-exclamation-triangle"></i>
+                        </div>
+                        <p class="table-empty-text">Erreur lors du chargement des sessions</p>
                     </div>
-                    <p class="table-empty-text">Aucune activite recente</p>
-                </div>
-            </td>
-        </tr>
-    `;
+                </td>
+            </tr>
+        `;
+    }
+}
+
+function getStatusLabel(status) {
+    const labels = {
+        'created': 'Cree',
+        'extracting': 'Extraction...',
+        'extracted': 'Extrait',
+        'chunking': 'Chunking...',
+        'chunked': 'Chunks OK',
+        'embedding': 'Embeddings...',
+        'embedded': 'Embeddings OK',
+        'uploading': 'Upload...',
+        'completed': 'Termine',
+        'error': 'Erreur'
+    };
+    return labels[status] || status;
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function confirmDeleteSession(sessionId, sessionFolder) {
+    if (!confirm(`Supprimer la session "${sessionFolder}" ?\n\nCette action supprimera tous les fichiers associes.`)) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/admin/sessions/${sessionId}`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            showToast('Session supprimee avec succes', 'success');
+            loadSessions();
+            loadStats();
+        } else {
+            const data = await response.json();
+            showToast(data.detail || 'Erreur lors de la suppression', 'error');
+        }
+    } catch (error) {
+        console.error('Error deleting session:', error);
+        showToast('Erreur lors de la suppression', 'error');
+    }
 }
 
 // Load data on page load
 loadStats();
-loadRecentActivity();
+loadSessions();
 </script>
 {% endblock %}
