@@ -63,6 +63,7 @@
         </div>
 
         <!-- Actions Card -->
+        {% if user_role == 'owner' or current_user.is_admin %}
         <div class="card">
             <div class="card-header">
                 <h2 class="card-title">
@@ -72,11 +73,6 @@
             </div>
             <div class="card-body">
                 <div class="actions-stack">
-                    <a href="/?project={{ project.id }}" class="btn btn-primary btn-full">
-                        <i class="bi bi-play-circle"></i>
-                        Lancer un pipeline
-                    </a>
-                    {% if user_role == 'owner' or current_user.is_admin %}
                     <button class="btn btn-secondary btn-full" onclick="openModal('editProjectModal')">
                         <i class="bi bi-pencil"></i>
                         Modifier le projet
@@ -85,10 +81,10 @@
                         <i class="bi bi-trash"></i>
                         Supprimer le projet
                     </button>
-                    {% endif %}
                 </div>
             </div>
         </div>
+        {% endif %}
     </div>
 
     <!-- Pipeline Sessions -->
@@ -688,8 +684,8 @@ function renderSessions(sessions) {
                             <td><small>${formatDate(s.created_at)}</small></td>
                             <td class="text-right">
                                 <a href="/?project=${projectId}&session=${encodeURIComponent(s.session_folder)}"
-                                   class="btn btn-ghost btn-sm" title="Reprendre">
-                                    <i class="bi bi-play-circle"></i>
+                                   class="btn btn-ghost btn-sm" title="Voir / Reprendre">
+                                    <i class="bi bi-box-arrow-up-right"></i>
                                 </a>
                                 <button class="btn btn-ghost btn-sm" onclick="deleteSession(${s.id})" title="Supprimer">
                                     <i class="bi bi-trash"></i>
