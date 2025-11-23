@@ -145,6 +145,22 @@
       </form>
     </div>
   </div>
+
+  <!-- Project Header (if linked to a project) -->
+  {% if project %}
+  <div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 12px 20px; margin-bottom: 0; display: flex; justify-content: space-between; align-items: center;">
+    <div>
+      <strong style="font-size: 1.1rem;">📁 {{ project.name }}</strong>
+      {% if session_folder %}
+      <span style="margin-left: 15px; opacity: 0.9; font-size: 0.9rem;">Session: {{ session_folder }}</span>
+      {% endif %}
+    </div>
+    <a href="/project/{{ project.id }}" style="background: rgba(255,255,255,0.2); color: white; padding: 8px 16px; border-radius: 4px; text-decoration: none; font-size: 0.9rem;">
+      ← Retour au projet
+    </a>
+  </div>
+  {% endif %}
+
   <div class="container">
     <h1>RAGpy Data Processing Pipeline</h1>
 
@@ -644,8 +660,102 @@
         settingsSaveStatus.textContent = "Request failed: " + err;
       }
     };
+    // Project and Session context from server
+    const projectId = {{ project_id or 'null' }};
+    const sessionFolder = '{{ session_folder or "" }}';
+
     // Use appState.currentPath instead of separate variable
     let currentPath = ''; // Keep for backward compatibility
+
+    // If we have an existing session, load its files
+    async function loadExistingSession() {
+      if (!sessionFolder) return;
+
+      console.log('Loading existing session:', sessionFolder);
+      currentPath = sessionFolder;
+      appState.currentPath = sessionFolder;
+
+      try {
+        const response = await fetch(`/api/pipeline/sessions/${encodeURIComponent(sessionFolder)}/files`);
+        if (!response.ok) {
+          console.error('Failed to load session files:', response.status);
+          return;
+        }
+
+        const data = await response.json();
+        console.log('Session files:', data);
+
+        // Update UI based on existing files
+        const files = data.files;
+
+        // Upload step - always completed if we have a session
+        if (files.upload.completed) {
+          completeStep('upload', null);
+          markSectionCompleted('upload-section');
+          unlockSection('dataframe-section');
+          updateStepTracker('upload', 'completed');
+
+          const uploadResult = document.getElementById('uploadResult');
+          uploadResult.innerHTML = `<p>✅ Session chargée: <strong>${sessionFolder}</strong></p>`;
+        }
+
+        // Extraction step
+        if (files.extraction.completed) {
+          completeStep('extraction', 'output.csv');
+          markSectionCompleted('dataframe-section');
+          unlockDecisionTree();
+          updateStepTracker('extraction', 'completed');
+
+          const dataframeResult = document.getElementById('dataframeResult');
+          const rowInfo = files.extraction.row_count ? ` (${files.extraction.row_count} lignes)` : '';
+          dataframeResult.innerHTML = `<p>✅ CSV existant: ${buildDownloadLink('output.csv')}${rowInfo}</p>`;
+        }
+
+        // Chunking step
+        if (files.chunking.completed) {
+          completeStep('chunking', 'output_chunks.json');
+          markSectionCompleted('initial-chunk-section');
+          unlockSection('dense-embedding-section');
+          updateStepTracker('chunking', 'completed');
+
+          const chunkResult = document.getElementById('initialChunkResult');
+          const chunkInfo = files.chunking.chunk_count ? ` (${files.chunking.chunk_count} chunks)` : '';
+          chunkResult.innerHTML = `<p>✅ Chunks existants: ${buildDownloadLink('output_chunks.json')}${chunkInfo}</p>`;
+        }
+
+        // Dense embedding step
+        if (files.dense_embedding.completed) {
+          completeStep('denseEmbed', 'output_chunks_with_embeddings.json');
+          markSectionCompleted('dense-embedding-section');
+          unlockSection('sparse-embedding-section');
+
+          const denseResult = document.getElementById('denseEmbeddingResult');
+          const denseInfo = files.dense_embedding.chunk_count ? ` (${files.dense_embedding.chunk_count} chunks)` : '';
+          denseResult.innerHTML = `<p>✅ Embeddings denses existants: ${buildDownloadLink('output_chunks_with_embeddings.json')}${denseInfo}</p>`;
+        }
+
+        // Sparse embedding step
+        if (files.sparse_embedding.completed) {
+          completeStep('sparseEmbed', 'output_chunks_with_embeddings_sparse.json');
+          markSectionCompleted('sparse-embedding-section');
+          unlockSection('db-section');
+          updateStepTracker('sparseEmbed', 'completed');
+
+          const sparseResult = document.getElementById('sparseEmbeddingResult');
+          const sparseInfo = files.sparse_embedding.chunk_count ? ` (${files.sparse_embedding.chunk_count} chunks)` : '';
+          sparseResult.innerHTML = `<p>✅ Embeddings sparses existants: ${buildDownloadLink('output_chunks_with_embeddings_sparse.json')}${sparseInfo}</p>`;
+        }
+
+        console.log('Current stage:', data.current_stage);
+      } catch (err) {
+        console.error('Error loading session:', err);
+      }
+    }
+
+    // Load existing session on page load
+    document.addEventListener('DOMContentLoaded', function() {
+      loadExistingSession();
+    });
 
     function ensureSessionPath(resultDiv) {
       if (!appState.currentPath && !currentPath) {
