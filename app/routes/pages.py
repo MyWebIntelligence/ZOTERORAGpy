@@ -10,6 +10,7 @@ import os
 
 from app.database.session import get_db
 from app.models.user import User
+from app.models.project import Project
 from app.middleware.auth import get_optional_user
 
 # Templates directory
@@ -177,3 +178,42 @@ async def admin_settings_page(
     context = get_template_context(request, current_user, show_sidebar=True)
     # Reuse admin dashboard for now
     return templates.TemplateResponse("admin/dashboard.html", context)
+
+
+# --- Project pages ---
+
+@router.get("/project/{project_id}", response_class=HTMLResponse)
+async def project_detail_page(
+    project_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_user)
+):
+    """Project detail page - redirects to the main pipeline interface"""
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=302)
+
+    # Get the project
+    project = db.query(Project).filter(Project.id == project_id).first()
+
+    if not project:
+        # Project not found - redirect to projects list
+        return RedirectResponse(url="/my-projects", status_code=302)
+
+    # Check access
+    user_role = project.get_user_role(current_user.id)
+    if not user_role and not current_user.is_admin:
+        # No access - redirect to projects list
+        return RedirectResponse(url="/my-projects", status_code=302)
+
+    # Get project owner
+    owner = db.query(User).filter(User.id == project.owner_id).first()
+
+    context = get_template_context(
+        request,
+        current_user,
+        project=project,
+        owner=owner,
+        user_role=user_role or "admin"
+    )
+    return templates.TemplateResponse("user/project_detail.html", context)

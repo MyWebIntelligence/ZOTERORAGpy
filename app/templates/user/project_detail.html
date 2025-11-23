@@ -1,0 +1,321 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.name }} - MyDoc Intelligence{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- Project header -->
+    <div class="d-flex justify-content-between align-items-start mb-4">
+        <div>
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="/">Accueil</a></li>
+                    <li class="breadcrumb-item"><a href="/my-projects">Mes projets</a></li>
+                    <li class="breadcrumb-item active">{{ project.name }}</li>
+                </ol>
+            </nav>
+            <h1>{{ project.name }}</h1>
+            {% if project.description %}
+            <p class="text-muted">{{ project.description }}</p>
+            {% endif %}
+        </div>
+        <div>
+            <span class="badge bg-secondary">{{ user_role }}</span>
+        </div>
+    </div>
+
+    <!-- Project info -->
+    <div class="row mb-4">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="bi bi-info-circle"></i> Informations du projet</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p><strong>Propri&eacute;taire :</strong> {{ owner.full_name if owner else 'Inconnu' }}</p>
+                            <p><strong>Cr&eacute;&eacute; le :</strong> {{ project.created_at.strftime('%d/%m/%Y') if project.created_at else '-' }}</p>
+                        </div>
+                        <div class="col-md-6">
+                            <p><strong>Dossier de session :</strong> {{ project.session_folder or 'Non d&eacute;fini' }}</p>
+                            <p><strong>Base vectorielle :</strong> {{ project.vector_db_type or 'Non configur&eacute;e' }}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="bi bi-gear"></i> Actions</h5>
+                </div>
+                <div class="card-body">
+                    <div class="d-grid gap-2">
+                        <a href="/pipeline?project={{ project.id }}" class="btn btn-primary">
+                            <i class="bi bi-play-circle"></i> Ouvrir le pipeline RAG
+                        </a>
+                        {% if user_role == 'owner' or current_user.is_admin %}
+                        <button class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editProjectModal">
+                            <i class="bi bi-pencil"></i> Modifier le projet
+                        </button>
+                        <button class="btn btn-outline-danger" onclick="confirmDelete()">
+                            <i class="bi bi-trash"></i> Supprimer le projet
+                        </button>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Members section -->
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0"><i class="bi bi-people"></i> Membres du projet</h5>
+            {% if user_role == 'owner' or current_user.is_admin %}
+            <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addMemberModal">
+                <i class="bi bi-plus-lg"></i> Ajouter
+            </button>
+            {% endif %}
+        </div>
+        <div class="card-body">
+            <div id="membersList">
+                <p class="text-muted">Chargement...</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Project Modal -->
+<div class="modal fade" id="editProjectModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Modifier le projet</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="editProjectForm">
+                    <div class="mb-3">
+                        <label for="editProjectName" class="form-label">Nom du projet</label>
+                        <input type="text" class="form-control" id="editProjectName" value="{{ project.name }}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="editProjectDescription" class="form-label">Description</label>
+                        <textarea class="form-control" id="editProjectDescription" rows="3">{{ project.description or '' }}</textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+                <button type="button" class="btn btn-primary" onclick="updateProject()">Enregistrer</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Member Modal -->
+<div class="modal fade" id="addMemberModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Ajouter un membre</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addMemberForm">
+                    <div class="mb-3">
+                        <label for="memberEmail" class="form-label">Email de l'utilisateur</label>
+                        <input type="email" class="form-control" id="memberEmail" required placeholder="utilisateur@email.com">
+                    </div>
+                    <div class="mb-3">
+                        <label for="memberRole" class="form-label">R&ocirc;le</label>
+                        <select class="form-select" id="memberRole">
+                            <option value="viewer">Lecteur</option>
+                            <option value="collaborator">Collaborateur</option>
+                        </select>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+                <button type="button" class="btn btn-primary" onclick="addMember()">Ajouter</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const projectId = {{ project.id }};
+
+async function loadMembers() {
+    try {
+        const response = await fetch(`/projects/${projectId}/members`, {
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            const members = await response.json();
+            renderMembers(members);
+        }
+    } catch (error) {
+        console.error('Error loading members:', error);
+    }
+}
+
+function renderMembers(members) {
+    const container = document.getElementById('membersList');
+
+    if (members.length === 0) {
+        container.innerHTML = '<p class="text-muted">Aucun membre</p>';
+        return;
+    }
+
+    container.innerHTML = `
+        <table class="table table-hover mb-0">
+            <thead>
+                <tr>
+                    <th>Nom</th>
+                    <th>Email</th>
+                    <th>R&ocirc;le</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${members.map(m => `
+                    <tr>
+                        <td>${escapeHtml(m.full_name)}</td>
+                        <td>${escapeHtml(m.email)}</td>
+                        <td><span class="badge bg-secondary">${m.role}</span></td>
+                        <td>
+                            ${m.role !== 'owner' ? `
+                                <button class="btn btn-sm btn-outline-danger" onclick="removeMember(${m.user_id})">
+                                    <i class="bi bi-x"></i>
+                                </button>
+                            ` : ''}
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+}
+
+async function updateProject() {
+    const name = document.getElementById('editProjectName').value;
+    const description = document.getElementById('editProjectDescription').value;
+
+    try {
+        const response = await fetch(`/projects/${projectId}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            },
+            body: JSON.stringify({ name, description })
+        });
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur', 'danger');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showFlash('Erreur lors de la mise &agrave; jour', 'danger');
+    }
+}
+
+async function addMember() {
+    const email = document.getElementById('memberEmail').value;
+    const role = document.getElementById('memberRole').value;
+
+    try {
+        const response = await fetch(`/projects/${projectId}/members`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            },
+            body: JSON.stringify({ email, role })
+        });
+
+        if (response.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('addMemberModal')).hide();
+            document.getElementById('addMemberForm').reset();
+            loadMembers();
+            showFlash('Membre ajout&eacute;', 'success');
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur', 'danger');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showFlash('Erreur lors de l\'ajout', 'danger');
+    }
+}
+
+async function removeMember(userId) {
+    if (!confirm('Retirer ce membre du projet ?')) return;
+
+    try {
+        const response = await fetch(`/projects/${projectId}/members/${userId}`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            loadMembers();
+            showFlash('Membre retir&eacute;', 'success');
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur', 'danger');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showFlash('Erreur lors de la suppression', 'danger');
+    }
+}
+
+async function confirmDelete() {
+    if (!confirm('Supprimer ce projet ? Cette action est irr&eacute;versible.')) return;
+
+    try {
+        const response = await fetch(`/projects/${projectId}`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            window.location.href = '/my-projects';
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur', 'danger');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showFlash('Erreur lors de la suppression', 'danger');
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Load members on page load
+loadMembers();
+</script>
+{% endblock %}
