@@ -30,7 +30,7 @@ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAGPY_DIR = os.path.dirname(APP_DIR)
 UPLOAD_DIR = os.path.join(RAGPY_DIR, "uploads")
 
-router = APIRouter(prefix="/admin", tags=["Administration"])
+router = APIRouter(prefix="/api/admin", tags=["Administration"])
 
 
 def get_client_ip(request: Request) -> str:
