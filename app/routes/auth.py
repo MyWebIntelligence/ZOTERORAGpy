@@ -52,7 +52,8 @@ async def register(
     """
     Inscription d'un nouvel utilisateur.
 
-    Le premier utilisateur devient automatiquement administrateur.
+    Si aucun administrateur n'existe dans le système, le nouvel utilisateur
+    devient automatiquement administrateur et est vérifié immédiatement.
     """
     # Vérifier si l'email existe déjà
     existing_user = db.query(User).filter(User.email == user_data.email.lower()).first()
@@ -62,9 +63,19 @@ async def register(
             detail="Un compte avec cet email existe déjà"
         )
 
-    # Vérifier si c'est le premier utilisateur
-    user_count = db.query(User).count()
-    is_first_user = user_count == 0
+    # Vérifier s'il existe au moins un administrateur
+    # Si aucun admin n'existe, le nouvel utilisateur devient admin
+    admin_exists = db.query(User).filter(
+        User.roles.contains(["ADMIN"])
+    ).first() is not None
+
+    # Fallback: vérifier aussi avec une requête plus robuste (JSON array check)
+    if admin_exists is False:
+        # Double check avec une approche différente pour les bases qui ne supportent pas contains
+        all_users = db.query(User).all()
+        admin_exists = any(u.is_admin for u in all_users)
+
+    should_be_admin = not admin_exists
 
     # Créer l'utilisateur
     new_user = User(
@@ -74,10 +85,10 @@ async def register(
         last_name=user_data.last_name,
         organization=user_data.organization,
         title=user_data.title,
-        roles=["USER", "ADMIN"] if is_first_user else ["USER"],
+        roles=["USER", "ADMIN"] if should_be_admin else ["USER"],
         is_active=True,
-        is_verified=is_first_user,  # Premier utilisateur vérifié automatiquement
-        verification_token=None if is_first_user else generate_verification_token()
+        is_verified=should_be_admin,  # Auto-vérifié si devient admin
+        verification_token=None if should_be_admin else generate_verification_token()
     )
 
     db.add(new_user)
@@ -93,7 +104,8 @@ async def register(
         resource_id=new_user.id,
         details={
             "email": new_user.email,
-            "is_first_user": is_first_user
+            "auto_promoted_admin": should_be_admin,
+            "reason": "no_admin_existed" if should_be_admin else None
         },
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("User-Agent")
