@@ -46,6 +46,10 @@ class User(Base, TimestampMixin):
     reset_token = Column(String(255), nullable=True)
     reset_token_expires = Column(DateTime(timezone=True), nullable=True)
 
+    # API Credentials (encrypted JSON)
+    # Stores user's personal API keys for various services
+    api_credentials = Column(Text, nullable=True)
+
     # Relations
     owned_projects = relationship(
         "Project",

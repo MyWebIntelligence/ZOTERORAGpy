@@ -7,8 +7,13 @@ from sqlalchemy.orm import Session
 from app.database.session import get_db
 from app.models.user import User
 from app.models.audit import AuditAction, create_audit_log
-from app.schemas.user import UserResponse, UserUpdate
+from app.schemas.user import UserResponse, UserUpdate, UserCredentialsResponse, UserCredentialsUpdate, CredentialValue
 from app.middleware.auth import get_current_active_user
+from app.core.credentials import (
+    get_masked_credentials,
+    update_user_credentials,
+    CREDENTIAL_KEYS
+)
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -139,3 +144,62 @@ async def delete_my_account(
     db.commit()
 
     return {"message": "Compte supprimé avec succès"}
+
+
+# --- Credentials Management ---
+
+@router.get("/me/credentials", response_model=UserCredentialsResponse)
+async def get_my_credentials(
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Retourne les credentials de l'utilisateur connecte (valeurs masquees).
+    """
+    masked = get_masked_credentials(current_user)
+
+    # Build response with all credential keys
+    response_data = {}
+    for key in CREDENTIAL_KEYS:
+        if key in masked:
+            response_data[key] = CredentialValue(**masked[key])
+        else:
+            response_data[key] = CredentialValue(has_value=False, masked="")
+
+    return UserCredentialsResponse(**response_data)
+
+
+@router.put("/me/credentials")
+async def update_my_credentials(
+    credentials: UserCredentialsUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Met a jour les credentials de l'utilisateur connecte.
+
+    Seuls les champs fournis sont mis a jour.
+    Pour supprimer un credential, envoyer une chaine vide.
+    """
+    # Convert Pydantic model to dict, excluding None values
+    updates = credentials.model_dump(exclude_unset=True)
+
+    if not updates:
+        return {"message": "Aucune modification"}
+
+    # Update credentials
+    update_user_credentials(current_user, updates, db)
+
+    # Log d'audit (sans les valeurs sensibles)
+    create_audit_log(
+        db=db,
+        action=AuditAction.USER_UPDATE,
+        user_id=current_user.id,
+        resource_type="user_credentials",
+        resource_id=current_user.id,
+        details={"updated_keys": list(updates.keys())},
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("User-Agent")
+    )
+
+    return {"message": "Credentials mis a jour avec succes", "updated": list(updates.keys())}

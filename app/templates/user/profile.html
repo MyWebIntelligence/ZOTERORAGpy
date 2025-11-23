@@ -89,6 +89,203 @@
         </div>
     </div>
 
+    <!-- API Credentials -->
+    <div class="card" id="credentials">
+        <div class="card-header">
+            <h2 class="card-title">
+                <i class="bi bi-key"></i>
+                Cles API
+            </h2>
+        </div>
+        <div class="card-body">
+            <p class="credentials-intro text-secondary">
+                Configurez vos cles API personnelles pour les services utilises par le pipeline.
+                Vos cles sont chiffrees et stockees de maniere securisee.
+            </p>
+
+            <form id="credentialsForm">
+                <!-- LLM Providers -->
+                <div class="credentials-section">
+                    <h3 class="credentials-section-title">
+                        <i class="bi bi-robot"></i>
+                        Fournisseurs LLM
+                    </h3>
+
+                    <div class="form-group">
+                        <label for="cred_openai_api_key" class="form-label">OpenAI API Key</label>
+                        <div class="input-with-status">
+                            <input type="password" class="form-input" id="cred_openai_api_key"
+                                   placeholder="sk-..." autocomplete="off">
+                            <span class="credential-status" id="status_openai_api_key"></span>
+                        </div>
+                        <div class="form-hint">Pour les embeddings et le recodage GPT</div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="cred_openrouter_api_key" class="form-label">OpenRouter API Key</label>
+                            <div class="input-with-status">
+                                <input type="password" class="form-input" id="cred_openrouter_api_key"
+                                       placeholder="sk-or-..." autocomplete="off">
+                                <span class="credential-status" id="status_openrouter_api_key"></span>
+                            </div>
+                            <div class="form-hint">Alternative economique pour le recodage</div>
+                        </div>
+                        <div class="form-group">
+                            <label for="cred_openrouter_model" class="form-label">OpenRouter Model</label>
+                            <input type="text" class="form-input" id="cred_openrouter_model"
+                                   placeholder="openai/gpt-4o-mini">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- OCR Provider -->
+                <div class="credentials-section">
+                    <h3 class="credentials-section-title">
+                        <i class="bi bi-file-earmark-text"></i>
+                        OCR (Mistral)
+                    </h3>
+
+                    <div class="form-group">
+                        <label for="cred_mistral_api_key" class="form-label">Mistral API Key</label>
+                        <div class="input-with-status">
+                            <input type="password" class="form-input" id="cred_mistral_api_key"
+                                   autocomplete="off">
+                            <span class="credential-status" id="status_mistral_api_key"></span>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="cred_mistral_model" class="form-label">Mistral Model</label>
+                            <input type="text" class="form-input" id="cred_mistral_model"
+                                   placeholder="mistral-ocr-latest">
+                        </div>
+                        <div class="form-group">
+                            <label for="cred_mistral_url" class="form-label">Mistral API URL</label>
+                            <input type="text" class="form-input" id="cred_mistral_url"
+                                   placeholder="https://api.mistral.ai">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Vector Databases -->
+                <div class="credentials-section">
+                    <h3 class="credentials-section-title">
+                        <i class="bi bi-database"></i>
+                        Bases Vectorielles
+                    </h3>
+
+                    <!-- Pinecone -->
+                    <div class="credential-provider">
+                        <div class="credential-provider-name">Pinecone</div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="cred_pinecone_api_key" class="form-label">API Key</label>
+                                <div class="input-with-status">
+                                    <input type="password" class="form-input" id="cred_pinecone_api_key"
+                                           autocomplete="off">
+                                    <span class="credential-status" id="status_pinecone_api_key"></span>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="cred_pinecone_env" class="form-label">Environment</label>
+                                <input type="text" class="form-input" id="cred_pinecone_env"
+                                       placeholder="us-east-1">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Weaviate -->
+                    <div class="credential-provider">
+                        <div class="credential-provider-name">Weaviate</div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="cred_weaviate_api_key" class="form-label">API Key</label>
+                                <div class="input-with-status">
+                                    <input type="password" class="form-input" id="cred_weaviate_api_key"
+                                           autocomplete="off">
+                                    <span class="credential-status" id="status_weaviate_api_key"></span>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="cred_weaviate_url" class="form-label">Cluster URL</label>
+                                <input type="text" class="form-input" id="cred_weaviate_url"
+                                       placeholder="https://xxx.weaviate.network">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Qdrant -->
+                    <div class="credential-provider">
+                        <div class="credential-provider-name">Qdrant</div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="cred_qdrant_api_key" class="form-label">API Key</label>
+                                <div class="input-with-status">
+                                    <input type="password" class="form-input" id="cred_qdrant_api_key"
+                                           autocomplete="off">
+                                    <span class="credential-status" id="status_qdrant_api_key"></span>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="cred_qdrant_url" class="form-label">Instance URL</label>
+                                <input type="text" class="form-input" id="cred_qdrant_url"
+                                       placeholder="https://xxx.qdrant.io">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Zotero -->
+                <div class="credentials-section">
+                    <h3 class="credentials-section-title">
+                        <i class="bi bi-book"></i>
+                        Zotero
+                    </h3>
+
+                    <div class="form-group">
+                        <label for="cred_zotero_api_key" class="form-label">Zotero API Key</label>
+                        <div class="input-with-status">
+                            <input type="password" class="form-input" id="cred_zotero_api_key"
+                                   autocomplete="off">
+                            <span class="credential-status" id="status_zotero_api_key"></span>
+                        </div>
+                        <div class="form-hint">
+                            <a href="https://www.zotero.org/settings/keys" target="_blank" rel="noopener">
+                                Obtenir une cle API Zotero <i class="bi bi-box-arrow-up-right"></i>
+                            </a>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="cred_zotero_user_id" class="form-label">User ID</label>
+                            <input type="text" class="form-input" id="cred_zotero_user_id"
+                                   placeholder="12345678">
+                        </div>
+                        <div class="form-group">
+                            <label for="cred_zotero_group_id" class="form-label">Group ID (optionnel)</label>
+                            <input type="text" class="form-input" id="cred_zotero_group_id"
+                                   placeholder="Pour bibliotheques partagees">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-check-lg"></i>
+                        Enregistrer les cles
+                    </button>
+                    <button type="button" class="btn btn-secondary" onclick="loadCredentials()">
+                        <i class="bi bi-arrow-clockwise"></i>
+                        Reinitialiser
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Change Password -->
     <div class="card">
         <div class="card-header">
@@ -310,6 +507,83 @@
     .text-secondary {
         color: var(--color-text-secondary);
     }
+
+    /* Credentials Section */
+    .credentials-intro {
+        margin-bottom: var(--space-6);
+    }
+
+    .credentials-section {
+        margin-bottom: var(--space-6);
+        padding-bottom: var(--space-6);
+        border-bottom: 1px solid var(--color-border);
+    }
+
+    .credentials-section:last-of-type {
+        border-bottom: none;
+        margin-bottom: var(--space-4);
+    }
+
+    .credentials-section-title {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: var(--space-4);
+    }
+
+    .credential-provider {
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        padding: var(--space-4);
+        margin-bottom: var(--space-4);
+    }
+
+    .credential-provider:last-child {
+        margin-bottom: 0;
+    }
+
+    .credential-provider-name {
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+        margin-bottom: var(--space-3);
+        font-size: var(--font-size-sm);
+    }
+
+    .input-with-status {
+        position: relative;
+        display: flex;
+        align-items: center;
+    }
+
+    .input-with-status .form-input {
+        padding-right: var(--space-10);
+    }
+
+    .credential-status {
+        position: absolute;
+        right: var(--space-3);
+        font-size: var(--font-size-sm);
+    }
+
+    .credential-status.configured {
+        color: var(--color-success);
+    }
+
+    .credential-status.configured::before {
+        content: "\\2713";
+    }
+
+    .form-actions {
+        display: flex;
+        gap: var(--space-3);
+        margin-top: var(--space-4);
+    }
 </style>
 {% endblock %}
 
@@ -441,7 +715,110 @@ async function deleteAccount() {
     }
 }
 
-// Load profile on page load
+// --- Credentials Management ---
+
+const credentialKeys = [
+    'openai_api_key', 'openrouter_api_key', 'openrouter_model',
+    'mistral_api_key', 'mistral_model', 'mistral_url',
+    'pinecone_api_key', 'pinecone_env',
+    'weaviate_api_key', 'weaviate_url',
+    'qdrant_api_key', 'qdrant_url',
+    'zotero_api_key', 'zotero_user_id', 'zotero_group_id'
+];
+
+async function loadCredentials() {
+    try {
+        const response = await fetch('/users/me/credentials', {
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            const credentials = await response.json();
+
+            // Update each field
+            credentialKeys.forEach(key => {
+                const input = document.getElementById('cred_' + key);
+                const status = document.getElementById('status_' + key);
+
+                if (input) {
+                    // Clear the field
+                    input.value = '';
+
+                    // Show masked value as placeholder if configured
+                    if (credentials[key] && credentials[key].has_value) {
+                        input.placeholder = credentials[key].masked || 'Configure';
+                        if (status) {
+                            status.classList.add('configured');
+                        }
+                    } else {
+                        if (status) {
+                            status.classList.remove('configured');
+                        }
+                    }
+                }
+            });
+        }
+    } catch (error) {
+        console.error('Error loading credentials:', error);
+    }
+}
+
+document.getElementById('credentialsForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    // Collect only non-empty fields
+    const updates = {};
+    credentialKeys.forEach(key => {
+        const input = document.getElementById('cred_' + key);
+        if (input && input.value.trim()) {
+            updates[key] = input.value.trim();
+        }
+    });
+
+    if (Object.keys(updates).length === 0) {
+        showToast('Aucune modification a enregistrer', 'info');
+        return;
+    }
+
+    try {
+        const response = await fetch('/users/me/credentials', {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            },
+            body: JSON.stringify(updates)
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            showToast(`Credentials mis a jour: ${data.updated.join(', ')}`, 'success');
+            loadCredentials(); // Reload to show updated status
+        } else {
+            const data = await response.json();
+            showToast(data.detail || 'Erreur lors de la mise a jour', 'error');
+        }
+    } catch (error) {
+        console.error('Error saving credentials:', error);
+        showToast('Erreur lors de la sauvegarde', 'error');
+    }
+});
+
+// Handle hash navigation to credentials section
+function scrollToCredentials() {
+    if (window.location.hash === '#credentials') {
+        const section = document.getElementById('credentials');
+        if (section) {
+            section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    }
+}
+
+// Load profile and credentials on page load
 loadProfile();
+loadCredentials();
+scrollToCredentials();
 </script>
 {% endblock %}

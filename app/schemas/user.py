@@ -131,3 +131,74 @@ class AdminStats(BaseModel):
                 "recent_logins": 30
             }
         }
+
+
+# --- User Credentials Schemas ---
+
+class CredentialValue(BaseModel):
+    """Schema pour une valeur de credential masquee"""
+    has_value: bool
+    masked: str = ""
+
+
+class UserCredentialsResponse(BaseModel):
+    """Schema pour la reponse des credentials utilisateur (valeurs masquees)"""
+    # LLM Providers
+    openai_api_key: CredentialValue
+    openrouter_api_key: CredentialValue
+    openrouter_model: CredentialValue
+    # OCR Provider
+    mistral_api_key: CredentialValue
+    mistral_model: CredentialValue
+    mistral_url: CredentialValue
+    # Vector Databases
+    pinecone_api_key: CredentialValue
+    pinecone_env: CredentialValue
+    weaviate_api_key: CredentialValue
+    weaviate_url: CredentialValue
+    qdrant_api_key: CredentialValue
+    qdrant_url: CredentialValue
+    # Zotero
+    zotero_api_key: CredentialValue
+    zotero_user_id: CredentialValue
+    zotero_group_id: CredentialValue
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "openai_api_key": {"has_value": True, "masked": "••••••••abcd"},
+                "openrouter_api_key": {"has_value": False, "masked": ""},
+                "pinecone_api_key": {"has_value": True, "masked": "••••••••1234"}
+            }
+        }
+
+
+class UserCredentialsUpdate(BaseModel):
+    """Schema pour la mise a jour des credentials utilisateur"""
+    # LLM Providers
+    openai_api_key: Optional[str] = Field(None, description="OpenAI API Key")
+    openrouter_api_key: Optional[str] = Field(None, description="OpenRouter API Key")
+    openrouter_model: Optional[str] = Field(None, description="OpenRouter default model")
+    # OCR Provider
+    mistral_api_key: Optional[str] = Field(None, description="Mistral API Key")
+    mistral_model: Optional[str] = Field(None, description="Mistral model for OCR")
+    mistral_url: Optional[str] = Field(None, description="Mistral API base URL")
+    # Vector Databases
+    pinecone_api_key: Optional[str] = Field(None, description="Pinecone API Key")
+    pinecone_env: Optional[str] = Field(None, description="Pinecone environment")
+    weaviate_api_key: Optional[str] = Field(None, description="Weaviate API Key")
+    weaviate_url: Optional[str] = Field(None, description="Weaviate cluster URL")
+    qdrant_api_key: Optional[str] = Field(None, description="Qdrant API Key")
+    qdrant_url: Optional[str] = Field(None, description="Qdrant instance URL")
+    # Zotero
+    zotero_api_key: Optional[str] = Field(None, description="Zotero API Key")
+    zotero_user_id: Optional[str] = Field(None, description="Zotero User ID")
+    zotero_group_id: Optional[str] = Field(None, description="Zotero Group ID")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "openai_api_key": "sk-xxxxxxxxxxxxxxxxxxxxx",
+                "pinecone_api_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+            }
+        }

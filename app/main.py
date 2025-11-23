@@ -13,7 +13,7 @@ try:
 except OverflowError:
     csv.field_size_limit(2**31 - 1)
 import pandas as pd
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi import FastAPI, Request, UploadFile, File, Form, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -32,8 +32,9 @@ from app.routes.admin import router as admin_router
 from app.routes.projects import router as projects_router
 from app.routes.pages import router as pages_router
 from app.routes.pipeline import router as pipeline_router
-from app.middleware.auth import get_optional_user
+from app.middleware.auth import get_optional_user, get_current_active_user
 from app.database.session import get_db
+from app.core.credentials import get_credential_or_env, get_user_credentials
 
 # --- Path Definitions ---
 APP_DIR = os.path.dirname(os.path.abspath(__file__))  # Should be /.../__RAG/ragpy/app
@@ -853,7 +854,8 @@ async def save_credentials(
 async def generate_zotero_notes(
     session: str = Form(...),
     model: str = Form(""),
-    extended_analysis: str = Form("true")
+    extended_analysis: str = Form("true"),
+    current_user = Depends(get_current_active_user)
 ):
     """
     Generate reading notes for Zotero items and push them to Zotero.
@@ -902,14 +904,14 @@ async def generate_zotero_notes(
     library_id = library_info["library_id"]
     logger.info(f"Detected library: type={library_type}, id={library_id}")
 
-    # Get Zotero credentials from environment
-    zotero_api_key = os.getenv("ZOTERO_API_KEY")
+    # Get Zotero credentials from user profile (with fallback to environment)
+    zotero_api_key = get_credential_or_env(current_user, "zotero_api_key", "ZOTERO_API_KEY")
 
     if not zotero_api_key:
-        logger.error("ZOTERO_API_KEY not found in environment")
+        logger.error("ZOTERO_API_KEY not found in user credentials or environment")
         return JSONResponse(
             status_code=400,
-            content={"error": "ZOTERO_API_KEY not configured. Please set it in Settings."}
+            content={"error": "ZOTERO_API_KEY not configured. Please set it in your Profile > Credentials."}
         )
 
     # Verify API key first
@@ -1317,16 +1319,17 @@ async def sparse_embedding_generation(path: str = Form(...)): # path is now rela
 
 @app.post("/upload_db") # Added decorator back
 async def upload_db(
-    path: str = Form(...), 
+    path: str = Form(...),
     db_choice: str = Form(...),
     pinecone_index_name: str = Form(None),
     pinecone_namespace: str = Form(None),
     weaviate_class_name: str = Form(None),
     weaviate_tenant_name: str = Form(None),
-    qdrant_collection_name: str = Form(None)
+    qdrant_collection_name: str = Form(None),
+    current_user = Depends(get_current_active_user)
 ): # path is now relative to UPLOAD_DIR
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
-    logger.info(f"/upload_db called with relative path: '{path}', resolved to absolute: '{absolute_processing_path}', db_choice: '{db_choice}'")
+    logger.info(f"/upload_db called by user {current_user.email} with relative path: '{path}', resolved to absolute: '{absolute_processing_path}', db_choice: '{db_choice}'")
     logger.info(f"Pinecone index: {pinecone_index_name}, namespace: {pinecone_namespace}, Weaviate class: {weaviate_class_name}, Qdrant collection: {qdrant_collection_name}")
 
     chunks_json = os.path.join(absolute_processing_path, f"{BASE_CHUNK_OUTPUT_NAME}_chunks_with_embeddings_sparse.json")
@@ -1334,24 +1337,9 @@ async def upload_db(
         logger.error(f"Chunks file not found for DB upload: {chunks_json}")
         return JSONResponse(status_code=400, content={"error": f"Required chunks file not found: {chunks_json}"})
 
-    # Load credentials
-    env_path_relative = os.path.join(os.path.dirname(__file__), "..", ".env")
-    env_path_abs = os.path.abspath(env_path_relative)
-    
-    current_env_vars = {}
-    if os.path.exists(env_path_abs):
-        try:
-            with open(env_path_abs, "r", encoding="utf-8") as f:
-                for line in f:
-                    if "=" in line and not line.strip().startswith("#"):
-                        k, v = line.strip().split("=", 1)
-                        current_env_vars[k.strip()] = v.strip()
-            logger.info(f"Loaded {len(current_env_vars)} credentials from {env_path_abs} for DB upload.")
-        except Exception as e:
-            logger.error(f"Error reading .env file for DB upload: {str(e)}")
-            return JSONResponse(status_code=500, content={"error": f"Failed to read credentials for DB upload: {str(e)}"})
-    else:
-        logger.warning(f".env file not found at {env_path_abs} for DB upload. Operations might fail if API keys are required.")
+    # Load credentials from user profile (with fallback to environment)
+    user_creds = get_user_credentials(current_user)
+    logger.info(f"Loaded {len(user_creds)} credentials from user profile for DB upload.")
 
     # Import necessary functions from rad_vectordb.py
     # This assumes 'scripts' is in PYTHONPATH or accessible.
@@ -1375,7 +1363,7 @@ async def upload_db(
 
     try:
         if db_choice == "pinecone":
-            api_key = current_env_vars.get("PINECONE_API_KEY")
+            api_key = get_credential_or_env(current_user, "pinecone_api_key", "PINECONE_API_KEY")
             # PINECONE_ENV is typically handled by the Pinecone client library via environment variable
             # or if the index is serverless, it might not be needed for pc.Index(index_name)
             # The insert_to_pinecone function doesn't explicitly take PINECONE_ENV.
@@ -1415,8 +1403,8 @@ async def upload_db(
                 })
 
         elif db_choice == "weaviate":
-            api_key = current_env_vars.get("WEAVIATE_API_KEY")
-            url = current_env_vars.get("WEAVIATE_URL")
+            api_key = get_credential_or_env(current_user, "weaviate_api_key", "WEAVIATE_API_KEY")
+            url = get_credential_or_env(current_user, "weaviate_url", "WEAVIATE_URL")
             if not api_key or not url:
                 return JSONResponse(status_code=400, content={"error": "Weaviate API Key or URL not found in credentials."})
             if not weaviate_class_name:
@@ -1460,8 +1448,8 @@ async def upload_db(
 
 
         elif db_choice == "qdrant":
-            api_key = current_env_vars.get("QDRANT_API_KEY") # Can be None for local/unsecured
-            url = current_env_vars.get("QDRANT_URL")
+            api_key = get_credential_or_env(current_user, "qdrant_api_key", "QDRANT_API_KEY")  # Can be None for local/unsecured
+            url = get_credential_or_env(current_user, "qdrant_url", "QDRANT_URL")
             if not url: # URL is essential
                 return JSONResponse(status_code=400, content={"error": "Qdrant URL not found in credentials."})
             if not qdrant_collection_name:
@@ -1626,13 +1614,17 @@ async def process_dataframe_sse(path: str = Form(...)):
 async def generate_zotero_notes_sse(
     session: str = Form(...),
     model: str = Form(""),
-    extended_analysis: str = Form("true")
+    extended_analysis: str = Form("true"),
+    current_user = Depends(get_current_active_user)
 ):
     """
     Generate Zotero notes with Server-Sent Events for progress tracking.
     """
     use_extended = extended_analysis.lower() == "true"
     session_dir = os.path.join(UPLOAD_DIR, session)
+
+    # Get credentials before entering the generator (closure capture)
+    zotero_api_key = get_credential_or_env(current_user, "zotero_api_key", "ZOTERO_API_KEY")
 
     async def event_generator():
         try:
@@ -1649,10 +1641,9 @@ async def generate_zotero_notes_sse(
             library_type = library_info["library_type"]
             library_id = library_info["library_id"]
 
-            # Get API key
-            zotero_api_key = os.getenv("ZOTERO_API_KEY")
+            # Check API key (already retrieved from user credentials)
             if not zotero_api_key:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'ZOTERO_API_KEY not configured'})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'message': 'ZOTERO_API_KEY not configured. Set it in Profile > Credentials.'})}\n\n"
                 return
 
             # Verify API key
