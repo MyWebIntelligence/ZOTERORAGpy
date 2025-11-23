@@ -17,10 +17,22 @@ from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
 from logging.handlers import RotatingFileHandler
+from contextlib import asynccontextmanager
 
 # Import Zotero utilities
 from app.utils import zotero_client, llm_note_generator, zotero_parser
+
+# Import authentication and database modules
+from app.database.init_db import init_database
+from app.routes.auth import router as auth_router
+from app.routes.users import router as users_router
+from app.routes.admin import router as admin_router
+from app.routes.projects import router as projects_router
+from app.routes.pages import router as pages_router
+from app.middleware.auth import get_optional_user
+from app.database.session import get_db
 
 # --- Path Definitions ---
 APP_DIR = os.path.dirname(os.path.abspath(__file__))  # Should be /.../__RAG/ragpy/app
@@ -61,16 +73,81 @@ logger.info(f"UPLOAD_DIR initialized to: {UPLOAD_DIR}")
 logger.info(f"Application log file: {app_log_file}")
 # --- End Logging and Path Setup ---
 
-# Initialize FastAPI app
-app = FastAPI()
+# --- Database Initialization ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler for startup/shutdown events"""
+    # Startup: Initialize database
+    logger.info("Initializing database...")
+    init_database()
+    logger.info("Database initialized successfully")
+    yield
+    # Shutdown: cleanup if needed
+    logger.info("Application shutting down...")
 
+# Initialize FastAPI app with lifespan
+app = FastAPI(
+    title="MyDoc Intelligence",
+    description="RAGpy - Pipeline de traitement de documents académiques",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount static files
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
+# Include authentication and API routers
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(admin_router)
+app.include_router(projects_router)
+app.include_router(pages_router)
+
 @app.get("/", response_class=HTMLResponse)
 async def homepage(request: Request):
-    # Serve the main UI
-    return templates.TemplateResponse("index.html", {"request": request})
+    """Main application page - shows projects if logged in, or login prompt"""
+    from sqlalchemy.orm import Session
+    from fastapi import Depends
+
+    # Get optional user from cookie
+    db = next(get_db())
+    try:
+        token = request.cookies.get("access_token")
+        current_user = None
+
+        if token:
+            from app.core.security import decode_token
+            from app.models.user import User
+
+            payload = decode_token(token)
+            if payload and payload.get("type") == "access":
+                try:
+                    user_id = int(payload.get("sub"))
+                    current_user = db.query(User).filter(User.id == user_id).first()
+                except (ValueError, TypeError):
+                    pass
+
+        # Return appropriate template based on login status
+        return templates.TemplateResponse(
+            "user/projects.html" if current_user else "auth/login.html",
+            {
+                "request": request,
+                "current_user": current_user,
+                "show_sidebar": False
+            }
+        )
+    finally:
+        db.close()
 
 @app.post("/upload_zip")
 async def upload_zip(file: UploadFile = File(...)):
