@@ -107,12 +107,12 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-# Include authentication and API routers
+# Include routers - pages_router first for HTML pages to take precedence
+app.include_router(pages_router)  # HTML pages (must be before API routers with same paths)
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(admin_router)
 app.include_router(projects_router)
-app.include_router(pages_router)
 app.include_router(pipeline_router)
 
 @app.get("/", response_class=HTMLResponse)
