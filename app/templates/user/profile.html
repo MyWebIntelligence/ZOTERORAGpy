@@ -1,0 +1,249 @@
+{% extends "base.html" %}
+
+{% block title %}Mon profil - MyDoc Intelligence{% endblock %}
+
+{% block content %}
+<div class="container" style="max-width: 800px;">
+    <h1 class="mb-4">Mon profil</h1>
+
+    <!-- Profile form -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">Informations personnelles</h5>
+        </div>
+        <div class="card-body">
+            <form id="profileForm">
+                <div class="row">
+                    <div class="col-md-6 mb-3">
+                        <label for="first_name" class="form-label">Pr&eacute;nom</label>
+                        <input type="text" class="form-control" id="first_name" name="first_name" maxlength="100">
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <label for="last_name" class="form-label">Nom</label>
+                        <input type="text" class="form-control" id="last_name" name="last_name" maxlength="100">
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <label for="email" class="form-label">Email</label>
+                    <input type="email" class="form-control" id="email" readonly disabled>
+                    <div class="form-text">L'email ne peut pas &ecirc;tre modifi&eacute;.</div>
+                </div>
+
+                <div class="mb-3">
+                    <label for="organization" class="form-label">Organisation</label>
+                    <input type="text" class="form-control" id="organization" name="organization" maxlength="255">
+                </div>
+
+                <div class="mb-3">
+                    <label for="title" class="form-label">Titre / Fonction</label>
+                    <input type="text" class="form-control" id="title" name="title" maxlength="255">
+                </div>
+
+                <button type="submit" class="btn btn-primary">Enregistrer les modifications</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Account info -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">Informations du compte</h5>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-6">
+                    <p><strong>Compte cr&eacute;&eacute; le :</strong> <span id="createdAt">-</span></p>
+                    <p><strong>Derni&egrave;re connexion :</strong> <span id="lastLogin">-</span></p>
+                </div>
+                <div class="col-md-6">
+                    <p><strong>R&ocirc;les :</strong> <span id="roles">-</span></p>
+                    <p><strong>Statut :</strong> <span id="status">-</span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Change password -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">Changer le mot de passe</h5>
+        </div>
+        <div class="card-body">
+            <form id="passwordForm">
+                <div class="mb-3">
+                    <label for="current_password" class="form-label">Mot de passe actuel</label>
+                    <input type="password" class="form-control" id="current_password" required>
+                </div>
+                <div class="mb-3">
+                    <label for="new_password" class="form-label">Nouveau mot de passe</label>
+                    <input type="password" class="form-control" id="new_password" required minlength="8">
+                    <div class="form-text">Minimum 8 caract&egrave;res, une lettre et un chiffre.</div>
+                </div>
+                <div class="mb-3">
+                    <label for="confirm_password" class="form-label">Confirmer le nouveau mot de passe</label>
+                    <input type="password" class="form-control" id="confirm_password" required>
+                </div>
+                <button type="submit" class="btn btn-warning">Changer le mot de passe</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Danger zone -->
+    <div class="card border-danger">
+        <div class="card-header bg-danger text-white">
+            <h5 class="mb-0">Zone de danger</h5>
+        </div>
+        <div class="card-body">
+            <p class="text-muted">La suppression de votre compte est d&eacute;finitive et irr&eacute;versible.</p>
+            <button class="btn btn-outline-danger" onclick="confirmDeleteAccount()">
+                <i class="bi bi-trash"></i> Supprimer mon compte
+            </button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadProfile() {
+    try {
+        const response = await fetch('/auth/me', {
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            const user = await response.json();
+
+            document.getElementById('first_name').value = user.first_name || '';
+            document.getElementById('last_name').value = user.last_name || '';
+            document.getElementById('email').value = user.email;
+            document.getElementById('organization').value = user.organization || '';
+            document.getElementById('title').value = user.title || '';
+
+            document.getElementById('createdAt').textContent = user.created_at
+                ? new Date(user.created_at).toLocaleDateString('fr-FR')
+                : '-';
+            document.getElementById('lastLogin').textContent = user.last_login
+                ? new Date(user.last_login).toLocaleDateString('fr-FR')
+                : '-';
+            document.getElementById('roles').innerHTML = user.roles.map(r =>
+                `<span class="badge ${r === 'ADMIN' ? 'bg-primary' : 'bg-secondary'}">${r}</span>`
+            ).join(' ');
+            document.getElementById('status').innerHTML = user.is_active
+                ? '<span class="badge bg-success">Actif</span>'
+                : '<span class="badge bg-danger">Inactif</span>';
+        } else if (response.status === 401) {
+            window.location.href = '/login';
+        }
+    } catch (error) {
+        console.error('Error loading profile:', error);
+    }
+}
+
+document.getElementById('profileForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    const formData = {
+        first_name: document.getElementById('first_name').value || null,
+        last_name: document.getElementById('last_name').value || null,
+        organization: document.getElementById('organization').value || null,
+        title: document.getElementById('title').value || null
+    };
+
+    try {
+        const response = await fetch('/users/me', {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            },
+            body: JSON.stringify(formData)
+        });
+
+        if (response.ok) {
+            showFlash('Profil mis &agrave; jour avec succ&egrave;s', 'success');
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur lors de la mise &agrave; jour', 'danger');
+        }
+    } catch (error) {
+        console.error('Error updating profile:', error);
+        showFlash('Erreur lors de la mise &agrave; jour', 'danger');
+    }
+});
+
+document.getElementById('passwordForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    const newPassword = document.getElementById('new_password').value;
+    const confirmPassword = document.getElementById('confirm_password').value;
+
+    if (newPassword !== confirmPassword) {
+        showFlash('Les mots de passe ne correspondent pas', 'danger');
+        return;
+    }
+
+    try {
+        const response = await fetch('/auth/change-password', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            },
+            body: JSON.stringify({
+                current_password: document.getElementById('current_password').value,
+                new_password: newPassword
+            })
+        });
+
+        if (response.ok) {
+            document.getElementById('passwordForm').reset();
+            showFlash('Mot de passe modifi&eacute; avec succ&egrave;s', 'success');
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur lors du changement de mot de passe', 'danger');
+        }
+    } catch (error) {
+        console.error('Error changing password:', error);
+        showFlash('Erreur lors du changement de mot de passe', 'danger');
+    }
+});
+
+async function confirmDeleteAccount() {
+    if (!confirm('&Ecirc;tes-vous s&ucirc;r de vouloir supprimer votre compte ? Cette action est irr&eacute;versible.')) {
+        return;
+    }
+
+    if (!confirm('Derni&egrave;re confirmation : toutes vos donn&eacute;es seront d&eacute;finitivement supprim&eacute;es.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/users/me', {
+            method: 'DELETE',
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            localStorage.removeItem('access_token');
+            window.location.href = '/login?deleted=true';
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur lors de la suppression', 'danger');
+        }
+    } catch (error) {
+        console.error('Error deleting account:', error);
+        showFlash('Erreur lors de la suppression du compte', 'danger');
+    }
+}
+
+// Load profile on page load
+loadProfile();
+</script>
+{% endblock %}

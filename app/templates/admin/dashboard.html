@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block title %}Tableau de bord - Administration - MyDoc Intelligence{% endblock %}
+
+{% set show_sidebar = true %}
+
+{% block sidebar %}
+<aside class="sidebar">
+    <div class="sidebar-header">MyDoc Intelligence</div>
+    <nav class="nav flex-column">
+        <a class="nav-link active" href="/admin">
+            <i class="bi bi-speedometer2"></i> Tableau de bord
+        </a>
+        <a class="nav-link" href="/admin/users">
+            <i class="bi bi-people"></i> Utilisateurs
+        </a>
+        <a class="nav-link" href="/admin/projects">
+            <i class="bi bi-folder"></i> Projets
+        </a>
+        <a class="nav-link" href="/admin/settings">
+            <i class="bi bi-gear"></i> Param&egrave;tres
+        </a>
+    </nav>
+</aside>
+{% endblock %}
+
+{% block content %}
+<h1 class="mb-4">Tableau de bord</h1>
+
+<div class="row g-4">
+    <!-- Users card -->
+    <div class="col-md-6 col-lg-4">
+        <div class="stat-card">
+            <div class="card-header">
+                <i class="bi bi-people-fill"></i> Utilisateurs
+            </div>
+            <div class="card-body">
+                <div class="stat-number" id="totalUsers">-</div>
+                <div class="stat-label">Nombre total d'utilisateurs enregistr&eacute;s.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Projects card -->
+    <div class="col-md-6 col-lg-4">
+        <div class="stat-card">
+            <div class="card-header">
+                <i class="bi bi-folder-fill"></i> Projets
+            </div>
+            <div class="card-body">
+                <div class="stat-number" id="totalProjects">-</div>
+                <div class="stat-label">Nombre total de projets cr&eacute;&eacute;s.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Active users card -->
+    <div class="col-md-6 col-lg-4">
+        <div class="stat-card">
+            <div class="card-header">
+                <i class="bi bi-person-check-fill"></i> Utilisateurs actifs
+            </div>
+            <div class="card-body">
+                <div class="stat-number" id="activeUsers">-</div>
+                <div class="stat-label">Utilisateurs actifs cette semaine.</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent activity -->
+<div class="mt-5">
+    <h2 class="h4 mb-3">Activit&eacute; r&eacute;cente</h2>
+    <div class="table-container">
+        <table class="table table-hover mb-0">
+            <thead>
+                <tr>
+                    <th>Utilisateur</th>
+                    <th>Action</th>
+                    <th>Date</th>
+                </tr>
+            </thead>
+            <tbody id="recentActivity">
+                <tr>
+                    <td colspan="3" class="text-center text-muted py-4">
+                        Chargement...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadStats() {
+    try {
+        const response = await fetch('/admin/stats', {
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            const stats = await response.json();
+            document.getElementById('totalUsers').textContent = stats.total_users;
+            document.getElementById('totalProjects').textContent = stats.total_projects;
+            document.getElementById('activeUsers').textContent = stats.recent_logins;
+        } else if (response.status === 401 || response.status === 403) {
+            window.location.href = '/login';
+        }
+    } catch (error) {
+        console.error('Error loading stats:', error);
+    }
+}
+
+// Load stats on page load
+loadStats();
+</script>
+{% endblock %}

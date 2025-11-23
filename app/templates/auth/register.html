@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block title %}Cr&eacute;er un compte - MyDoc Intelligence{% endblock %}
+
+{% block content %}
+<div class="auth-container">
+    <h1>Cr&eacute;er un compte</h1>
+
+    {% if error %}
+    <div class="alert alert-danger" role="alert">
+        {{ error }}
+    </div>
+    {% endif %}
+
+    <form id="registerForm" method="post">
+        <div class="row">
+            <div class="col-md-6 mb-3">
+                <label for="first_name" class="form-label">Pr&eacute;nom</label>
+                <input type="text" class="form-control" id="first_name" name="first_name"
+                       maxlength="100">
+            </div>
+            <div class="col-md-6 mb-3">
+                <label for="last_name" class="form-label">Nom</label>
+                <input type="text" class="form-control" id="last_name" name="last_name"
+                       maxlength="100">
+            </div>
+        </div>
+
+        <div class="mb-3">
+            <label for="organization" class="form-label">Organisation</label>
+            <input type="text" class="form-control" id="organization" name="organization"
+                   maxlength="255" placeholder="Universit&eacute;, entreprise...">
+        </div>
+
+        <div class="mb-3">
+            <label for="title" class="form-label">Titre</label>
+            <input type="text" class="form-control" id="title" name="title"
+                   maxlength="255" placeholder="Chercheur, Professeur...">
+        </div>
+
+        <div class="mb-3">
+            <label for="email" class="form-label">E-mail <span class="text-danger">*</span></label>
+            <input type="email" class="form-control" id="email" name="email" required
+                   placeholder="votre@email.com">
+        </div>
+
+        <div class="mb-3">
+            <label for="password" class="form-label">Mot de passe <span class="text-danger">*</span></label>
+            <input type="password" class="form-control" id="password" name="password" required
+                   minlength="8" placeholder="Minimum 8 caract&egrave;res, 1 lettre, 1 chiffre">
+            <div class="form-text">Le mot de passe doit contenir au moins 8 caract&egrave;res, une lettre et un chiffre.</div>
+        </div>
+
+        <div class="mb-3">
+            <label for="password_confirm" class="form-label">Confirmer le mot de passe <span class="text-danger">*</span></label>
+            <input type="password" class="form-control" id="password_confirm" name="password_confirm" required>
+        </div>
+
+        <div class="mb-3 form-check">
+            <input type="checkbox" class="form-check-input" id="accept_terms" name="accept_terms" required>
+            <label class="form-check-label" for="accept_terms">
+                J'accepte les conditions d'utilisation <span class="text-danger">*</span>
+            </label>
+        </div>
+
+        <button type="submit" class="btn btn-primary w-100">S'enregistrer</button>
+    </form>
+
+    <div class="mt-3 text-center">
+        <span class="text-muted">D&eacute;j&agrave; un compte ?</span>
+        <a href="/login" class="text-decoration-none">Se connecter</a>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.getElementById('registerForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    // Validate password match
+    const password = document.getElementById('password').value;
+    const passwordConfirm = document.getElementById('password_confirm').value;
+
+    if (password !== passwordConfirm) {
+        showError('Les mots de passe ne correspondent pas');
+        return;
+    }
+
+    // Validate password strength
+    if (password.length < 8) {
+        showError('Le mot de passe doit contenir au moins 8 caract&egrave;res');
+        return;
+    }
+
+    if (!/[A-Za-z]/.test(password)) {
+        showError('Le mot de passe doit contenir au moins une lettre');
+        return;
+    }
+
+    if (!/\d/.test(password)) {
+        showError('Le mot de passe doit contenir au moins un chiffre');
+        return;
+    }
+
+    const formData = {
+        email: document.getElementById('email').value,
+        password: password,
+        first_name: document.getElementById('first_name').value || null,
+        last_name: document.getElementById('last_name').value || null,
+        organization: document.getElementById('organization').value || null,
+        title: document.getElementById('title').value || null,
+        accept_terms: document.getElementById('accept_terms').checked
+    };
+
+    try {
+        const response = await fetch('/auth/register', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(formData)
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            // Show success and redirect to login
+            alert('Compte cr&eacute;&eacute; avec succ&egrave;s ! Vous pouvez maintenant vous connecter.');
+            window.location.href = '/login';
+        } else {
+            showError(data.detail || 'Erreur lors de la cr&eacute;ation du compte');
+        }
+    } catch (error) {
+        console.error('Register error:', error);
+        showError('Erreur lors de la cr&eacute;ation du compte. Veuillez r&eacute;essayer.');
+    }
+});
+
+function showError(message) {
+    const existingAlert = document.querySelector('.auth-container .alert-danger');
+    if (existingAlert) {
+        existingAlert.remove();
+    }
+
+    const alertDiv = document.createElement('div');
+    alertDiv.className = 'alert alert-danger';
+    alertDiv.textContent = message;
+    document.querySelector('.auth-container h1').after(alertDiv);
+}
+</script>
+{% endblock %}
