@@ -439,3 +439,138 @@ async def delete_session(
     db.commit()
 
     return JSONResponse({"message": "Session supprimée avec succès"})
+
+
+@router.get("/sessions/{session_folder:path}/files")
+async def get_session_files(
+    session_folder: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Détecte les fichiers existants dans une session pour reprendre le pipeline.
+    Retourne l'état actuel de la session avec les fichiers disponibles.
+    """
+    # Verify session access
+    session = verify_session_access(db, session_folder, current_user)
+
+    session_path = os.path.join(UPLOAD_DIR, session_folder)
+
+    if not os.path.exists(session_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dossier de session non trouvé"
+        )
+
+    # Define expected files at each stage
+    files_status = {
+        "upload": {
+            "completed": False,
+            "files": []
+        },
+        "extraction": {
+            "completed": False,
+            "file": "output.csv",
+            "exists": False,
+            "row_count": None
+        },
+        "chunking": {
+            "completed": False,
+            "file": "output_chunks.json",
+            "exists": False,
+            "chunk_count": None
+        },
+        "dense_embedding": {
+            "completed": False,
+            "file": "output_chunks_with_embeddings.json",
+            "exists": False,
+            "chunk_count": None
+        },
+        "sparse_embedding": {
+            "completed": False,
+            "file": "output_chunks_with_embeddings_sparse.json",
+            "exists": False,
+            "chunk_count": None
+        }
+    }
+
+    # Check upload (any files present)
+    all_files = os.listdir(session_path)
+    files_status["upload"]["files"] = all_files
+    files_status["upload"]["completed"] = len(all_files) > 0
+
+    # Check extraction (output.csv)
+    csv_path = os.path.join(session_path, "output.csv")
+    if os.path.exists(csv_path):
+        files_status["extraction"]["exists"] = True
+        files_status["extraction"]["completed"] = True
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_path, nrows=0)
+            # Count rows more efficiently
+            with open(csv_path, 'r', encoding='utf-8-sig') as f:
+                row_count = sum(1 for _ in f) - 1  # minus header
+            files_status["extraction"]["row_count"] = row_count
+        except Exception:
+            pass
+
+    # Check chunking (output_chunks.json)
+    chunks_path = os.path.join(session_path, "output_chunks.json")
+    if os.path.exists(chunks_path):
+        files_status["chunking"]["exists"] = True
+        files_status["chunking"]["completed"] = True
+        try:
+            import json
+            with open(chunks_path, 'r', encoding='utf-8') as f:
+                chunks = json.load(f)
+            files_status["chunking"]["chunk_count"] = len(chunks)
+        except Exception:
+            pass
+
+    # Check dense embeddings (output_chunks_with_embeddings.json)
+    dense_path = os.path.join(session_path, "output_chunks_with_embeddings.json")
+    if os.path.exists(dense_path):
+        files_status["dense_embedding"]["exists"] = True
+        files_status["dense_embedding"]["completed"] = True
+        try:
+            import json
+            with open(dense_path, 'r', encoding='utf-8') as f:
+                chunks = json.load(f)
+            files_status["dense_embedding"]["chunk_count"] = len(chunks)
+        except Exception:
+            pass
+
+    # Check sparse embeddings (output_chunks_with_embeddings_sparse.json)
+    sparse_path = os.path.join(session_path, "output_chunks_with_embeddings_sparse.json")
+    if os.path.exists(sparse_path):
+        files_status["sparse_embedding"]["exists"] = True
+        files_status["sparse_embedding"]["completed"] = True
+        try:
+            import json
+            with open(sparse_path, 'r', encoding='utf-8') as f:
+                chunks = json.load(f)
+            files_status["sparse_embedding"]["chunk_count"] = len(chunks)
+        except Exception:
+            pass
+
+    # Determine current stage
+    current_stage = "upload"
+    if files_status["sparse_embedding"]["completed"]:
+        current_stage = "destination"
+    elif files_status["dense_embedding"]["completed"]:
+        current_stage = "sparse_embedding"
+    elif files_status["chunking"]["completed"]:
+        current_stage = "dense_embedding"
+    elif files_status["extraction"]["completed"]:
+        current_stage = "chunking"
+    elif files_status["upload"]["completed"]:
+        current_stage = "extraction"
+
+    return JSONResponse({
+        "session_id": session.id,
+        "session_folder": session_folder,
+        "project_id": session.project_id,
+        "current_stage": current_stage,
+        "files": files_status,
+        "session_status": session.status.value if session.status else "unknown"
+    })
