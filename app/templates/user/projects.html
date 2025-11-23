@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+
+{% block title %}Mes projets - MyDoc Intelligence{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <h1 class="mb-4">Mes projets</h1>
+
+    <!-- Owned projects -->
+    <section class="mb-5">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="h4 mb-0">Mes projets</h2>
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createProjectModal">
+                <i class="bi bi-plus-lg"></i> Nouveau projet
+            </button>
+        </div>
+
+        <div class="row g-4" id="ownedProjects">
+            <div class="col-12 text-center text-muted py-4">
+                Chargement...
+            </div>
+        </div>
+    </section>
+
+    <!-- Collaborations -->
+    <section class="mb-5">
+        <h2 class="h4 mb-3">Collaborations</h2>
+        <div class="row g-4" id="collaborationProjects">
+            <div class="col-12">
+                <p class="text-muted">Vous n'avez pas encore &eacute;t&eacute; invit&eacute; &agrave; rejoindre un projet.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Favorites -->
+    <section>
+        <h2 class="h4 mb-3">Favoris</h2>
+        <div class="row g-4" id="favoriteProjects">
+            <div class="col-12">
+                <p class="text-muted">Vous n'avez pas encore de projets favoris.</p>
+            </div>
+        </div>
+    </section>
+</div>
+
+<!-- Create Project Modal -->
+<div class="modal fade" id="createProjectModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Nouveau projet</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="createProjectForm">
+                    <div class="mb-3">
+                        <label for="projectName" class="form-label">Nom du projet <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="projectName" required maxlength="255">
+                    </div>
+                    <div class="mb-3">
+                        <label for="projectDescription" class="form-label">Description</label>
+                        <textarea class="form-control" id="projectDescription" rows="3" maxlength="1000"></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+                <button type="button" class="btn btn-primary" onclick="createProject()">Cr&eacute;er</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadProjects() {
+    try {
+        const response = await fetch('/projects', {
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            renderOwnedProjects(data.owned);
+            renderCollaborations(data.collaborations);
+            renderFavorites(data.favorites);
+        } else if (response.status === 401) {
+            window.location.href = '/login';
+        }
+    } catch (error) {
+        console.error('Error loading projects:', error);
+    }
+}
+
+function renderOwnedProjects(projects) {
+    const container = document.getElementById('ownedProjects');
+
+    if (projects.length === 0) {
+        container.innerHTML = `
+            <div class="col-12">
+                <p class="text-muted">Vous n'avez pas encore cr&eacute;&eacute; de projet.</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = projects.map(project => `
+        <div class="col-md-6 col-lg-4">
+            <div class="project-card p-3">
+                <h5 class="mb-2">${escapeHtml(project.name)}</h5>
+                <p class="text-muted small mb-3">${escapeHtml(project.description || 'Pas de description')}</p>
+                <div class="d-flex gap-2">
+                    <a href="/project/${project.id}" class="btn btn-primary btn-sm">
+                        <i class="bi bi-folder-open"></i> Ouvrir
+                    </a>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="deleteProject(${project.id})">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderCollaborations(projects) {
+    const container = document.getElementById('collaborationProjects');
+
+    if (projects.length === 0) {
+        container.innerHTML = `
+            <div class="col-12">
+                <p class="text-muted">Vous n'avez pas encore &eacute;t&eacute; invit&eacute; &agrave; rejoindre un projet.</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = projects.map(project => `
+        <div class="col-md-6 col-lg-4">
+            <div class="project-card p-3">
+                <h5 class="mb-1">${escapeHtml(project.name)}</h5>
+                <p class="text-muted small mb-2">Par ${escapeHtml(project.owner_name || 'Inconnu')}</p>
+                <p class="text-muted small mb-3">${escapeHtml(project.description || 'Pas de description')}</p>
+                <span class="badge bg-secondary mb-2">${project.user_role}</span>
+                <div>
+                    <a href="/project/${project.id}" class="btn btn-primary btn-sm">
+                        <i class="bi bi-folder-open"></i> Ouvrir
+                    </a>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderFavorites(projects) {
+    const container = document.getElementById('favoriteProjects');
+
+    if (projects.length === 0) {
+        container.innerHTML = `
+            <div class="col-12">
+                <p class="text-muted">Vous n'avez pas encore de projets favoris.</p>
+            </div>
+        `;
+        return;
+    }
+
+    // Similar rendering as owned projects
+    container.innerHTML = projects.map(project => `
+        <div class="col-md-6 col-lg-4">
+            <div class="project-card p-3">
+                <h5 class="mb-2">${escapeHtml(project.name)}</h5>
+                <p class="text-muted small mb-3">${escapeHtml(project.description || 'Pas de description')}</p>
+                <a href="/project/${project.id}" class="btn btn-primary btn-sm">
+                    <i class="bi bi-folder-open"></i> Ouvrir
+                </a>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function createProject() {
+    const name = document.getElementById('projectName').value;
+    const description = document.getElementById('projectDescription').value;
+
+    if (!name.trim()) {
+        showFlash('Le nom du projet est obligatoire', 'danger');
+        return;
+    }
+
+    try {
+        const response = await fetch('/projects', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            },
+            body: JSON.stringify({ name, description })
+        });
+
+        if (response.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('createProjectModal')).hide();
+            document.getElementById('createProjectForm').reset();
+            loadProjects();
+            showFlash('Projet cr&eacute;&eacute; avec succ&egrave;s', 'success');
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur lors de la cr&eacute;ation', 'danger');
+        }
+    } catch (error) {
+        console.error('Error creating project:', error);
+        showFlash('Erreur lors de la cr&eacute;ation du projet', 'danger');
+    }
+}
+
+async function deleteProject(projectId) {
+    if (!confirm('&Ecirc;tes-vous s&ucirc;r de vouloir supprimer ce projet ?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/projects/${projectId}`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (response.ok) {
+            loadProjects();
+            showFlash('Projet supprim&eacute;', 'success');
+        } else {
+            const data = await response.json();
+            showFlash(data.detail || 'Erreur lors de la suppression', 'danger');
+        }
+    } catch (error) {
+        console.error('Error deleting project:', error);
+        showFlash('Erreur lors de la suppression', 'danger');
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Load projects on page load
+loadProjects();
+</script>
+{% endblock %}
