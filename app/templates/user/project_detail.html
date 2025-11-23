@@ -94,7 +94,7 @@
                 <i class="bi bi-diagram-3"></i>
                 Sessions de pipeline
             </h2>
-            <a href="/?project={{ project.id }}" class="btn btn-primary btn-sm">
+            <a href="/pipeline?project={{ project.id }}" class="btn btn-primary btn-sm">
                 <i class="bi bi-plus-lg"></i>
                 Nouvelle session
             </a>
@@ -643,7 +643,7 @@ function renderSessions(sessions) {
             <div class="empty-state-small">
                 <div class="empty-state-small-icon"><i class="bi bi-inbox"></i></div>
                 <p class="text-muted">Aucune session de pipeline</p>
-                <a href="/?project=${projectId}" class="btn btn-primary btn-sm">
+                <a href="/pipeline?project=${projectId}" class="btn btn-primary btn-sm">
                     <i class="bi bi-play-circle"></i>
                     Demarrer un pipeline
                 </a>
@@ -683,7 +683,7 @@ function renderSessions(sessions) {
                             </td>
                             <td><small>${formatDate(s.created_at)}</small></td>
                             <td class="text-right">
-                                <a href="/?project=${projectId}&session=${encodeURIComponent(s.session_folder)}"
+                                <a href="/pipeline?project=${projectId}&session=${encodeURIComponent(s.session_folder)}"
                                    class="btn btn-ghost btn-sm" title="Voir / Reprendre">
                                     <i class="bi bi-box-arrow-up-right"></i>
                                 </a>
