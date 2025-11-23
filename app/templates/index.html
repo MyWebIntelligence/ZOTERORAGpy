@@ -840,6 +840,11 @@
       uploadResult.textContent = 'Uploading ZIP...';
       const formData = new FormData(e.target);
 
+      // Add project_id if available
+      if (projectId) {
+        formData.append('project_id', projectId);
+      }
+
       try {
         const res = await fetch('/upload_zip', {
           method: 'POST',
@@ -872,6 +877,11 @@
       const uploadResult = document.getElementById('uploadResult');
       uploadResult.textContent = 'Uploading and processing CSV...';
       const formData = new FormData(e.target);
+
+      // Add project_id if available
+      if (projectId) {
+        formData.append('project_id', projectId);
+      }
 
       try {
         const res = await fetch('/upload_csv', {

@@ -152,14 +152,17 @@ async def homepage(request: Request):
         db.close()
 
 @app.post("/upload_zip")
-async def upload_zip(file: UploadFile = File(...)):
+async def upload_zip(
+    file: UploadFile = File(...),
+    project_id: int = Form(None)
+):
     # Generate a unique prefix for the filename
     unique_id = str(uuid.uuid4().hex)[:8] # Use first 8 chars of a UUID hex
     original_filename, file_extension = os.path.splitext(file.filename)
     unique_filename = f"{unique_id}_{original_filename}{file_extension}"
-    
+
     zip_path = os.path.join(UPLOAD_DIR, unique_filename)
-    
+
     # Ensure UPLOAD_DIR exists (it should from startup, but good practice)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -220,10 +223,53 @@ async def upload_zip(file: UploadFile = File(...)):
             
     relative_processing_path = os.path.relpath(processing_path, UPLOAD_DIR)
     logger.info(f"Returning relative processing path: {relative_processing_path} to client. (Absolute was: {processing_path})")
-    return JSONResponse({"path": relative_processing_path, "tree": tree})
+
+    # Create PipelineSession if project_id is provided
+    session_id = None
+    if project_id:
+        try:
+            from app.models.pipeline_session import PipelineSession, SessionStatus
+            from app.models.project import Project
+
+            db = next(get_db())
+            try:
+                # Verify project exists
+                project = db.query(Project).filter(Project.id == project_id).first()
+                if project:
+                    # Create session record
+                    pipeline_session = PipelineSession(
+                        project_id=project_id,
+                        session_folder=relative_processing_path,
+                        original_filename=file.filename,
+                        source_type="zip",
+                        status=SessionStatus.CREATED
+                    )
+                    db.add(pipeline_session)
+
+                    # Update project's active session
+                    project.session_folder = relative_processing_path
+
+                    db.commit()
+                    db.refresh(pipeline_session)
+                    session_id = pipeline_session.id
+                    logger.info(f"Created PipelineSession {session_id} for project {project_id}")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to create PipelineSession: {e}")
+
+    return JSONResponse({
+        "path": relative_processing_path,
+        "tree": tree,
+        "project_id": project_id,
+        "session_id": session_id
+    })
 
 @app.post("/upload_csv")
-async def upload_csv_endpoint(file: UploadFile = File(...)):
+async def upload_csv_endpoint(
+    file: UploadFile = File(...),
+    project_id: int = Form(None)
+):
     """
     Upload CSV file for direct ingestion (bypass PDF/OCR).
     Converts CSV to DataFrame using ingestion.csv_ingestion module,
@@ -286,10 +332,47 @@ async def upload_csv_endpoint(file: UploadFile = File(...)):
         relative_processing_path = os.path.relpath(dst_dir, UPLOAD_DIR)
         logger.info(f"CSV ingestion successful. Returning path: {relative_processing_path}")
 
+        # Create PipelineSession if project_id is provided
+        session_id = None
+        if project_id:
+            try:
+                from app.models.pipeline_session import PipelineSession, SessionStatus
+                from app.models.project import Project
+
+                db = next(get_db())
+                try:
+                    # Verify project exists
+                    project = db.query(Project).filter(Project.id == project_id).first()
+                    if project:
+                        # Create session record
+                        pipeline_session = PipelineSession(
+                            project_id=project_id,
+                            session_folder=relative_processing_path,
+                            original_filename=file.filename,
+                            source_type="csv",
+                            status=SessionStatus.EXTRACTED,  # CSV skips extraction
+                            row_count=len(df)
+                        )
+                        db.add(pipeline_session)
+
+                        # Update project's active session
+                        project.session_folder = relative_processing_path
+
+                        db.commit()
+                        db.refresh(pipeline_session)
+                        session_id = pipeline_session.id
+                        logger.info(f"Created PipelineSession {session_id} for project {project_id}")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.error(f"Failed to create PipelineSession: {e}")
+
         return JSONResponse({
             "path": relative_processing_path,
             "tree": tree,
-            "message": f"CSV ingested successfully: {len(df)} rows processed."
+            "message": f"CSV ingested successfully: {len(df)} rows processed.",
+            "project_id": project_id,
+            "session_id": session_id
         })
 
     except Exception as e:

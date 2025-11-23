@@ -52,9 +52,6 @@
                 </div>
                 <div class="card-body">
                     <div class="d-grid gap-2">
-                        <a href="/pipeline?project={{ project.id }}" class="btn btn-primary">
-                            <i class="bi bi-play-circle"></i> Ouvrir le pipeline RAG
-                        </a>
                         {% if user_role == 'owner' or current_user.is_admin %}
                         <button class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editProjectModal">
                             <i class="bi bi-pencil"></i> Modifier le projet
