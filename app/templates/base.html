@@ -56,6 +56,12 @@
                                 <span class="sidebar-nav-text">Mes projets</span>
                             </a>
                         </li>
+                        <li class="sidebar-nav-item">
+                            <a href="/profile#credentials" class="sidebar-nav-link {% if request.url.path == '/profile' and 'credentials' in request.url.fragment|default('', true) %}active{% endif %}">
+                                <i class="bi bi-key sidebar-nav-icon"></i>
+                                <span class="sidebar-nav-text">Credentials</span>
+                            </a>
+                        </li>
                     </ul>
                 </div>
                 {% if current_user and current_user.is_admin %}
