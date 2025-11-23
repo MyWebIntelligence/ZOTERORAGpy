@@ -15,7 +15,7 @@ def init_database():
     À appeler au démarrage de l'application.
     """
     # Import des modèles pour qu'ils soient enregistrés dans Base.metadata
-    from app.models import user, project, audit  # noqa: F401
+    from app.models import user, project, audit, pipeline_session  # noqa: F401
 
     logger.info("Initializing database...")
 
