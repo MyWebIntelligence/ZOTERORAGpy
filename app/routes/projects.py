@@ -34,6 +34,9 @@ class ProjectCreate(BaseModel):
 class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = Field(None, max_length=1000)
+    session_folder: Optional[str] = Field(None, max_length=255)
+    vector_db_type: Optional[str] = Field(None, max_length=50)
+    index_name: Optional[str] = Field(None, max_length=255)
 
 
 class ProjectResponse(BaseModel):
@@ -270,6 +273,12 @@ async def update_project(
         project.name = project_data.name
     if project_data.description is not None:
         project.description = project_data.description
+    if project_data.session_folder is not None:
+        project.session_folder = project_data.session_folder
+    if project_data.vector_db_type is not None:
+        project.vector_db_type = project_data.vector_db_type
+    if project_data.index_name is not None:
+        project.index_name = project_data.index_name
 
     db.commit()
     db.refresh(project)
