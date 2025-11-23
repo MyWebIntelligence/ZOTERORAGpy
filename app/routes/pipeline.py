@@ -1,0 +1,441 @@
+"""
+Pipeline session routes - secure pipeline management per project
+"""
+import os
+import shutil
+import uuid
+import zipfile
+from datetime import datetime
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from app.database.session import get_db
+from app.models.user import User
+from app.models.project import Project
+from app.models.pipeline_session import PipelineSession, SessionStatus
+from app.middleware.auth import get_current_active_user
+
+router = APIRouter(prefix="/api/pipeline", tags=["Pipeline"])
+
+# Directory configuration
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RAGPY_DIR = os.path.dirname(APP_DIR)
+UPLOAD_DIR = os.path.join(RAGPY_DIR, "uploads")
+
+
+# --- Schemas ---
+
+class SessionResponse(BaseModel):
+    id: int
+    project_id: int
+    session_folder: str
+    original_filename: Optional[str]
+    status: str
+    source_type: Optional[str]
+    row_count: Optional[int]
+    chunk_count: Optional[int]
+    vector_db_type: Optional[str]
+    index_name: Optional[str]
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+class SessionListResponse(BaseModel):
+    sessions: List[SessionResponse]
+    total: int
+
+
+# --- Helper functions ---
+
+def verify_project_access(db: Session, project_id: int, user: User) -> Project:
+    """
+    Verifies user has access to the project.
+    Returns project if access granted, raises HTTPException otherwise.
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Projet non trouvé"
+        )
+
+    # Check access (owner, member, or admin)
+    if not project.has_access(user.id) and not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès non autorisé à ce projet"
+        )
+
+    return project
+
+
+def verify_session_access(db: Session, session_folder: str, user: User) -> PipelineSession:
+    """
+    Verifies user has access to the pipeline session.
+    Returns session if access granted, raises HTTPException otherwise.
+    """
+    session = db.query(PipelineSession).filter(
+        PipelineSession.session_folder == session_folder
+    ).first()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session non trouvée"
+        )
+
+    # Verify project access
+    verify_project_access(db, session.project_id, user)
+
+    return session
+
+
+# --- Routes ---
+
+@router.get("/projects/{project_id}/sessions", response_model=SessionListResponse)
+async def list_project_sessions(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Liste toutes les sessions de pipeline d'un projet.
+    """
+    # Verify access
+    project = verify_project_access(db, project_id, current_user)
+
+    sessions = db.query(PipelineSession).filter(
+        PipelineSession.project_id == project_id
+    ).order_by(PipelineSession.created_at.desc()).all()
+
+    return SessionListResponse(
+        sessions=[SessionResponse(
+            id=s.id,
+            project_id=s.project_id,
+            session_folder=s.session_folder,
+            original_filename=s.original_filename,
+            status=s.status.value if s.status else "unknown",
+            source_type=s.source_type,
+            row_count=s.row_count,
+            chunk_count=s.chunk_count,
+            vector_db_type=s.vector_db_type,
+            index_name=s.index_name,
+            created_at=s.created_at,
+            updated_at=s.updated_at
+        ) for s in sessions],
+        total=len(sessions)
+    )
+
+
+@router.post("/projects/{project_id}/upload_zip")
+async def upload_zip_to_project(
+    project_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Upload a ZIP file to a project.
+    Creates a new pipeline session linked to the project.
+    """
+    # Verify access (must be able to edit)
+    project = verify_project_access(db, project_id, current_user)
+
+    if not project.can_edit(current_user.id) and not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vous n'avez pas les droits pour ajouter des fichiers à ce projet"
+        )
+
+    # Generate unique session folder
+    unique_id = str(uuid.uuid4().hex)[:8]
+    original_filename, file_extension = os.path.splitext(file.filename)
+    session_folder = f"{unique_id}_{original_filename}"
+
+    zip_path = os.path.join(UPLOAD_DIR, f"{session_folder}{file_extension}")
+    dst_dir = os.path.join(UPLOAD_DIR, session_folder)
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    try:
+        # Save ZIP file
+        with open(zip_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        # Extract ZIP
+        if os.path.exists(dst_dir):
+            shutil.rmtree(dst_dir)
+        os.makedirs(dst_dir, exist_ok=True)
+
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            z.extractall(dst_dir)
+
+        # Handle single root directory case
+        extracted_items = os.listdir(dst_dir)
+        processing_path = dst_dir
+
+        if len(extracted_items) == 1:
+            single_item_path = os.path.join(dst_dir, extracted_items[0])
+            if os.path.isdir(single_item_path):
+                processing_path = single_item_path
+
+        relative_path = os.path.relpath(processing_path, UPLOAD_DIR)
+
+        # Create pipeline session record
+        pipeline_session = PipelineSession(
+            project_id=project_id,
+            session_folder=relative_path,
+            original_filename=file.filename,
+            source_type="zip",
+            status=SessionStatus.CREATED
+        )
+        db.add(pipeline_session)
+
+        # Update project's active session
+        project.session_folder = relative_path
+
+        db.commit()
+        db.refresh(pipeline_session)
+
+        # Build file tree
+        tree = []
+        for root, dirs, files in os.walk(processing_path):
+            for d in dirs:
+                tree.append(os.path.relpath(os.path.join(root, d), processing_path) + '/')
+            for fname in files:
+                tree.append(os.path.relpath(os.path.join(root, fname), processing_path))
+
+        return JSONResponse({
+            "path": relative_path,
+            "tree": tree,
+            "session_id": pipeline_session.id,
+            "project_id": project_id
+        })
+
+    except zipfile.BadZipFile:
+        if os.path.exists(dst_dir):
+            shutil.rmtree(dst_dir)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Le fichier n'est pas une archive ZIP valide"
+        )
+    except Exception as e:
+        if os.path.exists(dst_dir):
+            shutil.rmtree(dst_dir)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de l'extraction: {str(e)}"
+        )
+
+
+@router.post("/projects/{project_id}/upload_csv")
+async def upload_csv_to_project(
+    project_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Upload a CSV file to a project.
+    Creates a new pipeline session linked to the project.
+    """
+    # Verify access (must be able to edit)
+    project = verify_project_access(db, project_id, current_user)
+
+    if not project.can_edit(current_user.id) and not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vous n'avez pas les droits pour ajouter des fichiers à ce projet"
+        )
+
+    # Validate extension
+    original_filename, file_extension = os.path.splitext(file.filename)
+    if file_extension.lower() != ".csv":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Seuls les fichiers .csv sont acceptés"
+        )
+
+    # Generate unique session folder
+    unique_id = str(uuid.uuid4().hex)[:8]
+    session_folder = f"{unique_id}_{original_filename}"
+    dst_dir = os.path.join(UPLOAD_DIR, session_folder)
+
+    os.makedirs(dst_dir, exist_ok=True)
+
+    try:
+        # Save CSV temporarily
+        temp_csv_path = os.path.join(dst_dir, f"{original_filename}.csv")
+        with open(temp_csv_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        # Import and process with ingestion module
+        import sys
+        if RAGPY_DIR not in sys.path:
+            sys.path.insert(0, RAGPY_DIR)
+
+        from ingestion import ingest_csv_to_dataframe
+        import pandas as pd
+
+        df = ingest_csv_to_dataframe(temp_csv_path)
+
+        # Save as output.csv
+        output_csv_path = os.path.join(dst_dir, "output.csv")
+        df.to_csv(output_csv_path, index=False, encoding="utf-8-sig")
+
+        # Clean up temp file if different
+        if os.path.abspath(temp_csv_path) != os.path.abspath(output_csv_path):
+            os.remove(temp_csv_path)
+
+        relative_path = os.path.relpath(dst_dir, UPLOAD_DIR)
+
+        # Create pipeline session record
+        pipeline_session = PipelineSession(
+            project_id=project_id,
+            session_folder=relative_path,
+            original_filename=file.filename,
+            source_type="csv",
+            status=SessionStatus.EXTRACTED,  # CSV skips extraction
+            row_count=len(df)
+        )
+        db.add(pipeline_session)
+
+        # Update project's active session
+        project.session_folder = relative_path
+
+        db.commit()
+        db.refresh(pipeline_session)
+
+        return JSONResponse({
+            "path": relative_path,
+            "tree": ["output.csv"],
+            "session_id": pipeline_session.id,
+            "project_id": project_id,
+            "message": f"CSV importé avec succès: {len(df)} lignes"
+        })
+
+    except Exception as e:
+        if os.path.exists(dst_dir):
+            shutil.rmtree(dst_dir)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors du traitement CSV: {str(e)}"
+        )
+
+
+@router.get("/sessions/{session_folder:path}/verify")
+async def verify_session(
+    session_folder: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Verifies user has access to a session folder.
+    Returns session info if access granted.
+    """
+    session = verify_session_access(db, session_folder, current_user)
+
+    return JSONResponse({
+        "authorized": True,
+        "session_id": session.id,
+        "project_id": session.project_id,
+        "status": session.status.value if session.status else "unknown"
+    })
+
+
+@router.patch("/sessions/{session_id}/status")
+async def update_session_status(
+    session_id: int,
+    status: str = Form(...),
+    row_count: Optional[int] = Form(None),
+    chunk_count: Optional[int] = Form(None),
+    error_message: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Updates the status of a pipeline session.
+    """
+    session = db.query(PipelineSession).filter(PipelineSession.id == session_id).first()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session non trouvée"
+        )
+
+    # Verify project access
+    verify_project_access(db, session.project_id, current_user)
+
+    # Update status
+    try:
+        session.status = SessionStatus(status)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Statut invalide: {status}"
+        )
+
+    if row_count is not None:
+        session.row_count = row_count
+    if chunk_count is not None:
+        session.chunk_count = chunk_count
+    if error_message is not None:
+        session.error_message = error_message
+
+    if status == SessionStatus.COMPLETED.value:
+        session.completed_at = datetime.utcnow()
+
+    db.commit()
+
+    return JSONResponse({"status": "updated", "new_status": session.status.value})
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Deletes a pipeline session and its files.
+    Only project owner or admin can delete.
+    """
+    session = db.query(PipelineSession).filter(PipelineSession.id == session_id).first()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session non trouvée"
+        )
+
+    # Get project and verify ownership
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+
+    if project.owner_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seul le propriétaire peut supprimer une session"
+        )
+
+    # Delete files
+    session_path = os.path.join(UPLOAD_DIR, session.session_folder)
+    if os.path.exists(session_path):
+        shutil.rmtree(session_path)
+
+    # Update project if this was the active session
+    if project.session_folder == session.session_folder:
+        project.session_folder = None
+
+    db.delete(session)
+    db.commit()
+
+    return JSONResponse({"message": "Session supprimée avec succès"})
