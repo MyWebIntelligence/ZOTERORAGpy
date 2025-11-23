@@ -1,15 +1,20 @@
 """
 Administration routes for user and system management
 """
+import os
+import shutil
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy.orm import Session
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_
+from pydantic import BaseModel
 
 from app.database.session import get_db
 from app.models.user import User
 from app.models.project import Project
+from app.models.pipeline_session import PipelineSession, SessionStatus
 from app.models.audit import AuditAction, create_audit_log
 from app.schemas.user import (
     UserResponse,
@@ -19,6 +24,11 @@ from app.schemas.user import (
 )
 from app.core.security import get_password_hash, generate_reset_token
 from app.middleware.auth import require_admin
+
+# Directory configuration
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RAGPY_DIR = os.path.dirname(APP_DIR)
+UPLOAD_DIR = os.path.join(RAGPY_DIR, "uploads")
 
 router = APIRouter(prefix="/admin", tags=["Administration"])
 
@@ -510,3 +520,160 @@ async def admin_verify_user(
     )
 
     return {"message": "Utilisateur vérifié avec succès"}
+
+
+# --- Pipeline Sessions Admin ---
+
+class AdminSessionResponse(BaseModel):
+    """Session response with user and project info for admin"""
+    id: int
+    session_folder: str
+    original_filename: Optional[str]
+    status: str
+    source_type: Optional[str]
+    row_count: Optional[int]
+    chunk_count: Optional[int]
+    vector_db_type: Optional[str]
+    index_name: Optional[str]
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+    # Project info
+    project_id: int
+    project_name: str
+    # User info
+    owner_id: int
+    owner_email: str
+    owner_name: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+class AdminSessionListResponse(BaseModel):
+    sessions: List[AdminSessionResponse]
+    total: int
+    page: int
+    per_page: int
+    pages: int
+
+
+@router.get("/sessions", response_model=AdminSessionListResponse)
+async def list_all_sessions(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    status_filter: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin)
+):
+    """
+    Liste toutes les sessions de pipeline (admin seulement).
+    Inclut les informations du projet et de l'utilisateur.
+    """
+    query = db.query(PipelineSession).join(
+        Project, PipelineSession.project_id == Project.id
+    ).join(
+        User, Project.owner_id == User.id
+    )
+
+    # Apply status filter
+    if status_filter:
+        try:
+            status_enum = SessionStatus(status_filter)
+            query = query.filter(PipelineSession.status == status_enum)
+        except ValueError:
+            pass  # Invalid status, ignore filter
+
+    # Count total
+    total = query.count()
+
+    # Pagination
+    offset = (page - 1) * per_page
+    sessions = query.order_by(PipelineSession.created_at.desc()).offset(offset).limit(per_page).all()
+
+    # Build response with project and user info
+    session_responses = []
+    for session in sessions:
+        project = db.query(Project).filter(Project.id == session.project_id).first()
+        owner = db.query(User).filter(User.id == project.owner_id).first() if project else None
+
+        session_responses.append(AdminSessionResponse(
+            id=session.id,
+            session_folder=session.session_folder,
+            original_filename=session.original_filename,
+            status=session.status.value if session.status else "unknown",
+            source_type=session.source_type,
+            row_count=session.row_count,
+            chunk_count=session.chunk_count,
+            vector_db_type=session.vector_db_type,
+            index_name=session.index_name,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            project_id=session.project_id,
+            project_name=project.name if project else "Projet supprime",
+            owner_id=owner.id if owner else 0,
+            owner_email=owner.email if owner else "Inconnu",
+            owner_name=owner.full_name if owner else None
+        ))
+
+    pages = (total + per_page - 1) // per_page
+
+    return AdminSessionListResponse(
+        sessions=session_responses,
+        total=total,
+        page=page,
+        per_page=per_page,
+        pages=pages
+    )
+
+
+@router.delete("/sessions/{session_id}")
+async def admin_delete_session(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin)
+):
+    """
+    Supprime une session de pipeline (admin seulement).
+    Supprime egalement les fichiers associes.
+    """
+    session = db.query(PipelineSession).filter(PipelineSession.id == session_id).first()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session non trouvee"
+        )
+
+    # Get project for audit
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+
+    # Delete files
+    session_path = os.path.join(UPLOAD_DIR, session.session_folder)
+    if os.path.exists(session_path):
+        shutil.rmtree(session_path)
+
+    # Update project if this was the active session
+    if project and project.session_folder == session.session_folder:
+        project.session_folder = None
+
+    # Log d'audit
+    create_audit_log(
+        db=db,
+        action=AuditAction.PROJECT_DELETE,
+        user_id=admin.id,
+        resource_type="pipeline_session",
+        resource_id=session.id,
+        details={
+            "session_folder": session.session_folder,
+            "project_id": session.project_id,
+            "project_name": project.name if project else "Unknown"
+        },
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("User-Agent")
+    )
+
+    db.delete(session)
+    db.commit()
+
+    return JSONResponse({"message": "Session supprimee avec succes"})
