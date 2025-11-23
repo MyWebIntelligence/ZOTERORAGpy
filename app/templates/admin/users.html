@@ -1,130 +1,392 @@
 {% extends "base.html" %}
 
-{% block title %}Utilisateurs - Administration - MyDoc Intelligence{% endblock %}
+{% block title %}Utilisateurs - Administration - RAGpy{% endblock %}
 
 {% set show_sidebar = true %}
 
-{% block sidebar %}
-<aside class="sidebar">
-    <div class="sidebar-header">MyDoc Intelligence</div>
-    <nav class="nav flex-column">
-        <a class="nav-link" href="/admin">
-            <i class="bi bi-speedometer2"></i> Tableau de bord
-        </a>
-        <a class="nav-link active" href="/admin/users">
-            <i class="bi bi-people"></i> Utilisateurs
-        </a>
-        <a class="nav-link" href="/admin/projects">
-            <i class="bi bi-folder"></i> Projets
-        </a>
-        <a class="nav-link" href="/admin/settings">
-            <i class="bi bi-gear"></i> Param&egrave;tres
-        </a>
-    </nav>
-</aside>
-{% endblock %}
-
 {% block content %}
-<h1 class="mb-4">Liste des Utilisateurs</h1>
+<div class="page-container">
+    <!-- Page Header -->
+    <div class="page-header">
+        <div class="page-header-content">
+            <h1 class="page-title">Utilisateurs</h1>
+            <p class="page-subtitle">Gerer les comptes utilisateurs de la plateforme</p>
+        </div>
+    </div>
 
-<!-- Filters -->
-<div class="row mb-4">
-    <div class="col-md-4">
-        <input type="text" class="form-control" id="searchInput" placeholder="Rechercher...">
+    <!-- Filters -->
+    <div class="filters-bar">
+        <div class="filter-group filter-search">
+            <div class="input-with-icon">
+                <i class="bi bi-search input-icon"></i>
+                <input type="text"
+                       class="form-input"
+                       id="searchInput"
+                       placeholder="Rechercher un utilisateur...">
+            </div>
+        </div>
+        <div class="filter-group">
+            <select class="form-select" id="statusFilter">
+                <option value="">Tous les statuts</option>
+                <option value="active">Actifs</option>
+                <option value="inactive">Inactifs</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <select class="form-select" id="roleFilter">
+                <option value="">Tous les roles</option>
+                <option value="admin">Administrateurs</option>
+                <option value="user">Utilisateurs</option>
+            </select>
+        </div>
     </div>
-    <div class="col-md-3">
-        <select class="form-select" id="statusFilter">
-            <option value="">Tous les statuts</option>
-            <option value="active">Actifs</option>
-            <option value="inactive">Inactifs</option>
-        </select>
+
+    <!-- Users Table -->
+    <div class="card">
+        <div class="table-container">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Utilisateur</th>
+                        <th>Email</th>
+                        <th>Role</th>
+                        <th>Statut</th>
+                        <th>Verifie</th>
+                        <th class="text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="usersTableBody">
+                    <tr>
+                        <td colspan="6">
+                            <div class="table-loading">
+                                <span class="spinner"></span>
+                                <span>Chargement des utilisateurs...</span>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
     </div>
-    <div class="col-md-3">
-        <select class="form-select" id="roleFilter">
-            <option value="">Tous les r&ocirc;les</option>
-            <option value="admin">Administrateurs</option>
-            <option value="user">Utilisateurs</option>
-        </select>
+
+    <!-- Pagination -->
+    <div class="pagination-container" id="pagination">
+        <div class="pagination"></div>
     </div>
 </div>
-
-<!-- Users table -->
-<div class="table-container">
-    <table class="table table-hover">
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Pr&eacute;nom</th>
-                <th>Nom</th>
-                <th>Email</th>
-                <th>R&ocirc;les</th>
-                <th>Statut</th>
-                <th>V&eacute;rifi&eacute;</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody id="usersTableBody">
-            <tr>
-                <td colspan="8" class="text-center text-muted py-4">
-                    Chargement...
-                </td>
-            </tr>
-        </tbody>
-    </table>
-</div>
-
-<!-- Pagination -->
-<nav class="mt-4" id="pagination">
-    <ul class="pagination justify-content-center">
-    </ul>
-</nav>
 
 <!-- Reset Password Modal -->
-<div class="modal fade" id="resetPasswordModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">R&eacute;initialiser le mot de passe</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+<div class="modal" id="resetPasswordModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Reinitialiser le mot de passe</h3>
+            <button class="modal-close" onclick="closeModal('resetPasswordModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div id="resetTokenInitial">
+                <p class="text-secondary">Un token de reinitialisation sera genere pour cet utilisateur.</p>
             </div>
-            <div class="modal-body">
-                <p>Un token de r&eacute;initialisation sera g&eacute;n&eacute;r&eacute; pour l'utilisateur.</p>
-                <div id="resetTokenResult" class="d-none">
-                    <div class="alert alert-info">
-                        <strong>Token de r&eacute;initialisation:</strong>
-                        <code id="resetTokenValue"></code>
+            <div id="resetTokenResult" style="display: none;">
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle"></i>
+                    <div>
+                        <strong>Token de reinitialisation:</strong>
+                        <code id="resetTokenValue" class="token-display"></code>
                     </div>
-                    <p class="text-muted small">Ce token expire dans 24 heures.</p>
                 </div>
+                <p class="text-muted text-sm">Ce token expire dans 24 heures.</p>
             </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-                <button type="button" class="btn btn-primary" id="confirmResetBtn">G&eacute;n&eacute;rer le token</button>
-            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('resetPasswordModal')">Fermer</button>
+            <button type="button" class="btn btn-primary" id="confirmResetBtn">
+                <i class="bi bi-key"></i>
+                Generer le token
+            </button>
         </div>
     </div>
 </div>
 
 <!-- Delete Confirmation Modal -->
-<div class="modal fade" id="deleteModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Confirmer la suppression</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+<div class="modal" id="deleteModal">
+    <div class="modal-content modal-sm">
+        <div class="modal-header">
+            <h3 class="modal-title">Confirmer la suppression</h3>
+            <button class="modal-close" onclick="closeModal('deleteModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div class="delete-warning">
+                <div class="delete-warning-icon">
+                    <i class="bi bi-exclamation-triangle"></i>
+                </div>
+                <p>Etes-vous sur de vouloir supprimer cet utilisateur?</p>
+                <p class="text-danger text-sm"><strong>Cette action est irreversible.</strong></p>
             </div>
-            <div class="modal-body">
-                <p>&Ecirc;tes-vous s&ucirc;r de vouloir supprimer cet utilisateur ?</p>
-                <p class="text-danger"><strong>Cette action est irr&eacute;versible.</strong></p>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
-                <button type="button" class="btn btn-danger" id="confirmDeleteBtn">Supprimer</button>
-            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('deleteModal')">Annuler</button>
+            <button type="button" class="btn btn-danger" id="confirmDeleteBtn">
+                <i class="bi bi-trash"></i>
+                Supprimer
+            </button>
         </div>
     </div>
 </div>
+{% endblock %}
 
+{% block extra_css %}
+<style>
+    .page-container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: var(--space-6);
+    }
+
+    .page-header {
+        margin-bottom: var(--space-6);
+    }
+
+    .page-title {
+        font-size: var(--font-size-2xl);
+        font-weight: var(--font-weight-bold);
+        color: var(--color-text-primary);
+        margin-bottom: var(--space-2);
+    }
+
+    .page-subtitle {
+        font-size: var(--font-size-base);
+        color: var(--color-text-secondary);
+    }
+
+    /* Filters */
+    .filters-bar {
+        display: flex;
+        gap: var(--space-4);
+        margin-bottom: var(--space-6);
+        flex-wrap: wrap;
+    }
+
+    .filter-group {
+        min-width: 180px;
+    }
+
+    .filter-search {
+        flex: 1;
+        min-width: 280px;
+    }
+
+    .input-with-icon {
+        position: relative;
+    }
+
+    .input-icon {
+        position: absolute;
+        left: var(--space-3);
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--color-text-muted);
+        pointer-events: none;
+    }
+
+    .input-with-icon .form-input {
+        padding-left: var(--space-10);
+    }
+
+    /* Table Styles */
+    .table-loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-3);
+        padding: var(--space-10);
+        color: var(--color-text-secondary);
+    }
+
+    .table-empty {
+        text-align: center;
+        padding: var(--space-10) var(--space-4);
+    }
+
+    .table-empty-icon {
+        font-size: 2.5rem;
+        color: var(--color-text-muted);
+        margin-bottom: var(--space-3);
+    }
+
+    .table-empty-text {
+        color: var(--color-text-secondary);
+    }
+
+    /* User Cell */
+    .user-cell {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
+    }
+
+    .user-avatar {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: var(--color-brand-bg);
+        color: var(--color-brand-primary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: var(--font-weight-medium);
+        font-size: var(--font-size-sm);
+        flex-shrink: 0;
+    }
+
+    .user-info {
+        min-width: 0;
+    }
+
+    .user-name {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+    }
+
+    .user-id {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+    }
+
+    /* Actions */
+    .actions-cell {
+        display: flex;
+        gap: var(--space-1);
+        justify-content: flex-end;
+    }
+
+    .btn-icon {
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: var(--radius-md);
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        transition: var(--transition-fast);
+    }
+
+    .btn-icon:hover {
+        background: var(--color-surface-hover);
+        color: var(--color-text-primary);
+    }
+
+    .btn-icon-danger:hover {
+        background: var(--color-danger-bg);
+        color: var(--color-danger);
+    }
+
+    /* Pagination */
+    .pagination-container {
+        display: flex;
+        justify-content: center;
+        margin-top: var(--space-6);
+    }
+
+    .pagination {
+        display: flex;
+        gap: var(--space-1);
+    }
+
+    .page-btn {
+        min-width: 36px;
+        height: 36px;
+        padding: 0 var(--space-3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        transition: var(--transition-fast);
+    }
+
+    .page-btn:hover:not(:disabled) {
+        background: var(--color-surface-hover);
+        border-color: var(--color-border-hover);
+    }
+
+    .page-btn.active {
+        background: var(--color-brand-primary);
+        border-color: var(--color-brand-primary);
+        color: white;
+    }
+
+    .page-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .page-ellipsis {
+        min-width: 36px;
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--color-text-muted);
+    }
+
+    /* Modal Styles */
+    .modal-sm .modal-content {
+        max-width: 400px;
+    }
+
+    .token-display {
+        display: block;
+        margin-top: var(--space-2);
+        padding: var(--space-2) var(--space-3);
+        background: var(--color-surface-hover);
+        border-radius: var(--radius-sm);
+        font-family: monospace;
+        font-size: var(--font-size-sm);
+        word-break: break-all;
+    }
+
+    .delete-warning {
+        text-align: center;
+        padding: var(--space-4) 0;
+    }
+
+    .delete-warning-icon {
+        width: 64px;
+        height: 64px;
+        margin: 0 auto var(--space-4);
+        background: var(--color-danger-bg);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--color-danger);
+        font-size: 1.75rem;
+    }
+
+    .text-right {
+        text-align: right;
+    }
+
+    .text-sm {
+        font-size: var(--font-size-sm);
+    }
+
+    .text-secondary {
+        color: var(--color-text-secondary);
+    }
+</style>
 {% endblock %}
 
 {% block extra_js %}
@@ -161,6 +423,7 @@ async function loadUsers(page = 1) {
         }
     } catch (error) {
         console.error('Error loading users:', error);
+        showToast('Erreur lors du chargement des utilisateurs', 'error');
     }
 }
 
@@ -170,55 +433,85 @@ function renderUsers(users) {
     if (users.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="8" class="text-center text-muted py-4">
-                    Aucun utilisateur trouv&eacute;
+                <td colspan="6">
+                    <div class="table-empty">
+                        <div class="table-empty-icon">
+                            <i class="bi bi-people"></i>
+                        </div>
+                        <p class="table-empty-text">Aucun utilisateur trouve</p>
+                    </div>
                 </td>
             </tr>
         `;
         return;
     }
 
-    tbody.innerHTML = users.map(user => `
-        <tr>
-            <td>${user.id}</td>
-            <td>${user.first_name || '-'}</td>
-            <td>${user.last_name || '-'}</td>
-            <td>${user.email}</td>
-            <td>
-                ${user.roles.map(role => `
-                    <span class="badge badge-role ${role === 'ADMIN' ? 'badge-admin' : 'badge-user'}">
-                        ${role}
+    tbody.innerHTML = users.map(user => {
+        const initials = getInitials(user.first_name, user.last_name, user.email);
+        const displayName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email.split('@')[0];
+
+        return `
+            <tr>
+                <td>
+                    <div class="user-cell">
+                        <div class="user-avatar">${initials}</div>
+                        <div class="user-info">
+                            <div class="user-name">${displayName}</div>
+                            <div class="user-id">ID: ${user.id}</div>
+                        </div>
+                    </div>
+                </td>
+                <td>${user.email}</td>
+                <td>
+                    ${user.roles.map(role => `
+                        <span class="badge ${role === 'ADMIN' ? 'badge-primary' : 'badge-secondary'}">
+                            ${role}
+                        </span>
+                    `).join(' ')}
+                </td>
+                <td>
+                    <span class="badge ${user.is_active ? 'badge-success' : 'badge-danger'}">
+                        ${user.is_active ? 'Actif' : 'Inactif'}
                     </span>
-                `).join(' ')}
-            </td>
-            <td>
-                <span class="badge ${user.is_active ? 'badge-active' : 'badge-inactive'}">
-                    ${user.is_active ? 'Actif' : 'Inactif'}
-                </span>
-            </td>
-            <td>${user.is_verified ? 'Oui' : 'Non'}</td>
-            <td>
-                <div class="d-flex gap-1">
-                    <button class="btn-action btn-lock" onclick="toggleActive(${user.id})" title="${user.is_active ? 'D\u00e9sactiver' : 'Activer'}">
-                        <i class="bi bi-${user.is_active ? 'lock' : 'unlock'}"></i>
-                    </button>
-                    <button class="btn-action btn-shield" onclick="toggleAdmin(${user.id})" title="${user.is_admin ? 'Retirer admin' : 'Promouvoir admin'}">
-                        <i class="bi bi-shield${user.is_admin ? '-fill' : ''}"></i>
-                    </button>
-                    <button class="btn-action btn-key" onclick="showResetPassword(${user.id})" title="R\u00e9initialiser le mot de passe">
-                        <i class="bi bi-key"></i>
-                    </button>
-                    <button class="btn-action btn-delete" onclick="showDeleteConfirm(${user.id})" title="Supprimer">
-                        <i class="bi bi-trash"></i>
-                    </button>
-                </div>
-            </td>
-        </tr>
-    `).join('');
+                </td>
+                <td>
+                    ${user.is_verified
+                        ? '<i class="bi bi-check-circle-fill text-success"></i>'
+                        : '<i class="bi bi-x-circle text-muted"></i>'}
+                </td>
+                <td>
+                    <div class="actions-cell">
+                        <button class="btn-icon tooltip" data-tooltip="${user.is_active ? 'Desactiver' : 'Activer'}" onclick="toggleActive(${user.id})">
+                            <i class="bi bi-${user.is_active ? 'lock' : 'unlock'}"></i>
+                        </button>
+                        <button class="btn-icon tooltip" data-tooltip="${user.is_admin ? 'Retirer admin' : 'Promouvoir admin'}" onclick="toggleAdmin(${user.id})">
+                            <i class="bi bi-shield${user.is_admin ? '-fill' : ''}"></i>
+                        </button>
+                        <button class="btn-icon tooltip" data-tooltip="Reinitialiser mot de passe" onclick="showResetPassword(${user.id})">
+                            <i class="bi bi-key"></i>
+                        </button>
+                        <button class="btn-icon btn-icon-danger tooltip" data-tooltip="Supprimer" onclick="showDeleteConfirm(${user.id})">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function getInitials(firstName, lastName, email) {
+    if (firstName && lastName) {
+        return (firstName[0] + lastName[0]).toUpperCase();
+    }
+    if (firstName) {
+        return firstName[0].toUpperCase();
+    }
+    return email[0].toUpperCase();
 }
 
 function renderPagination(currentPage, totalPages) {
-    const pagination = document.querySelector('#pagination .pagination');
+    const pagination = document.querySelector('.pagination');
 
     if (totalPages <= 1) {
         pagination.innerHTML = '';
@@ -227,31 +520,31 @@ function renderPagination(currentPage, totalPages) {
 
     let html = '';
 
-    // Previous
+    // Previous button
     html += `
-        <li class="page-item ${currentPage === 1 ? 'disabled' : ''}">
-            <a class="page-link" href="#" onclick="loadUsers(${currentPage - 1}); return false;">Pr&eacute;c&eacute;dent</a>
-        </li>
+        <button class="page-btn" onclick="loadUsers(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>
+            <i class="bi bi-chevron-left"></i>
+        </button>
     `;
 
-    // Pages
+    // Page numbers
     for (let i = 1; i <= totalPages; i++) {
         if (i === 1 || i === totalPages || (i >= currentPage - 2 && i <= currentPage + 2)) {
             html += `
-                <li class="page-item ${i === currentPage ? 'active' : ''}">
-                    <a class="page-link" href="#" onclick="loadUsers(${i}); return false;">${i}</a>
-                </li>
+                <button class="page-btn ${i === currentPage ? 'active' : ''}" onclick="loadUsers(${i})">
+                    ${i}
+                </button>
             `;
         } else if (i === currentPage - 3 || i === currentPage + 3) {
-            html += '<li class="page-item disabled"><span class="page-link">...</span></li>';
+            html += '<span class="page-ellipsis">...</span>';
         }
     }
 
-    // Next
+    // Next button
     html += `
-        <li class="page-item ${currentPage === totalPages ? 'disabled' : ''}">
-            <a class="page-link" href="#" onclick="loadUsers(${currentPage + 1}); return false;">Suivant</a>
-        </li>
+        <button class="page-btn" onclick="loadUsers(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''}>
+            <i class="bi bi-chevron-right"></i>
+        </button>
     `;
 
     pagination.innerHTML = html;
@@ -268,14 +561,14 @@ async function toggleActive(userId) {
 
         if (response.ok) {
             loadUsers(currentPage);
-            showFlash('Statut utilisateur modifi&eacute;', 'success');
+            showToast('Statut utilisateur modifie', 'success');
         } else {
             const data = await response.json();
-            showFlash(data.detail || 'Erreur', 'danger');
+            showToast(data.detail || 'Erreur', 'error');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFlash('Erreur lors de la modification', 'danger');
+        showToast('Erreur lors de la modification', 'error');
     }
 }
 
@@ -290,22 +583,23 @@ async function toggleAdmin(userId) {
 
         if (response.ok) {
             loadUsers(currentPage);
-            showFlash('R&ocirc;le utilisateur modifi&eacute;', 'success');
+            showToast('Role utilisateur modifie', 'success');
         } else {
             const data = await response.json();
-            showFlash(data.detail || 'Erreur', 'danger');
+            showToast(data.detail || 'Erreur', 'error');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFlash('Erreur lors de la modification', 'danger');
+        showToast('Erreur lors de la modification', 'error');
     }
 }
 
 function showResetPassword(userId) {
     currentUserId = userId;
-    document.getElementById('resetTokenResult').classList.add('d-none');
-    document.getElementById('confirmResetBtn').classList.remove('d-none');
-    new bootstrap.Modal(document.getElementById('resetPasswordModal')).show();
+    document.getElementById('resetTokenResult').style.display = 'none';
+    document.getElementById('resetTokenInitial').style.display = 'block';
+    document.getElementById('confirmResetBtn').style.display = '';
+    openModal('resetPasswordModal');
 }
 
 document.getElementById('confirmResetBtn').addEventListener('click', async function() {
@@ -320,21 +614,22 @@ document.getElementById('confirmResetBtn').addEventListener('click', async funct
         if (response.ok) {
             const data = await response.json();
             document.getElementById('resetTokenValue').textContent = data.reset_token;
-            document.getElementById('resetTokenResult').classList.remove('d-none');
-            document.getElementById('confirmResetBtn').classList.add('d-none');
+            document.getElementById('resetTokenResult').style.display = 'block';
+            document.getElementById('resetTokenInitial').style.display = 'none';
+            document.getElementById('confirmResetBtn').style.display = 'none';
         } else {
             const data = await response.json();
-            showFlash(data.detail || 'Erreur', 'danger');
+            showToast(data.detail || 'Erreur', 'error');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFlash('Erreur lors de la r&eacute;initialisation', 'danger');
+        showToast('Erreur lors de la reinitialisation', 'error');
     }
 });
 
 function showDeleteConfirm(userId) {
     currentUserId = userId;
-    new bootstrap.Modal(document.getElementById('deleteModal')).show();
+    openModal('deleteModal');
 }
 
 document.getElementById('confirmDeleteBtn').addEventListener('click', async function() {
@@ -346,18 +641,18 @@ document.getElementById('confirmDeleteBtn').addEventListener('click', async func
             }
         });
 
-        bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
+        closeModal('deleteModal');
 
         if (response.ok) {
             loadUsers(currentPage);
-            showFlash('Utilisateur supprim&eacute;', 'success');
+            showToast('Utilisateur supprime', 'success');
         } else {
             const data = await response.json();
-            showFlash(data.detail || 'Erreur', 'danger');
+            showToast(data.detail || 'Erreur', 'error');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFlash('Erreur lors de la suppression', 'danger');
+        showToast('Erreur lors de la suppression', 'error');
     }
 });
 
@@ -365,14 +660,6 @@ document.getElementById('confirmDeleteBtn').addEventListener('click', async func
 document.getElementById('searchInput').addEventListener('input', debounce(() => loadUsers(1), 300));
 document.getElementById('statusFilter').addEventListener('change', () => loadUsers(1));
 document.getElementById('roleFilter').addEventListener('change', () => loadUsers(1));
-
-function debounce(func, wait) {
-    let timeout;
-    return function(...args) {
-        clearTimeout(timeout);
-        timeout = setTimeout(() => func.apply(this, args), wait);
-    };
-}
 
 // Load users on page load
 loadUsers();

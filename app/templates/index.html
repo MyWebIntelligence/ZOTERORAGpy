@@ -1,1447 +1,1880 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>RAGpy Data Processing</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}" />
-  <link rel="icon" href="{{ url_for('static', path='favicon.ico') }}">
-  <style>
-    #settingsModal {
-      display: none;
-      position: fixed;
-      z-index: 1002;
-      left: 0;
-      top: 0;
-      width: 100vw;
-      height: 100vh;
-      overflow: auto;
-      background: rgba(0,0,0,0.3);
-    }
-    #settingsModal .modal-content {
-      background: #fff;
-      margin: 5% auto;
-      padding: 32px 24px 24px 24px;
-      border-radius: 12px;
-      width: 95%;
-      max-width: 540px;
-      box-shadow: 0 4px 32px rgba(0,0,0,0.18);
-      border: 1.5px solid #e0e0e0;
-      position: relative;
-    }
-    #settingsModal .close {
-      position: absolute;
-      right: 18px;
-      top: 12px;
-      font-size: 1.5rem;
-      color: #888;
-      cursor: pointer;
-    }
-    #settingsModal label {
-      display: block;
-      margin-top: 10px;
-      font-weight: 500;
-    }
-    #settingsModal input[type="text"],
-    #settingsModal input[type="password"] {
-      width: 100%;
-      padding: 7px 10px;
-      margin-top: 4px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      font-size: 1rem;
-    }
-    #settingsModal button.save-btn {
-      margin-top: 24px;
-      background: #1976d2;
-      color: #fff;
-      border: none;
-      padding: 10px 24px;
-      border-radius: 4px;
-      font-size: 1.1rem;
-      cursor: pointer;
-      width: 100%;
-    }
-    #settingsModal .save-status {
-      margin-top: 16px;
-      font-size: 1rem;
-      color: #1976d2;
-      text-align: center;
-    }
-    #settingsModal h3 {
-      margin-top: 0;
-      margin-bottom: 10px;
-      color: #1976d2;
-    }
-    #settingsModal form > div {
-      background: #f7fafd;
-      border-radius: 8px;
-      padding: 18px 16px;
-      margin-bottom: 18px;
-      border: 1px solid #e3e8f0;
-    }
-  </style>
-</head>
-<body>
-  <button id="settingsBtn" title="Settings" style="font-size: 2.2rem; color: #1976d2;" onclick="document.getElementById('settingsModal').style.display='block';">&#9881;</button>
-  <div id="settingsModal">
-    <div class="modal-content" style="max-width: 540px; border-radius: 12px; box-shadow: 0 4px 32px rgba(0,0,0,0.18); border: 1.5px solid #e0e0e0;">
-      <span class="close" id="closeSettingsModal" onclick="document.getElementById('settingsModal').style.display='none';">&times;</span>
-      <h2 style="text-align:center; margin-bottom: 18px;">Credentials Settings</h2>
-      <form id="settingsForm">
-        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
-          <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">OpenAI</h3>
-          <label for="openaiKey">API Key</label>
-          <input type="text" id="openaiKey" name="OPENAI_API_KEY" autocomplete="off" placeholder="sk-..." />
-        </div>
-        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
-          <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">OpenRouter (Optional - for cost savings)</h3>
-          <label for="openrouterKey">API Key</label>
-          <input type="text" id="openrouterKey" name="OPENROUTER_API_KEY" autocomplete="off" placeholder="sk-or-v1-..." />
-          <label for="openrouterModel">Default Model</label>
-          <input type="text" id="openrouterModel" name="OPENROUTER_DEFAULT_MODEL" autocomplete="off" placeholder="google/gemini-2.5-flash" />
-        </div>
-        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
-          <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">Mistral (Optional - for OCR)</h3>
-          <label for="mistralKey">API Key</label>
-          <input type="text" id="mistralKey" name="MISTRAL_API_KEY" autocomplete="off" placeholder="Mistral API Key" />
-          <label for="mistralModel">OCR Model</label>
-          <input type="text" id="mistralModel" name="MISTRAL_OCR_MODEL" autocomplete="off" placeholder="mistral-ocr-latest" />
-          <label for="mistralUrl">API Base URL</label>
-          <input type="text" id="mistralUrl" name="MISTRAL_API_BASE_URL" autocomplete="off" placeholder="https://api.mistral.ai" />
-        </div>
-        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
-          <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">Pinecone</h3>
-          <label for="pineconeKey">API Key</label>
-          <input type="text" id="pineconeKey" name="PINECONE_API_KEY" autocomplete="off" placeholder="Pinecone API Key" />
-          <label for="pineconeEnv">Environment</label>
-          <input type="text" id="pineconeEnv" name="PINECONE_ENV" autocomplete="off" placeholder="Pinecone Environment" />
-        </div>
-        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
-          <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">Weaviate</h3>
-          <label for="weaviateKey">API Key</label>
-          <input type="text" id="weaviateKey" name="WEAVIATE_API_KEY" autocomplete="off" placeholder="Weaviate API Key" />
-          <label for="weaviateUrl">URL</label>
-          <input type="text" id="weaviateUrl" name="WEAVIATE_URL" autocomplete="off" placeholder="https://..." />
-        </div>
-        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
-          <h3 style="margin-top:0; margin-bottom: 10px; color: #1976d2;">Qdrant</h3>
-          <label for="qdrantKey">API Key</label>
-          <input type="text" id="qdrantKey" name="QDRANT_API_KEY" autocomplete="off" placeholder="Qdrant API Key" />
-          <label for="qdrantUrl">URL</label>
-          <input type="text" id="qdrantUrl" name="QDRANT_URL" autocomplete="off" placeholder="http://..." />
-        </div>
-        <div style="background: #f7fafd; border-radius: 8px; padding: 18px 16px; margin-bottom: 18px; border: 1px solid #e3e8f0;">
-          <h3 style="margin-top:0; margin-bottom: 10px; color: #9c27b0;">Zotero (Optional - for automatic reading notes)</h3>
-          <label for="zoteroApiKey">API Key</label>
-          <input type="password" id="zoteroApiKey" name="ZOTERO_API_KEY" autocomplete="off" placeholder="Get from https://www.zotero.org/settings/keys/new" />
-          <label for="zoteroUserId">User ID (optional - auto-detected)</label>
-          <input type="text" id="zoteroUserId" name="ZOTERO_USER_ID" autocomplete="off" placeholder="Auto-detected from Zotero export" />
-          <label for="zoteroGroupId">Group ID (optional)</label>
-          <input type="text" id="zoteroGroupId" name="ZOTERO_GROUP_ID" autocomplete="off" placeholder="For group libraries" />
-        </div>
-        <button type="submit" class="save-btn" style="width:100%; font-size:1.15rem;">Save</button>
-        <div class="save-status" id="settingsSaveStatus"></div>
-      </form>
-    </div>
-  </div>
+{% extends "base.html" %}
 
-  <!-- Project Header (if linked to a project) -->
+{% block title %}RAGpy - Data Processing Pipeline{% endblock %}
+
+{% block extra_css %}
+<style>
+  /* Pipeline-specific styles */
+  .pipeline-page {
+    padding: var(--space-6);
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .pipeline-header {
+    text-align: center;
+    margin-bottom: var(--space-8);
+  }
+
+  .pipeline-header h1 {
+    font-size: var(--text-3xl);
+    font-weight: var(--font-bold);
+    color: var(--color-text-primary);
+    margin-bottom: var(--space-2);
+  }
+
+  .pipeline-header p {
+    color: var(--color-text-secondary);
+    font-size: var(--text-base);
+  }
+
+  /* Project Banner */
+  .project-banner {
+    background: linear-gradient(135deg, var(--color-brand-primary) 0%, #2563EB 100%);
+    color: white;
+    padding: var(--space-4) var(--space-6);
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-6);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .project-banner-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  .project-banner-name {
+    font-weight: var(--font-semibold);
+    font-size: var(--text-lg);
+  }
+
+  .project-banner-session {
+    opacity: 0.85;
+    font-size: var(--text-sm);
+  }
+
+  .project-banner-back {
+    background: rgba(255,255,255,0.2);
+    color: white;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md);
+    text-decoration: none;
+    font-size: var(--text-sm);
+    transition: background var(--transition-fast);
+  }
+
+  .project-banner-back:hover {
+    background: rgba(255,255,255,0.3);
+    color: white;
+  }
+
+  /* Step Tracker */
+  .step-tracker {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: var(--space-8);
+    padding: var(--space-6);
+    background: var(--color-surface);
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--color-border);
+  }
+
+  .step-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+    position: relative;
+    min-width: 100px;
+    opacity: 0.5;
+    transition: all var(--transition-base);
+  }
+
+  .step-item.active,
+  .step-item.completed {
+    opacity: 1;
+  }
+
+  .step-number {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-bg-tertiary);
+    color: var(--color-text-tertiary);
+    border-radius: 50%;
+    font-weight: var(--font-semibold);
+    font-size: var(--text-base);
+    border: 2px solid var(--color-border);
+    transition: all var(--transition-base);
+  }
+
+  .step-item.active .step-number {
+    background: var(--color-brand-primary-light);
+    color: var(--color-brand-primary);
+    border-color: var(--color-brand-primary);
+  }
+
+  .step-item.completed .step-number {
+    background: var(--color-success);
+    color: white;
+    border-color: var(--color-success);
+  }
+
+  .step-title {
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    color: var(--color-text-secondary);
+  }
+
+  .step-item.active .step-title,
+  .step-item.completed .step-title {
+    color: var(--color-text-primary);
+  }
+
+  .step-connector {
+    width: 60px;
+    height: 2px;
+    background: var(--color-border);
+    margin: 0 var(--space-2);
+    transition: background var(--transition-base);
+  }
+
+  .step-connector.completed {
+    background: var(--color-success);
+  }
+
+  .step-file-link {
+    font-size: var(--text-xs);
+    color: var(--color-brand-primary);
+    text-decoration: none;
+    margin-top: var(--space-1);
+  }
+
+  /* Global Controls */
+  .global-controls {
+    text-align: center;
+    margin-bottom: var(--space-6);
+  }
+
+  /* Pipeline Sections */
+  .pipeline-section {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-xl);
+    margin-bottom: var(--space-6);
+    overflow: hidden;
+    transition: all var(--transition-base);
+  }
+
+  .pipeline-section.step-locked {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  .pipeline-section.step-completed {
+    border-color: var(--color-success);
+  }
+
+  .section-header {
+    padding: var(--space-5) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  .section-number {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-brand-primary-light);
+    color: var(--color-brand-primary);
+    border-radius: 50%;
+    font-weight: var(--font-semibold);
+    flex-shrink: 0;
+  }
+
+  .pipeline-section.step-completed .section-number {
+    background: var(--color-success);
+    color: white;
+  }
+
+  .section-header h2 {
+    font-size: var(--text-lg);
+    font-weight: var(--font-semibold);
+    margin: 0;
+    flex: 1;
+  }
+
+  .section-body {
+    padding: var(--space-6);
+  }
+
+  /* Upload Options */
+  .upload-options {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-4);
+  }
+
+  @media (max-width: 768px) {
+    .upload-options {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .upload-option {
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-5);
+    transition: all var(--transition-base);
+  }
+
+  .upload-option:hover {
+    border-color: var(--color-brand-primary);
+    box-shadow: var(--shadow-md);
+  }
+
+  .upload-option.option-zip {
+    border-color: var(--color-brand-primary);
+    background: var(--color-brand-primary-light);
+  }
+
+  .upload-option.option-csv {
+    border-color: var(--color-success);
+    background: var(--color-success-light);
+  }
+
+  .upload-option-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+
+  .upload-option-icon {
+    font-size: 1.5rem;
+  }
+
+  .upload-option-title {
+    font-size: var(--text-base);
+    font-weight: var(--font-semibold);
+    color: var(--color-text-primary);
+  }
+
+  .upload-option.option-zip .upload-option-title {
+    color: var(--color-brand-primary);
+  }
+
+  .upload-option.option-csv .upload-option-title {
+    color: var(--color-success-dark);
+  }
+
+  .upload-option-desc {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin-bottom: var(--space-4);
+  }
+
+  .upload-form {
+    display: flex;
+    gap: var(--space-3);
+    align-items: center;
+  }
+
+  .upload-form input[type="file"] {
+    flex: 1;
+    padding: var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+  }
+
+  /* Decision Tree */
+  .decision-tree {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-xl);
+    margin-bottom: var(--space-6);
+    overflow: hidden;
+  }
+
+  .decision-tree.step-locked {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  .decision-tree-header {
+    padding: var(--space-5) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+    text-align: center;
+  }
+
+  .decision-tree-header h2 {
+    font-size: var(--text-xl);
+    font-weight: var(--font-semibold);
+    margin: 0 0 var(--space-2);
+  }
+
+  .tree-subtitle {
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+    margin: 0;
+  }
+
+  .branches-container {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-6);
+    padding: var(--space-6);
+  }
+
+  @media (max-width: 1024px) {
+    .branches-container {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .branch {
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    opacity: 0.6;
+    transition: all var(--transition-base);
+  }
+
+  .branch.selected {
+    opacity: 1;
+    box-shadow: var(--shadow-md);
+  }
+
+  .branch-rag.selected {
+    border-color: var(--color-brand-primary);
+  }
+
+  .branch-zotero.selected {
+    border-color: #8B5CF6;
+  }
+
+  .branch-header {
+    padding: var(--space-4);
+    background: var(--color-bg-tertiary);
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .branch-header input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    accent-color: var(--color-brand-primary);
+  }
+
+  .branch-header label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
+    flex: 1;
+  }
+
+  .branch-icon {
+    font-size: 1.25rem;
+  }
+
+  .branch-title {
+    font-weight: var(--font-semibold);
+    font-size: var(--text-base);
+  }
+
+  .branch-content {
+    padding: var(--space-5);
+  }
+
+  /* Sub-sections within branches */
+  .sub-section {
+    background: var(--color-bg-tertiary);
+    border-radius: var(--radius-lg);
+    padding: var(--space-5);
+    margin-bottom: var(--space-4);
+    transition: all var(--transition-base);
+  }
+
+  .sub-section:last-child {
+    margin-bottom: 0;
+  }
+
+  .sub-section.step-locked {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  .sub-section.step-completed {
+    background: var(--color-success-light);
+  }
+
+  .sub-section h3 {
+    font-size: var(--text-base);
+    font-weight: var(--font-semibold);
+    margin: 0 0 var(--space-3);
+  }
+
+  .sub-section-warning {
+    font-size: var(--text-sm);
+    color: var(--color-warning-dark);
+    background: var(--color-warning-light);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-4);
+  }
+
+  /* Stage Upload Form */
+  .stage-upload-form {
+    display: flex;
+    gap: var(--space-3);
+    align-items: center;
+    margin-bottom: var(--space-4);
+    padding: var(--space-3);
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    border: 1px dashed var(--color-border);
+  }
+
+  .stage-upload-form input[type="file"] {
+    flex: 1;
+    font-size: var(--text-sm);
+  }
+
+  .stage-upload-form button {
+    flex-shrink: 0;
+  }
+
+  /* Model Input */
+  .model-input-group {
+    margin-bottom: var(--space-4);
+  }
+
+  .model-input-group label {
+    display: block;
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    margin-bottom: var(--space-2);
+  }
+
+  .model-input-group input {
+    width: 100%;
+    max-width: 400px;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+  }
+
+  .model-input-hint {
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+    margin-top: var(--space-1);
+  }
+
+  /* Vector DB Options */
+  .db-options {
+    margin-top: var(--space-4);
+  }
+
+  .db-select-group {
+    margin-bottom: var(--space-4);
+  }
+
+  .db-select-group select {
+    width: 100%;
+    max-width: 300px;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+    background: var(--color-surface);
+  }
+
+  .db-params {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+    margin-bottom: var(--space-4);
+  }
+
+  .db-params label {
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    margin-bottom: var(--space-1);
+    display: block;
+  }
+
+  .db-params input {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+  }
+
+  /* Progress Bar */
+  .progress-container {
+    margin-top: var(--space-4);
+    padding: var(--space-4);
+    background: var(--color-bg-tertiary);
+    border-radius: var(--radius-lg);
+  }
+
+  .progress-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+
+  .progress-count {
+    font-weight: var(--font-semibold);
+    min-width: 60px;
+  }
+
+  .progress-status {
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+    flex: 1;
+  }
+
+  .progress-bar-wrapper {
+    height: 8px;
+    background: var(--color-border);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--color-brand-primary), var(--color-brand-primary-hover));
+    border-radius: var(--radius-full);
+    transition: width 0.3s ease;
+    width: 0%;
+  }
+
+  .progress-bar-fill.zotero {
+    background: linear-gradient(90deg, #8B5CF6, #A78BFA);
+  }
+
+  /* Result Box */
+  .result {
+    margin-top: var(--space-4);
+    padding: var(--space-4);
+    background: var(--color-bg-tertiary);
+    border-radius: var(--radius-lg);
+    font-size: var(--text-sm);
+  }
+
+  .result:empty {
+    display: none;
+  }
+
+  .result a {
+    color: var(--color-brand-primary);
+    font-weight: var(--font-medium);
+  }
+
+  .result .error-text {
+    color: var(--color-error);
+  }
+
+  /* Zotero Options */
+  .zotero-options {
+    margin-bottom: var(--space-4);
+  }
+
+  .zotero-checkbox-group {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+    margin-bottom: var(--space-3);
+  }
+
+  .zotero-checkbox-group input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+  }
+
+  .zotero-checkbox-label {
+    flex: 1;
+  }
+
+  .zotero-checkbox-label strong {
+    display: block;
+    margin-bottom: var(--space-1);
+  }
+
+  .zotero-checkbox-label small {
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+    line-height: 1.4;
+  }
+
+  /* Animations */
+  .fade-in {
+    animation: fadeInUp 0.3s ease-out;
+  }
+
+  /* Settings Button */
+  #settingsBtn {
+    position: fixed;
+    top: calc(var(--topbar-height) + var(--space-4));
+    right: var(--space-4);
+    width: 48px;
+    height: 48px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: var(--color-brand-primary);
+    font-size: 1.5rem;
+    box-shadow: var(--shadow-md);
+    z-index: 100;
+    transition: all var(--transition-fast);
+  }
+
+  #settingsBtn:hover {
+    transform: scale(1.05);
+    box-shadow: var(--shadow-lg);
+  }
+
+  /* Danger Button */
+  .danger-btn {
+    background: var(--color-error);
+    color: white;
+    border: none;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .danger-btn:hover {
+    background: var(--color-error-dark);
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Settings Button -->
+<button id="settingsBtn" onclick="openModal('settingsModal')" title="Settings">
+  <i class="bi bi-gear"></i>
+</button>
+
+<!-- Settings Modal -->
+<div class="modal modal-lg" id="settingsModal">
+  <div class="modal-header">
+    <h3 class="modal-title">API Credentials</h3>
+    <button class="modal-close" onclick="closeModal('settingsModal')">
+      <i class="bi bi-x-lg"></i>
+    </button>
+  </div>
+  <div class="modal-body">
+    <form id="settingsForm">
+      <!-- OpenAI -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <h4 class="text-brand mb-3"><i class="bi bi-robot"></i> OpenAI</h4>
+          <div class="form-group mb-0">
+            <label class="form-label" for="openaiKey">API Key</label>
+            <input type="text" class="form-input" id="openaiKey" name="OPENAI_API_KEY" autocomplete="off" placeholder="sk-...">
+          </div>
+        </div>
+      </div>
+
+      <!-- OpenRouter -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <h4 class="text-brand mb-3"><i class="bi bi-arrow-left-right"></i> OpenRouter <span class="badge badge-neutral">Optional</span></h4>
+          <div class="form-group">
+            <label class="form-label" for="openrouterKey">API Key</label>
+            <input type="text" class="form-input" id="openrouterKey" name="OPENROUTER_API_KEY" autocomplete="off" placeholder="sk-or-v1-...">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label" for="openrouterModel">Default Model</label>
+            <input type="text" class="form-input" id="openrouterModel" name="OPENROUTER_DEFAULT_MODEL" autocomplete="off" placeholder="google/gemini-2.5-flash">
+          </div>
+        </div>
+      </div>
+
+      <!-- Mistral -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <h4 class="text-brand mb-3"><i class="bi bi-file-earmark-pdf"></i> Mistral <span class="badge badge-neutral">OCR</span></h4>
+          <div class="form-group">
+            <label class="form-label" for="mistralKey">API Key</label>
+            <input type="text" class="form-input" id="mistralKey" name="MISTRAL_API_KEY" autocomplete="off" placeholder="Mistral API Key">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="mistralModel">OCR Model</label>
+            <input type="text" class="form-input" id="mistralModel" name="MISTRAL_OCR_MODEL" autocomplete="off" placeholder="mistral-ocr-latest">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label" for="mistralUrl">API Base URL</label>
+            <input type="text" class="form-input" id="mistralUrl" name="MISTRAL_API_BASE_URL" autocomplete="off" placeholder="https://api.mistral.ai">
+          </div>
+        </div>
+      </div>
+
+      <!-- Pinecone -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <h4 class="text-brand mb-3"><i class="bi bi-database"></i> Pinecone</h4>
+          <div class="form-group">
+            <label class="form-label" for="pineconeKey">API Key</label>
+            <input type="text" class="form-input" id="pineconeKey" name="PINECONE_API_KEY" autocomplete="off" placeholder="Pinecone API Key">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label" for="pineconeEnv">Environment</label>
+            <input type="text" class="form-input" id="pineconeEnv" name="PINECONE_ENV" autocomplete="off" placeholder="Pinecone Environment">
+          </div>
+        </div>
+      </div>
+
+      <!-- Weaviate -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <h4 class="text-brand mb-3"><i class="bi bi-hdd-network"></i> Weaviate</h4>
+          <div class="form-group">
+            <label class="form-label" for="weaviateKey">API Key</label>
+            <input type="text" class="form-input" id="weaviateKey" name="WEAVIATE_API_KEY" autocomplete="off" placeholder="Weaviate API Key">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label" for="weaviateUrl">URL</label>
+            <input type="text" class="form-input" id="weaviateUrl" name="WEAVIATE_URL" autocomplete="off" placeholder="https://...">
+          </div>
+        </div>
+      </div>
+
+      <!-- Qdrant -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <h4 class="text-brand mb-3"><i class="bi bi-grid-3x3"></i> Qdrant</h4>
+          <div class="form-group">
+            <label class="form-label" for="qdrantKey">API Key</label>
+            <input type="text" class="form-input" id="qdrantKey" name="QDRANT_API_KEY" autocomplete="off" placeholder="Qdrant API Key">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label" for="qdrantUrl">URL</label>
+            <input type="text" class="form-input" id="qdrantUrl" name="QDRANT_URL" autocomplete="off" placeholder="http://...">
+          </div>
+        </div>
+      </div>
+
+      <!-- Zotero -->
+      <div class="card" style="border-color: #8B5CF6;">
+        <div class="card-body">
+          <h4 style="color: #8B5CF6;" class="mb-3"><i class="bi bi-journal-bookmark"></i> Zotero <span class="badge badge-neutral">Optional</span></h4>
+          <div class="form-group">
+            <label class="form-label" for="zoteroApiKey">API Key</label>
+            <input type="password" class="form-input" id="zoteroApiKey" name="ZOTERO_API_KEY" autocomplete="off" placeholder="Get from zotero.org/settings/keys/new">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="zoteroUserId">User ID <span class="form-label-optional">(auto-detected)</span></label>
+            <input type="text" class="form-input" id="zoteroUserId" name="ZOTERO_USER_ID" autocomplete="off" placeholder="Auto-detected from Zotero export">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label" for="zoteroGroupId">Group ID <span class="form-label-optional">(optional)</span></label>
+            <input type="text" class="form-input" id="zoteroGroupId" name="ZOTERO_GROUP_ID" autocomplete="off" placeholder="For group libraries">
+          </div>
+        </div>
+      </div>
+    </form>
+  </div>
+  <div class="modal-footer">
+    <div id="settingsSaveStatus" class="text-sm text-secondary mr-4"></div>
+    <button type="button" class="btn btn-secondary" onclick="closeModal('settingsModal')">Cancel</button>
+    <button type="submit" form="settingsForm" class="btn btn-primary">Save Credentials</button>
+  </div>
+</div>
+
+<div class="pipeline-page">
+  <!-- Project Banner -->
   {% if project %}
-  <div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 12px 20px; margin-bottom: 0; display: flex; justify-content: space-between; align-items: center;">
-    <div>
-      <strong style="font-size: 1.1rem;">📁 {{ project.name }}</strong>
+  <div class="project-banner">
+    <div class="project-banner-info">
+      <span class="project-banner-name"><i class="bi bi-folder-fill"></i> {{ project.name }}</span>
       {% if session_folder %}
-      <span style="margin-left: 15px; opacity: 0.9; font-size: 0.9rem;">Session: {{ session_folder }}</span>
+      <span class="project-banner-session">Session: {{ session_folder }}</span>
       {% endif %}
     </div>
-    <a href="/project/{{ project.id }}" style="background: rgba(255,255,255,0.2); color: white; padding: 8px 16px; border-radius: 4px; text-decoration: none; font-size: 0.9rem;">
-      ← Retour au projet
+    <a href="/project/{{ project.id }}" class="project-banner-back">
+      <i class="bi bi-arrow-left"></i> Retour au projet
     </a>
   </div>
   {% endif %}
 
-  <div class="container">
+  <!-- Header -->
+  <div class="pipeline-header">
     <h1>RAGpy Data Processing Pipeline</h1>
+    <p>Transform your documents into searchable vector embeddings</p>
+  </div>
 
-    <!-- Step Tracker - Barre de progression -->
-    <div class="step-tracker" id="stepTracker">
-      <div class="step-item active" data-step="upload">
-        <span class="step-number">1</span>
-        <span class="step-title">Upload</span>
-        <a class="step-file-link" style="display:none"></a>
-      </div>
-      <div class="step-connector"></div>
-      <div class="step-item locked" data-step="extraction">
-        <span class="step-number">2</span>
-        <span class="step-title">Extraction</span>
-        <a class="step-file-link" style="display:none"></a>
-      </div>
-      <div class="step-connector"></div>
-      <div class="step-item locked" data-step="processing">
-        <span class="step-number">3</span>
-        <span class="step-title">Traitement</span>
-        <a class="step-file-link" style="display:none"></a>
-      </div>
-      <div class="step-connector"></div>
-      <div class="step-item locked" data-step="destination">
-        <span class="step-number">4</span>
-        <span class="step-title">Destination</span>
-        <a class="step-file-link" style="display:none"></a>
-      </div>
+  <!-- Step Tracker -->
+  <div class="step-tracker" id="stepTracker">
+    <div class="step-item active" data-step="upload">
+      <span class="step-number">1</span>
+      <span class="step-title">Upload</span>
+      <a class="step-file-link" style="display:none"></a>
     </div>
-
-    <div id="global-controls" style="text-align: center; margin-bottom: 20px;">
-      <button id="stopAllScriptsBtn" class="danger-btn">Stop All Running Scripts</button>
-      <div id="stopScriptsResult" class="result" style="display: none; margin-top:10px;"></div>
+    <div class="step-connector"></div>
+    <div class="step-item locked" data-step="extraction">
+      <span class="step-number">2</span>
+      <span class="step-title">Extraction</span>
+      <a class="step-file-link" style="display:none"></a>
     </div>
+    <div class="step-connector"></div>
+    <div class="step-item locked" data-step="processing">
+      <span class="step-number">3</span>
+      <span class="step-title">Processing</span>
+      <a class="step-file-link" style="display:none"></a>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step-item locked" data-step="destination">
+      <span class="step-number">4</span>
+      <span class="step-title">Destination</span>
+      <a class="step-file-link" style="display:none"></a>
+    </div>
+  </div>
 
-    <!-- Step 1: Upload Documents -->
-    <section id="upload-section">
-      <h2>1. Upload Documents</h2>
-      <p style="color: #555; margin-bottom: 15px;">Choose your data source:</p>
+  <!-- Global Controls -->
+  <div class="global-controls" id="global-controls">
+    <button id="stopAllScriptsBtn" class="danger-btn">
+      <i class="bi bi-stop-circle"></i> Stop All Running Scripts
+    </button>
+    <div id="stopScriptsResult" class="result" style="display: none; margin-top:10px;"></div>
+  </div>
 
-      <!-- Option A: ZIP (Zotero + PDFs) -->
-      <div style="border: 2px solid #1976d2; border-radius: 8px; padding: 15px; margin-bottom: 15px; background: #f0f7ff;">
-        <h3 style="margin-top: 0; color: #1976d2;">📦 Option A: ZIP Archive (Zotero + PDFs)</h3>
-        <p style="font-size: 0.9em; color: #555;">
-          For Zotero exports containing a JSON file + PDF attachments.
-          Requires OCR processing (Mistral/OpenAI).
-        </p>
-        <form id="uploadZipForm" enctype="multipart/form-data">
-          <input type="file" name="file" accept=".zip" required />
-          <button type="submit">Upload ZIP</button>
-        </form>
-      </div>
+  <!-- Step 1: Upload Documents -->
+  <section class="pipeline-section" id="upload-section">
+    <div class="section-header">
+      <span class="section-number">1</span>
+      <h2>Upload Documents</h2>
+    </div>
+    <div class="section-body">
+      <p class="text-secondary mb-4">Choose your data source:</p>
 
-      <!-- Option B: CSV Direct -->
-      <div style="border: 2px solid #2e7d32; border-radius: 8px; padding: 15px; background: #f1f8f4;">
-        <h3 style="margin-top: 0; color: #2e7d32;">📄 Option B: CSV File (Direct Text)</h3>
-        <p style="font-size: 0.9em; color: #555;">
-          For CSV files with canonical columns (itemKey, type, title, abstract, date, url, doi, authors, filename, path, attachment_title)
-          and a text column: <strong>"texteocr"</strong> OR <strong>"text"</strong> OR <strong>"content"</strong> OR <strong>"description"</strong>.
-          <strong>Skips OCR</strong> - faster and cheaper (no GPT recodage).
-        </p>
-        <form id="uploadCsvForm" enctype="multipart/form-data">
-          <input type="file" name="file" accept=".csv" required />
-          <button type="submit" style="background: #2e7d32;">Upload CSV</button>
-        </form>
+      <div class="upload-options">
+        <!-- Option A: ZIP -->
+        <div class="upload-option option-zip">
+          <div class="upload-option-header">
+            <span class="upload-option-icon">📦</span>
+            <span class="upload-option-title">ZIP Archive (Zotero + PDFs)</span>
+          </div>
+          <p class="upload-option-desc">
+            For Zotero exports containing a JSON file + PDF attachments. Requires OCR processing.
+          </p>
+          <form id="uploadZipForm" enctype="multipart/form-data" class="upload-form">
+            <input type="file" name="file" accept=".zip" required>
+            <button type="submit" class="btn btn-primary">Upload ZIP</button>
+          </form>
+        </div>
+
+        <!-- Option B: CSV -->
+        <div class="upload-option option-csv">
+          <div class="upload-option-header">
+            <span class="upload-option-icon">📄</span>
+            <span class="upload-option-title">CSV File (Direct Text)</span>
+          </div>
+          <p class="upload-option-desc">
+            For CSV files with a text column. Skips OCR - faster and cheaper.
+          </p>
+          <form id="uploadCsvForm" enctype="multipart/form-data" class="upload-form">
+            <input type="file" name="file" accept=".csv" required>
+            <button type="submit" class="btn btn-success">Upload CSV</button>
+          </form>
+        </div>
       </div>
 
       <div id="uploadResult" class="result"></div>
-    </section>
+    </div>
+  </section>
 
-    <!-- Step 2: Process DataFrame -->
-    <section id="dataframe-section" class="step-locked">
-      <h2>2. Extract Text & Metadata</h2>
-      <button id="processDataframeBtn">Generate CSV</button>
+  <!-- Step 2: Process DataFrame -->
+  <section class="pipeline-section step-locked" id="dataframe-section">
+    <div class="section-header">
+      <span class="section-number">2</span>
+      <h2>Extract Text & Metadata</h2>
+    </div>
+    <div class="section-body">
+      <button id="processDataframeBtn" class="btn btn-primary">
+        <i class="bi bi-file-earmark-text"></i> Generate CSV
+      </button>
 
-      <!-- Progress bar for Generate CSV -->
-      <div id="csvProgress" style="display:none; margin-top: 15px;">
-        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
-          <span id="csvProgressCount" style="font-weight: bold; min-width: 60px;">0/0</span>
-          <span id="csvProgressStatus" style="color: #666; font-size: 0.9em;">Processing...</span>
+      <div id="csvProgress" class="progress-container" style="display:none;">
+        <div class="progress-header">
+          <span id="csvProgressCount" class="progress-count">0/0</span>
+          <span id="csvProgressStatus" class="progress-status">Processing...</span>
         </div>
-        <div style="background: #e0e0e0; border-radius: 4px; height: 24px; overflow: hidden; display: flex;">
-          <div id="csvProgressBar" style="background: linear-gradient(90deg, #1976d2 0%, #42a5f5 100%); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center;">
-            <!-- Brick pattern -->
-            <div style="width: 100%; height: 100%; background: repeating-linear-gradient(90deg, transparent, transparent 8px, rgba(255,255,255,0.3) 8px, rgba(255,255,255,0.3) 10px);"></div>
-          </div>
+        <div class="progress-bar-wrapper">
+          <div id="csvProgressBar" class="progress-bar-fill"></div>
         </div>
       </div>
 
       <div id="dataframeResult" class="result"></div>
-    </section>
+    </div>
+  </section>
 
-    <!-- ========================================
-         ARBRE DE DECISION - Bifurcation POST-CSV
-         ======================================== -->
-    <div class="decision-tree step-locked" id="decision-tree">
-      <h2>3. Choisissez votre destination</h2>
-      <p class="tree-subtitle">Vous pouvez selectionner l'une ou les deux options</p>
+  <!-- Decision Tree -->
+  <div class="decision-tree step-locked" id="decision-tree">
+    <div class="decision-tree-header">
+      <h2>3. Choose Your Destination</h2>
+      <p class="tree-subtitle">You can select one or both options</p>
+    </div>
 
-      <div class="branches-container">
-        <!-- ========== BRANCHE GAUCHE : RAG ========== -->
-        <div class="branch branch-rag selected" id="rag-branch">
-          <div class="branch-header">
-            <input type="checkbox" id="rag-checkbox" checked>
-            <label for="rag-checkbox">
-              <span class="branch-icon">🔍</span>
-              <span class="branch-title">Nourrir un RAG</span>
-            </label>
+    <div class="branches-container">
+      <!-- RAG Branch -->
+      <div class="branch branch-rag selected" id="rag-branch">
+        <div class="branch-header">
+          <input type="checkbox" id="rag-checkbox" checked>
+          <label for="rag-checkbox">
+            <span class="branch-icon">🔍</span>
+            <span class="branch-title">Feed a RAG</span>
+          </label>
+        </div>
+        <div class="branch-content">
+          <!-- 3.1 Initial Chunking -->
+          <div class="sub-section" id="initial-chunk-section">
+            <h3>3.1 Initial Text Chunking</h3>
+            <div class="sub-section-warning">
+              <i class="bi bi-exclamation-triangle"></i>
+              This process can take a long time. We recommend processing max 10 articles at a time.
+            </div>
+
+            <form id="initialChunkUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+              <input type="file" id="initialChunkUploadInput" name="file" accept=".csv">
+              <button type="submit" class="btn btn-secondary btn-sm">Upload output.csv</button>
+            </form>
+
+            <div class="model-input-group">
+              <label for="recodingModelInput">Recoding Model (optional)</label>
+              <input type="text" id="recodingModelInput" placeholder="openai/gemini-2.5-flash">
+              <p class="model-input-hint">Leave empty for default. Format: "provider/model" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
+            </div>
+
+            <button id="runInitialChunkBtn" class="btn btn-primary">
+              <i class="bi bi-scissors"></i> Generate Chunks
+            </button>
+            <div id="initialChunkResult" class="result"></div>
           </div>
-          <div class="branch-content">
-            <!-- Step 3.1: Initial Text Chunking -->
-            <section id="initial-chunk-section">
-              <h2>3.1 Initial Text Chunking</h2>
-              <p style="color: black; font-size: 0.9em;">Warning: This process can take a long time depending on your file. Do not close your browser. We recommend processing a maximum of 10 articles or one book at a time.</p>
-              <form id="initialChunkUploadForm" enctype="multipart/form-data" class="stage-upload-form">
-                <input type="file" id="initialChunkUploadInput" name="file" accept=".csv" />
-                <button type="submit">Upload output.csv</button>
-              </form>
-              <label for="recodingModelInput" style="margin-top: 10px; display: block;">Recoding Model (optional):</label>
-              <input type="text" id="recodingModelInput" placeholder="openai/gemini-2.5-flash" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;" />
-              <p style="font-size: 0.85em; color: #666; margin-top: -5px;">Leave empty to use default from Settings. Format: "openai/gemini-2.5-flash" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
-              <button id="runInitialChunkBtn">Generate Chunks</button>
-              <div id="initialChunkResult" class="result"></div>
-            </section>
 
-            <!-- Step 3.2: Dense Embedding Generation -->
-            <section id="dense-embedding-section" class="step-locked">
-              <h2>3.2 Dense Embedding Generation</h2>
-              <form id="denseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
-                <input type="file" id="denseUploadInput" name="file" accept=".json" />
-                <button type="submit">Upload output_chunks.json</button>
-              </form>
-              <button id="runDenseEmbeddingBtn">Generate Dense Embeddings</button>
-              <div id="denseEmbeddingResult" class="result"></div>
-            </section>
+          <!-- 3.2 Dense Embeddings -->
+          <div class="sub-section step-locked" id="dense-embedding-section">
+            <h3>3.2 Dense Embedding Generation</h3>
+            <form id="denseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+              <input type="file" id="denseUploadInput" name="file" accept=".json">
+              <button type="submit" class="btn btn-secondary btn-sm">Upload output_chunks.json</button>
+            </form>
+            <button id="runDenseEmbeddingBtn" class="btn btn-primary">
+              <i class="bi bi-grid-3x3-gap"></i> Generate Dense Embeddings
+            </button>
+            <div id="denseEmbeddingResult" class="result"></div>
+          </div>
 
-            <!-- Step 3.3: Sparse Embedding Generation -->
-            <section id="sparse-embedding-section" class="step-locked">
-              <h2>3.3 Sparse Embedding Generation</h2>
-              <form id="sparseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
-                <input type="file" id="sparseUploadInput" name="file" accept=".json" />
-                <button type="submit">Upload output_chunks_with_embeddings.json</button>
-              </form>
-              <button id="runSparseEmbeddingBtn">Generate Sparse Embeddings</button>
-              <div id="sparseEmbeddingResult" class="result"></div>
-            </section>
+          <!-- 3.3 Sparse Embeddings -->
+          <div class="sub-section step-locked" id="sparse-embedding-section">
+            <h3>3.3 Sparse Embedding Generation</h3>
+            <form id="sparseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
+              <input type="file" id="sparseUploadInput" name="file" accept=".json">
+              <button type="submit" class="btn btn-secondary btn-sm">Upload output_chunks_with_embeddings.json</button>
+            </form>
+            <button id="runSparseEmbeddingBtn" class="btn btn-primary">
+              <i class="bi bi-grid"></i> Generate Sparse Embeddings
+            </button>
+            <div id="sparseEmbeddingResult" class="result"></div>
+          </div>
 
-            <!-- Step 4: Vector Database Upload -->
-            <section id="db-section" class="step-locked">
-              <h2>4. Upload to Vector Database</h2>
-              <p style="font-size: 0.9em; color: #555; margin-bottom: 10px;">
-                Store embeddings for semantic search and RAG applications.
-              </p>
+          <!-- 4. Vector DB Upload -->
+          <div class="sub-section step-locked" id="db-section">
+            <h3>4. Upload to Vector Database</h3>
+            <p class="text-secondary text-sm mb-4">Store embeddings for semantic search and RAG applications.</p>
 
-              <div id="vectorDbOptions" style="margin-top: 10px;">
-                <label for="dbChoice">Choose Database:</label>
-                <select id="dbChoice">
+            <div class="db-options" id="vectorDbOptions">
+              <div class="db-select-group">
+                <label class="form-label" for="dbChoice">Choose Database</label>
+                <select id="dbChoice" class="form-select">
                   <option value="pinecone">Pinecone</option>
                   <option value="weaviate">Weaviate</option>
                   <option value="qdrant">Qdrant</option>
                 </select>
+              </div>
 
-                <div id="pineconeParams" class="db-params" style="margin-top:10px;">
-                  <label for="pineconeIndexName">Pinecone Index Name:</label>
+              <div id="pineconeParams" class="db-params">
+                <div>
+                  <label for="pineconeIndexName">Index Name</label>
                   <input type="text" id="pineconeIndexName" name="pinecone_index_name" value="articles" placeholder="e.g., articles">
-                  <br>
-                  <label for="pineconeNamespace" style="margin-top:5px; display:inline-block;">Pinecone Namespace (optional):</label>
-                  <input type="text" id="pineconeNamespace" name="pinecone_namespace" placeholder="e.g., workshop" />
                 </div>
-                <div id="weaviateParams" class="db-params" style="display:none; margin-top:10px;">
-                  <label for="weaviateClassName">Weaviate Class Name:</label>
+                <div>
+                  <label for="pineconeNamespace">Namespace (optional)</label>
+                  <input type="text" id="pineconeNamespace" name="pinecone_namespace" placeholder="e.g., workshop">
+                </div>
+              </div>
+
+              <div id="weaviateParams" class="db-params" style="display:none;">
+                <div>
+                  <label for="weaviateClassName">Class Name</label>
                   <input type="text" id="weaviateClassName" name="weaviate_class_name" value="Article" placeholder="e.g., Article">
-                  <br>
-                  <label for="weaviateTenantName" style="margin-top:5px; display:inline-block;">Weaviate Tenant Name:</label>
+                </div>
+                <div>
+                  <label for="weaviateTenantName">Tenant Name</label>
                   <input type="text" id="weaviateTenantName" name="weaviate_tenant_name" value="alakel" placeholder="e.g., alakel">
                 </div>
-                <div id="qdrantParams" class="db-params" style="display:none; margin-top:10px;">
-                  <label for="qdrantCollectionName">Qdrant Collection Name:</label>
+              </div>
+
+              <div id="qdrantParams" class="db-params" style="display:none;">
+                <div>
+                  <label for="qdrantCollectionName">Collection Name</label>
                   <input type="text" id="qdrantCollectionName" name="qdrant_collection_name" placeholder="e.g., my_documents" required>
                 </div>
-
-                <button id="uploadDbBtn" style="margin-top:15px;">Upload to Vector DB</button>
-                <div id="dbResult" class="result"></div>
               </div>
-            </section>
+
+              <button id="uploadDbBtn" class="btn btn-primary">
+                <i class="bi bi-cloud-upload"></i> Upload to Vector DB
+              </button>
+              <div id="dbResult" class="result"></div>
+            </div>
           </div>
         </div>
+      </div>
 
-        <!-- ========== BRANCHE DROITE : ZOTERO NOTES ========== -->
-        <div class="branch branch-zotero" id="zotero-branch">
-          <div class="branch-header">
-            <input type="checkbox" id="zotero-checkbox">
-            <label for="zotero-checkbox">
-              <span class="branch-icon">📝</span>
-              <span class="branch-title">Notes Zotero</span>
-            </label>
-          </div>
-          <div class="branch-content">
-            <section id="zotero-notes-section">
-              <h2>3. Generate Zotero Reading Notes</h2>
-              <p style="font-size: 0.9em; color: #555; margin-bottom: 15px;">
-                Generate AI-powered reading notes and add them to your Zotero library.
-                <strong>Only available for Zotero exports.</strong>
-              </p>
+      <!-- Zotero Branch -->
+      <div class="branch branch-zotero" id="zotero-branch">
+        <div class="branch-header">
+          <input type="checkbox" id="zotero-checkbox">
+          <label for="zotero-checkbox">
+            <span class="branch-icon">📝</span>
+            <span class="branch-title">Zotero Notes</span>
+          </label>
+        </div>
+        <div class="branch-content">
+          <div class="sub-section" id="zotero-notes-section">
+            <h3>Generate Zotero Reading Notes</h3>
+            <p class="text-secondary text-sm mb-4">
+              Generate AI-powered reading notes and add them to your Zotero library.
+              <strong>Only available for Zotero exports.</strong>
+            </p>
 
-              <div style="margin-bottom: 15px;">
-                <label style="display: flex; align-items: center; cursor: pointer;">
-                  <input type="checkbox" id="extendedAnalysisCheckbox" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;" />
-                  <span style="font-weight: 500;">Extended Analysis (fiche de lecture détaillée)</span>
-                </label>
-                <p style="font-size: 0.85em; color: #666; margin-top: 5px; margin-left: 26px;">
-                  <strong>Coché :</strong> Crée une <em>note enfant</em> détaillée (8000-12000 mots) avec méthodologie, évaluation et bibliographie.<br/>
-                  <strong>Décoché :</strong> Enrichit le champ <em>Résumé/Abstract</em> existant avec un résumé synthétique (200-350 mots).
-                </p>
+            <div class="zotero-options">
+              <div class="zotero-checkbox-group">
+                <input type="checkbox" id="extendedAnalysisCheckbox" checked>
+                <div class="zotero-checkbox-label">
+                  <strong>Extended Analysis</strong>
+                  <small>
+                    <strong>Checked:</strong> Creates detailed child note (8000-12000 words) with methodology and bibliography.<br>
+                    <strong>Unchecked:</strong> Enriches Abstract field with a summary (200-350 words).
+                  </small>
+                </div>
               </div>
 
-              <label for="zoteroModelInput" style="display: block; margin-bottom: 5px;">LLM Model (optional):</label>
-              <input type="text" id="zoteroModelInput" placeholder="openai/gemini-2.5-flash or gpt-4o-mini" style="width: 100%; max-width: 400px; padding: 8px; margin-bottom: 10px;" />
-              <p style="font-size: 0.85em; color: #666; margin-top: -5px;">Leave empty to use default (gpt-4o-mini). Format: "openai/gemini-2.5-flash" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
-
-              <button id="generateZoteroNotesBtn" style="margin-top: 10px; background: #9c27b0;">
-                Generate Zotero Notes
-              </button>
-
-              <div id="zoteroProgress" style="display:none; margin-top: 15px;">
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
-                  <span id="zoteroProgressCount" style="font-weight: bold; min-width: 60px;">0/0</span>
-                  <span id="zoteroProgressStatus" style="color: #666; font-size: 0.9em;">Processing...</span>
-                </div>
-                <div style="background: #e0e0e0; border-radius: 4px; height: 24px; overflow: hidden; display: flex;">
-                  <div id="zoteroProgressBar" style="background: linear-gradient(90deg, #9c27b0 0%, #ba68c8 100%); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center;">
-                    <!-- Brick pattern -->
-                    <div style="width: 100%; height: 100%; background: repeating-linear-gradient(90deg, transparent, transparent 8px, rgba(255,255,255,0.3) 8px, rgba(255,255,255,0.3) 10px);"></div>
-                  </div>
-                </div>
-                <p id="zoteroProgressText" style="margin-top: 5px; font-size: 0.85em; color: #666;"></p>
+              <div class="model-input-group">
+                <label for="zoteroModelInput">LLM Model (optional)</label>
+                <input type="text" id="zoteroModelInput" placeholder="openai/gemini-2.5-flash or gpt-4o-mini">
+                <p class="model-input-hint">Leave empty for default (gpt-4o-mini).</p>
               </div>
+            </div>
 
-              <div id="zoteroLog" class="result" style="max-height: 400px; overflow-y: auto;"></div>
-            </section>
+            <button id="generateZoteroNotesBtn" class="btn btn-primary" style="background: #8B5CF6; border-color: #8B5CF6;">
+              <i class="bi bi-journal-bookmark"></i> Generate Zotero Notes
+            </button>
+
+            <div id="zoteroProgress" class="progress-container" style="display:none;">
+              <div class="progress-header">
+                <span id="zoteroProgressCount" class="progress-count">0/0</span>
+                <span id="zoteroProgressStatus" class="progress-status">Processing...</span>
+              </div>
+              <div class="progress-bar-wrapper">
+                <div id="zoteroProgressBar" class="progress-bar-fill zotero"></div>
+              </div>
+              <p id="zoteroProgressText" class="text-sm text-tertiary mt-2"></p>
+            </div>
+
+            <div id="zoteroLog" class="result" style="max-height: 400px; overflow-y: auto;"></div>
           </div>
         </div>
       </div>
     </div>
   </div>
+</div>
+{% endblock %}
 
-  <script>
-    // ========================================
-    // STATE MANAGEMENT
-    // ========================================
-    const appState = {
-      currentPath: '',
-      steps: {
-        upload: { completed: false, file: null },
-        extraction: { completed: false, file: 'output.csv' },
-        chunking: { completed: false, file: 'output_chunks.json' },
-        denseEmbed: { completed: false, file: 'output_chunks_with_embeddings.json' },
-        sparseEmbed: { completed: false, file: 'output_chunks_with_embeddings_sparse.json' },
-        vectorDb: { completed: false, file: null },
-        zoteroNotes: { completed: false, file: null }
-      },
-      selectedBranches: {
-        rag: true,
-        zotero: false
-      },
-      isZoteroExport: false // Track if current upload is from Zotero
+{% block extra_js %}
+<script>
+  // ========================================
+  // STATE MANAGEMENT
+  // ========================================
+  const appState = {
+    currentPath: '',
+    steps: {
+      upload: { completed: false, file: null },
+      extraction: { completed: false, file: 'output.csv' },
+      chunking: { completed: false, file: 'output_chunks.json' },
+      denseEmbed: { completed: false, file: 'output_chunks_with_embeddings.json' },
+      sparseEmbed: { completed: false, file: 'output_chunks_with_embeddings_sparse.json' },
+      vectorDb: { completed: false, file: null },
+      zoteroNotes: { completed: false, file: null }
+    },
+    selectedBranches: {
+      rag: true,
+      zotero: false
+    },
+    isZoteroExport: false
+  };
+
+  // ========================================
+  // STEP TRACKER FUNCTIONS
+  // ========================================
+  function updateStepTracker(stepName, status) {
+    const stepMapping = {
+      'upload': 'upload',
+      'extraction': 'extraction',
+      'chunking': 'processing',
+      'denseEmbed': 'processing',
+      'sparseEmbed': 'processing',
+      'vectorDb': 'destination',
+      'zoteroNotes': 'destination'
     };
 
-    // ========================================
-    // STEP TRACKER FUNCTIONS
-    // ========================================
-    function updateStepTracker(stepName, status) {
-      const stepMapping = {
-        'upload': 'upload',
-        'extraction': 'extraction',
-        'chunking': 'processing',
-        'denseEmbed': 'processing',
-        'sparseEmbed': 'processing',
-        'vectorDb': 'destination',
-        'zoteroNotes': 'destination'
-      };
+    const trackerStep = stepMapping[stepName];
+    if (!trackerStep) return;
 
-      const trackerStep = stepMapping[stepName];
-      if (!trackerStep) return;
+    const stepEl = document.querySelector(`.step-item[data-step="${trackerStep}"]`);
+    if (!stepEl) return;
 
-      const stepEl = document.querySelector(`.step-item[data-step="${trackerStep}"]`);
-      if (!stepEl) return;
+    const allSteps = ['upload', 'extraction', 'processing', 'destination'];
+    const stepIndex = allSteps.indexOf(trackerStep);
 
-      // Update connector before this step
-      const allSteps = ['upload', 'extraction', 'processing', 'destination'];
-      const stepIndex = allSteps.indexOf(trackerStep);
+    if (status === 'completed') {
+      stepEl.classList.remove('active', 'locked');
+      stepEl.classList.add('completed');
 
-      if (status === 'completed') {
-        stepEl.classList.remove('active', 'locked');
-        stepEl.classList.add('completed');
+      const connectors = document.querySelectorAll('.step-connector');
+      if (stepIndex > 0 && connectors[stepIndex - 1]) {
+        connectors[stepIndex - 1].classList.add('completed');
+      }
 
-        // Update connector
-        const connectors = document.querySelectorAll('.step-connector');
-        if (stepIndex > 0 && connectors[stepIndex - 1]) {
-          connectors[stepIndex - 1].classList.add('completed');
+      if (stepIndex < allSteps.length - 1) {
+        const nextStepEl = document.querySelector(`.step-item[data-step="${allSteps[stepIndex + 1]}"]`);
+        if (nextStepEl && nextStepEl.classList.contains('locked')) {
+          nextStepEl.classList.remove('locked');
+          nextStepEl.classList.add('active');
         }
-
-        // Activate next step
-        if (stepIndex < allSteps.length - 1) {
-          const nextStepEl = document.querySelector(`.step-item[data-step="${allSteps[stepIndex + 1]}"]`);
-          if (nextStepEl && nextStepEl.classList.contains('locked')) {
-            nextStepEl.classList.remove('locked');
-            nextStepEl.classList.add('active');
-          }
-        }
-
-        // Show file link if available
-        const fileLink = stepEl.querySelector('.step-file-link');
-        const stepData = appState.steps[stepName];
-        if (fileLink && stepData && stepData.file && appState.currentPath) {
-          fileLink.href = `/download_file?session_path=${encodeURIComponent(appState.currentPath)}&filename=${encodeURIComponent(stepData.file)}`;
-          fileLink.textContent = `📎 ${stepData.file}`;
-          fileLink.style.display = 'inline-flex';
-        }
-      } else if (status === 'active') {
-        stepEl.classList.remove('completed', 'locked');
-        stepEl.classList.add('active');
       }
-    }
 
-    function completeStep(stepName, fileName) {
-      appState.steps[stepName].completed = true;
-      if (fileName) {
-        appState.steps[stepName].file = fileName;
+      const fileLink = stepEl.querySelector('.step-file-link');
+      const stepData = appState.steps[stepName];
+      if (fileLink && stepData && stepData.file && appState.currentPath) {
+        fileLink.href = `/download_file?session_path=${encodeURIComponent(appState.currentPath)}&filename=${encodeURIComponent(stepData.file)}`;
+        fileLink.textContent = `📎 ${stepData.file}`;
+        fileLink.style.display = 'inline-flex';
       }
-      updateStepTracker(stepName, 'completed');
+    } else if (status === 'active') {
+      stepEl.classList.remove('completed', 'locked');
+      stepEl.classList.add('active');
     }
+  }
 
-    // ========================================
-    // SECTION UNLOCK FUNCTIONS
-    // ========================================
-    function unlockSection(sectionId) {
-      const section = document.getElementById(sectionId);
-      if (section) {
-        section.classList.remove('step-locked');
-        section.classList.add('step-available', 'fade-in');
+  function completeStep(stepName, fileName) {
+    appState.steps[stepName].completed = true;
+    if (fileName) {
+      appState.steps[stepName].file = fileName;
+    }
+    updateStepTracker(stepName, 'completed');
+  }
+
+  // ========================================
+  // SECTION UNLOCK FUNCTIONS
+  // ========================================
+  function unlockSection(sectionId) {
+    const section = document.getElementById(sectionId);
+    if (section) {
+      section.classList.remove('step-locked');
+      section.classList.add('step-available', 'fade-in');
+    }
+  }
+
+  function lockSection(sectionId) {
+    const section = document.getElementById(sectionId);
+    if (section) {
+      section.classList.remove('step-available', 'fade-in');
+      section.classList.add('step-locked');
+    }
+  }
+
+  function markSectionCompleted(sectionId) {
+    const section = document.getElementById(sectionId);
+    if (section) {
+      section.classList.add('step-completed');
+    }
+  }
+
+  function unlockDecisionTree() {
+    const tree = document.getElementById('decision-tree');
+    if (tree) {
+      tree.classList.remove('step-locked');
+      tree.classList.add('fade-in');
+      updateStepTracker('extraction', 'completed');
+    }
+  }
+
+  // ========================================
+  // BRANCH TOGGLE FUNCTIONS
+  // ========================================
+  function toggleBranch(branchName, enabled) {
+    appState.selectedBranches[branchName] = enabled;
+    const branch = document.getElementById(`${branchName}-branch`);
+    if (branch) {
+      branch.classList.toggle('selected', enabled);
+    }
+  }
+
+  document.getElementById('rag-checkbox').addEventListener('change', (e) => {
+    toggleBranch('rag', e.target.checked);
+  });
+
+  document.getElementById('zotero-checkbox').addEventListener('change', (e) => {
+    toggleBranch('zotero', e.target.checked);
+  });
+
+  // ========================================
+  // SETTINGS MODAL
+  // ========================================
+  const settingsForm = document.getElementById('settingsForm');
+  const settingsSaveStatus = document.getElementById('settingsSaveStatus');
+
+  async function loadCredentials() {
+    settingsSaveStatus.textContent = 'Loading credentials...';
+    try {
+      const res = await fetch('/get_credentials');
+      if (!res.ok) {
+        settingsSaveStatus.textContent = `Error ${res.status}`;
+        return;
       }
-    }
-
-    function lockSection(sectionId) {
-      const section = document.getElementById(sectionId);
-      if (section) {
-        section.classList.remove('step-available', 'fade-in');
-        section.classList.add('step-locked');
-      }
-    }
-
-    function markSectionCompleted(sectionId) {
-      const section = document.getElementById(sectionId);
-      if (section) {
-        section.classList.add('step-completed');
-      }
-    }
-
-    function unlockDecisionTree() {
-      const tree = document.getElementById('decision-tree');
-      if (tree) {
-        tree.classList.remove('step-locked');
-        tree.classList.add('fade-in');
-        updateStepTracker('extraction', 'completed');
-      }
-    }
-
-    // ========================================
-    // BRANCH TOGGLE FUNCTIONS
-    // ========================================
-    function toggleBranch(branchName, enabled) {
-      appState.selectedBranches[branchName] = enabled;
-      const branch = document.getElementById(`${branchName}-branch`);
-      if (branch) {
-        branch.classList.toggle('selected', enabled);
-      }
-    }
-
-    // Branch checkbox listeners
-    document.getElementById('rag-checkbox').addEventListener('change', (e) => {
-      toggleBranch('rag', e.target.checked);
-    });
-
-    document.getElementById('zotero-checkbox').addEventListener('change', (e) => {
-      toggleBranch('zotero', e.target.checked);
-    });
-
-    // ========================================
-    // Settings modal logic
-    // ========================================
-    const settingsBtn = document.getElementById('settingsBtn');
-    const settingsModal = document.getElementById('settingsModal');
-    const closeSettingsModal = document.getElementById('closeSettingsModal');
-    const settingsForm = document.getElementById('settingsForm');
-    const settingsSaveStatus = document.getElementById('settingsSaveStatus');
-
-    async function loadCredentials() {
-      settingsSaveStatus.textContent = 'Loading credentials...';
-      try {
-        console.log("Fetching credentials...");
-        const res = await fetch('/get_credentials');
-        console.log("Response status:", res.status);
-        
-        if (!res.ok) {
-          const errorText = await res.text();
-          console.error("Failed to load credentials:", res.status, errorText);
-          settingsSaveStatus.textContent = `Error ${res.status}: ${errorText}`;
-          return;
-        }
-        
-        const json = await res.json();
-        console.log("Credentials loaded:", Object.keys(json));
-        
-        for (const key in json) {
-          const input = document.querySelector(`#settingsForm [name="${key}"]`);
-          if (input) {
-            console.log(`Setting ${key} value`);
-            // Truncate API keys for security - show first 20 chars + #####
-            // Only mask fields that contain API_KEY or _KEY in their name
-            const value = json[key] || '';
-            const isApiKey = key.includes('API_KEY') || key.includes('_KEY');
-
-            if (isApiKey && value.length > 20) {
-              input.value = value.substring(0, 20) + '##########';
-            } else {
-              input.value = value;
-            }
-            // Store the full value as a data attribute for submission
-            input.dataset.fullValue = value;
+      const json = await res.json();
+      for (const key in json) {
+        const input = document.querySelector(`#settingsForm [name="${key}"]`);
+        if (input) {
+          const value = json[key] || '';
+          const isApiKey = key.includes('API_KEY') || key.includes('_KEY');
+          if (isApiKey && value.length > 20) {
+            input.value = value.substring(0, 20) + '##########';
           } else {
-            console.warn(`Input field not found for ${key}`);
+            input.value = value;
           }
+          input.dataset.fullValue = value;
         }
-        
-        // Only clear the status message if we successfully loaded credentials
-        if (Object.keys(json).length > 0) {
-          settingsSaveStatus.textContent = '';
-        } else {
-          settingsSaveStatus.textContent = 'No credentials found in .env file';
-        }
-      } catch (err) {
-        console.error("Error loading credentials:", err);
-        settingsSaveStatus.textContent = "Error: " + err.message;
       }
-    }
-
-    settingsBtn.onclick = () => {
-      settingsModal.style.display = 'block';
       settingsSaveStatus.textContent = '';
-      loadCredentials();
-    };
-    closeSettingsModal.onclick = () => {
-      settingsModal.style.display = 'none';
-    };
-    window.onclick = (event) => {
-      if (event.target === settingsModal) {
-        settingsModal.style.display = 'none';
-      }
-    };
+    } catch (err) {
+      settingsSaveStatus.textContent = "Error: " + err.message;
+    }
+  }
 
-    settingsForm.onsubmit = async (e) => {
-      e.preventDefault();
-      settingsSaveStatus.textContent = 'Saving...';
-      const data = {};
-      
-      // Extract form values.
-      // If the input value is the placeholder '##########' AND there's a fullValue that matches the prefix, use fullValue.
-      // Otherwise, use the current input value (which could be empty if cleared by user, or a new value if edited).
-      Array.from(settingsForm.elements).forEach(el => {
-        if (el.name) { // Process all named elements
-          if (el.dataset && el.dataset.fullValue && 
-              el.value.endsWith('##########') && 
-              el.value.startsWith(el.dataset.fullValue.substring(0, 20))) {
-            // Field was likely not touched by user and displays placeholder, use stored full value
-            data[el.name] = el.dataset.fullValue;
-          } else {
-            // Field was edited, or never had a fullValue, or placeholder logic doesn't match. Use current field value.
-            data[el.name] = el.value; 
-          }
+  // Load credentials when modal opens
+  const settingsModal = document.getElementById('settingsModal');
+  const observer = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      if (mutation.attributeName === 'class' && settingsModal.classList.contains('active')) {
+        loadCredentials();
+      }
+    });
+  });
+  observer.observe(settingsModal, { attributes: true });
+
+  settingsForm.onsubmit = async (e) => {
+    e.preventDefault();
+    settingsSaveStatus.textContent = 'Saving...';
+    const data = {};
+    Array.from(settingsForm.elements).forEach(el => {
+      if (el.name) {
+        if (el.dataset && el.dataset.fullValue &&
+            el.value.endsWith('##########') &&
+            el.value.startsWith(el.dataset.fullValue.substring(0, 20))) {
+          data[el.name] = el.dataset.fullValue;
+        } else {
+          data[el.name] = el.value;
         }
+      }
+    });
+    try {
+      const res = await fetch('/save_credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
       });
-      
-      try {
-        const res = await fetch('/save_credentials', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data)
-        });
-        const json = await res.json();
-        if (res.ok && json.status === "success") {
-          settingsSaveStatus.textContent = "Credentials saved!";
-        } else {
-          settingsSaveStatus.textContent = "Error: " + (json.error || "Could not save.");
-        }
-      } catch (err) {
-        settingsSaveStatus.textContent = "Request failed: " + err;
+      const json = await res.json();
+      if (res.ok && json.status === "success") {
+        settingsSaveStatus.textContent = "Credentials saved!";
+        showToast('Credentials saved successfully!', 'success');
+        setTimeout(() => closeModal('settingsModal'), 1500);
+      } else {
+        settingsSaveStatus.textContent = "Error: " + (json.error || "Could not save.");
       }
-    };
-    // Project and Session context from server
-    const projectId = {{ project_id or 'null' }};
-    const sessionFolder = '{{ session_folder or "" }}';
-
-    // Use appState.currentPath instead of separate variable
-    let currentPath = ''; // Keep for backward compatibility
-
-    // If we have an existing session, load its files
-    async function loadExistingSession() {
-      if (!sessionFolder) return;
-
-      console.log('Loading existing session:', sessionFolder);
-      currentPath = sessionFolder;
-      appState.currentPath = sessionFolder;
-
-      try {
-        const response = await fetch(`/api/pipeline/sessions/${encodeURIComponent(sessionFolder)}/files`);
-        if (!response.ok) {
-          console.error('Failed to load session files:', response.status);
-          return;
-        }
-
-        const data = await response.json();
-        console.log('Session files:', data);
-
-        // Update UI based on existing files
-        const files = data.files;
-
-        // Upload step - always completed if we have a session
-        if (files.upload.completed) {
-          completeStep('upload', null);
-          markSectionCompleted('upload-section');
-          unlockSection('dataframe-section');
-          updateStepTracker('upload', 'completed');
-
-          const uploadResult = document.getElementById('uploadResult');
-          uploadResult.innerHTML = `<p>✅ Session chargée: <strong>${sessionFolder}</strong></p>`;
-        }
-
-        // Extraction step
-        if (files.extraction.completed) {
-          completeStep('extraction', 'output.csv');
-          markSectionCompleted('dataframe-section');
-          unlockDecisionTree();
-          updateStepTracker('extraction', 'completed');
-
-          const dataframeResult = document.getElementById('dataframeResult');
-          const rowInfo = files.extraction.row_count ? ` (${files.extraction.row_count} lignes)` : '';
-          dataframeResult.innerHTML = `<p>✅ CSV existant: ${buildDownloadLink('output.csv')}${rowInfo}</p>`;
-        }
-
-        // Chunking step
-        if (files.chunking.completed) {
-          completeStep('chunking', 'output_chunks.json');
-          markSectionCompleted('initial-chunk-section');
-          unlockSection('dense-embedding-section');
-          updateStepTracker('chunking', 'completed');
-
-          const chunkResult = document.getElementById('initialChunkResult');
-          const chunkInfo = files.chunking.chunk_count ? ` (${files.chunking.chunk_count} chunks)` : '';
-          chunkResult.innerHTML = `<p>✅ Chunks existants: ${buildDownloadLink('output_chunks.json')}${chunkInfo}</p>`;
-        }
-
-        // Dense embedding step
-        if (files.dense_embedding.completed) {
-          completeStep('denseEmbed', 'output_chunks_with_embeddings.json');
-          markSectionCompleted('dense-embedding-section');
-          unlockSection('sparse-embedding-section');
-
-          const denseResult = document.getElementById('denseEmbeddingResult');
-          const denseInfo = files.dense_embedding.chunk_count ? ` (${files.dense_embedding.chunk_count} chunks)` : '';
-          denseResult.innerHTML = `<p>✅ Embeddings denses existants: ${buildDownloadLink('output_chunks_with_embeddings.json')}${denseInfo}</p>`;
-        }
-
-        // Sparse embedding step
-        if (files.sparse_embedding.completed) {
-          completeStep('sparseEmbed', 'output_chunks_with_embeddings_sparse.json');
-          markSectionCompleted('sparse-embedding-section');
-          unlockSection('db-section');
-          updateStepTracker('sparseEmbed', 'completed');
-
-          const sparseResult = document.getElementById('sparseEmbeddingResult');
-          const sparseInfo = files.sparse_embedding.chunk_count ? ` (${files.sparse_embedding.chunk_count} chunks)` : '';
-          sparseResult.innerHTML = `<p>✅ Embeddings sparses existants: ${buildDownloadLink('output_chunks_with_embeddings_sparse.json')}${sparseInfo}</p>`;
-        }
-
-        console.log('Current stage:', data.current_stage);
-      } catch (err) {
-        console.error('Error loading session:', err);
-      }
+    } catch (err) {
+      settingsSaveStatus.textContent = "Request failed: " + err;
     }
+  };
 
-    // Load existing session on page load
-    document.addEventListener('DOMContentLoaded', function() {
-      loadExistingSession();
-    });
+  // Project and Session context
+  const projectId = {{ project_id or 'null' }};
+  const sessionFolder = '{{ session_folder or "" }}';
+  let currentPath = '';
 
-    function ensureSessionPath(resultDiv) {
-      if (!appState.currentPath && !currentPath) {
-        resultDiv.textContent = 'Session path not initialised. Upload a ZIP archive or CSV first.';
-        return false;
+  // Load existing session
+  async function loadExistingSession() {
+    if (!sessionFolder) return;
+    currentPath = sessionFolder;
+    appState.currentPath = sessionFolder;
+
+    try {
+      const response = await fetch(`/api/pipeline/sessions/${encodeURIComponent(sessionFolder)}/files`);
+      if (!response.ok) return;
+
+      const data = await response.json();
+      const files = data.files;
+
+      if (files.upload.completed) {
+        completeStep('upload', null);
+        markSectionCompleted('upload-section');
+        unlockSection('dataframe-section');
+        updateStepTracker('upload', 'completed');
+        document.getElementById('uploadResult').innerHTML = `<p>✅ Session loaded: <strong>${sessionFolder}</strong></p>`;
       }
-      // Sync currentPath with appState
-      if (appState.currentPath) {
-        currentPath = appState.currentPath;
+
+      if (files.extraction.completed) {
+        completeStep('extraction', 'output.csv');
+        markSectionCompleted('dataframe-section');
+        unlockDecisionTree();
+        const rowInfo = files.extraction.row_count ? ` (${files.extraction.row_count} rows)` : '';
+        document.getElementById('dataframeResult').innerHTML = `<p>✅ Existing CSV: ${buildDownloadLink('output.csv')}${rowInfo}</p>`;
       }
-      return true;
-    }
 
-    function buildDownloadLink(filename) {
-      return `<a href="/download_file?session_path=${encodeURIComponent(currentPath)}&filename=${encodeURIComponent(filename)}" download="${filename}">${filename}</a>`;
-    }
+      if (files.chunking.completed) {
+        completeStep('chunking', 'output_chunks.json');
+        markSectionCompleted('initial-chunk-section');
+        unlockSection('dense-embedding-section');
+        const chunkInfo = files.chunking.chunk_count ? ` (${files.chunking.chunk_count} chunks)` : '';
+        document.getElementById('initialChunkResult').innerHTML = `<p>✅ Existing chunks: ${buildDownloadLink('output_chunks.json')}${chunkInfo}</p>`;
+      }
 
-    async function uploadStageArtifact({ stage, fileInput, resultDiv }) {
-      if (!ensureSessionPath(resultDiv)) {
+      if (files.dense_embedding.completed) {
+        completeStep('denseEmbed', 'output_chunks_with_embeddings.json');
+        markSectionCompleted('dense-embedding-section');
+        unlockSection('sparse-embedding-section');
+        const denseInfo = files.dense_embedding.chunk_count ? ` (${files.dense_embedding.chunk_count} chunks)` : '';
+        document.getElementById('denseEmbeddingResult').innerHTML = `<p>✅ Existing dense embeddings: ${buildDownloadLink('output_chunks_with_embeddings.json')}${denseInfo}</p>`;
+      }
+
+      if (files.sparse_embedding.completed) {
+        completeStep('sparseEmbed', 'output_chunks_with_embeddings_sparse.json');
+        markSectionCompleted('sparse-embedding-section');
+        unlockSection('db-section');
+        const sparseInfo = files.sparse_embedding.chunk_count ? ` (${files.sparse_embedding.chunk_count} chunks)` : '';
+        document.getElementById('sparseEmbeddingResult').innerHTML = `<p>✅ Existing sparse embeddings: ${buildDownloadLink('output_chunks_with_embeddings_sparse.json')}${sparseInfo}</p>`;
+      }
+    } catch (err) {
+      console.error('Error loading session:', err);
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', loadExistingSession);
+
+  function ensureSessionPath(resultDiv) {
+    if (!appState.currentPath && !currentPath) {
+      resultDiv.textContent = 'Session path not initialized. Upload a ZIP or CSV first.';
+      return false;
+    }
+    if (appState.currentPath) currentPath = appState.currentPath;
+    return true;
+  }
+
+  function buildDownloadLink(filename) {
+    return `<a href="/download_file?session_path=${encodeURIComponent(currentPath)}&filename=${encodeURIComponent(filename)}" download="${filename}">${filename}</a>`;
+  }
+
+  async function uploadStageArtifact({ stage, fileInput, resultDiv }) {
+    if (!ensureSessionPath(resultDiv)) return null;
+    if (!fileInput.files || fileInput.files.length === 0) {
+      resultDiv.textContent = 'Please choose a file before uploading.';
+      return null;
+    }
+    const formData = new FormData();
+    formData.append('path', currentPath);
+    formData.append('file', fileInput.files[0]);
+    resultDiv.textContent = 'Uploading...';
+    try {
+      const res = await fetch(`/upload_stage_file/${stage}`, { method: 'POST', body: formData });
+      const json = await res.json();
+      if (!res.ok || json.status !== 'success') {
+        resultDiv.textContent = `Error: ${json.error || 'Upload failed.'}`;
         return null;
       }
-
-      if (!fileInput.files || fileInput.files.length === 0) {
-        resultDiv.textContent = 'Please choose a file before uploading.';
-        return null;
-      }
-
-      const formData = new FormData();
-      formData.append('path', currentPath);
-      formData.append('file', fileInput.files[0]);
-
-      resultDiv.textContent = 'Uploading...';
-
-      try {
-        const res = await fetch(`/upload_stage_file/${stage}`, {
-          method: 'POST',
-          body: formData
-        });
-        const json = await res.json();
-        if (!res.ok || json.status !== 'success') {
-          const errMsg = json.error || res.statusText || 'Upload failed.';
-          resultDiv.textContent = `Error: ${errMsg}`;
-          return null;
-        }
-        return json;
-      } catch (err) {
-        resultDiv.textContent = `Upload failed: ${err}`;
-        return null;
-      }
+      return json;
+    } catch (err) {
+      resultDiv.textContent = `Upload failed: ${err}`;
+      return null;
     }
+  }
 
-    function formatUploadSummary(details) {
-      if (!details || typeof details !== 'object') {
-        return '';
-      }
+  function formatUploadSummary(details) {
+    if (!details || typeof details !== 'object') return '';
+    const parts = [];
+    if (typeof details.rows === 'number') parts.push(`Rows: <strong>${details.rows}</strong>`);
+    if (typeof details.columns === 'number') parts.push(`Columns: <strong>${details.columns}</strong>`);
+    if (typeof details.count === 'number') parts.push(`Items: <strong>${details.count}</strong>`);
+    if (details.parse_warning) parts.push(`<span class="error-text">${details.parse_warning}</span>`);
+    return parts.length ? `<p>${parts.join(' • ')}</p>` : '';
+  }
 
-      const parts = [];
-      if (typeof details.rows === 'number') {
-        parts.push(`Rows: <strong>${details.rows}</strong>`);
+  // Step 1A: Upload ZIP
+  document.getElementById('uploadZipForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const uploadResult = document.getElementById('uploadResult');
+    uploadResult.textContent = 'Uploading ZIP...';
+    const formData = new FormData(e.target);
+    if (projectId) formData.append('project_id', projectId);
+    try {
+      const res = await fetch('/upload_zip', { method: 'POST', body: formData });
+      const json = await res.json();
+      if (res.ok) {
+        currentPath = json.path;
+        appState.currentPath = json.path;
+        appState.isZoteroExport = true;
+        uploadResult.innerHTML = `<p>✅ ZIP uploaded: <strong>${currentPath}</strong></p>`;
+        completeStep('upload', null);
+        markSectionCompleted('upload-section');
+        unlockSection('dataframe-section');
+        showToast('ZIP uploaded successfully!', 'success');
+      } else {
+        uploadResult.textContent = 'Error: ' + (json.error || res.statusText);
       }
-      if (typeof details.columns === 'number') {
-        parts.push(`Columns: <strong>${details.columns}</strong>`);
-      }
-      if (typeof details.count === 'number') {
-        parts.push(`Items: <strong>${details.count}</strong>`);
-      }
-      if (details.parse_warning) {
-        parts.push(`<span class="error-text">${details.parse_warning}</span>`);
-      }
-
-      if (parts.length === 0) {
-        return '';
-      }
-
-      return `<p>${parts.join(' • ')}</p>`;
+    } catch (err) {
+      uploadResult.textContent = 'Upload failed: ' + err;
     }
+  });
 
-    // Step 1A: Upload ZIP (Zotero + PDFs)
-    document.getElementById('uploadZipForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const uploadResult = document.getElementById('uploadResult');
-      uploadResult.textContent = 'Uploading ZIP...';
-      const formData = new FormData(e.target);
-
-      // Add project_id if available
-      if (projectId) {
-        formData.append('project_id', projectId);
+  // Step 1B: Upload CSV
+  document.getElementById('uploadCsvForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const uploadResult = document.getElementById('uploadResult');
+    uploadResult.textContent = 'Uploading CSV...';
+    const formData = new FormData(e.target);
+    if (projectId) formData.append('project_id', projectId);
+    try {
+      const res = await fetch('/upload_csv', { method: 'POST', body: formData });
+      const json = await res.json();
+      if (res.ok) {
+        currentPath = json.path;
+        appState.currentPath = json.path;
+        appState.isZoteroExport = false;
+        uploadResult.innerHTML = `<p>✅ CSV ingested: <strong>${currentPath}</strong></p>`;
+        completeStep('upload', null);
+        completeStep('extraction', 'output.csv');
+        markSectionCompleted('upload-section');
+        lockSection('dataframe-section');
+        unlockDecisionTree();
+        showToast('CSV processed successfully!', 'success');
+      } else {
+        uploadResult.textContent = 'Error: ' + (json.error || res.statusText);
       }
+    } catch (err) {
+      uploadResult.textContent = 'Upload failed: ' + err;
+    }
+  });
 
-      try {
-        const res = await fetch('/upload_zip', {
-          method: 'POST',
-          body: formData
-        });
-        const json = await res.json();
-        if (res.ok) {
-          currentPath = json.path;
-          appState.currentPath = json.path;
-          appState.isZoteroExport = true;
+  // Step 2: Process DataFrame with SSE
+  document.getElementById('processDataframeBtn').addEventListener('click', async () => {
+    const resultDiv = document.getElementById('dataframeResult');
+    const progressDiv = document.getElementById('csvProgress');
+    const progressBar = document.getElementById('csvProgressBar');
+    const progressCount = document.getElementById('csvProgressCount');
+    const progressStatus = document.getElementById('csvProgressStatus');
 
-          uploadResult.innerHTML = `<p>✅ ZIP uploaded: <strong>${currentPath}</strong></p><p style="color: #1976d2;">Next: Extract Text & Metadata (Step 2)</p>`;
+    if (!ensureSessionPath(resultDiv)) return;
 
-          // Update UI using new functions
-          completeStep('upload', null);
-          markSectionCompleted('upload-section');
-          unlockSection('dataframe-section');
-          updateStepTracker('upload', 'completed');
-        } else {
-          uploadResult.textContent = 'Error: ' + (json.error || res.statusText);
-        }
-      } catch (err) {
-        uploadResult.textContent = 'Upload failed: ' + err;
-      }
-    });
+    resultDiv.innerHTML = '';
+    progressDiv.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressCount.textContent = '0/0';
+    progressStatus.textContent = 'Starting...';
 
-    // Step 1B: Upload CSV (Direct ingestion)
-    document.getElementById('uploadCsvForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const uploadResult = document.getElementById('uploadResult');
-      uploadResult.textContent = 'Uploading and processing CSV...';
-      const formData = new FormData(e.target);
+    const formData = new FormData();
+    formData.append('path', currentPath);
 
-      // Add project_id if available
-      if (projectId) {
-        formData.append('project_id', projectId);
-      }
+    try {
+      const response = await fetch('/process_dataframe_sse', { method: 'POST', body: formData });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      try {
-        const res = await fetch('/upload_csv', {
-          method: 'POST',
-          body: formData
-        });
-        const json = await res.json();
-        if (res.ok) {
-          currentPath = json.path;
-          appState.currentPath = json.path;
-          appState.isZoteroExport = false; // CSV is not a Zotero export
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop();
 
-          uploadResult.innerHTML = `<p>✅ CSV ingested: <strong>${currentPath}</strong></p><p>${json.message || ''}</p><p style="color: #2e7d32;">CSV processed! Choose your destination below.</p>`;
-
-          // Update UI - skip extraction, go directly to decision tree
-          completeStep('upload', null);
-          completeStep('extraction', 'output.csv');
-          markSectionCompleted('upload-section');
-          lockSection('dataframe-section'); // Hide extraction step for CSV
-
-          // Unlock the decision tree
-          unlockDecisionTree();
-
-          // Activate processing step in tracker
-          updateStepTracker('extraction', 'completed');
-        } else {
-          uploadResult.textContent = 'Error: ' + (json.error || res.statusText);
-          if (json.details) {
-            uploadResult.innerHTML += '<br><small>' + json.details + '</small>';
-          }
-        }
-      } catch (err) {
-        uploadResult.textContent = 'Upload failed: ' + err;
-      }
-    });
-
-    // Step 2: Process DataFrame with SSE Progress
-    document.getElementById('processDataframeBtn').addEventListener('click', async () => {
-      const resultDiv = document.getElementById('dataframeResult');
-      const progressDiv = document.getElementById('csvProgress');
-      const progressBar = document.getElementById('csvProgressBar');
-      const progressCount = document.getElementById('csvProgressCount');
-      const progressStatus = document.getElementById('csvProgressStatus');
-
-      if (!ensureSessionPath(resultDiv)) {
-        return;
-      }
-
-      // Reset and show progress
-      resultDiv.innerHTML = '';
-      progressDiv.style.display = 'block';
-      progressBar.style.width = '0%';
-      progressCount.textContent = '0/0';
-      progressStatus.textContent = 'Starting...';
-
-      const formData = new FormData();
-      formData.append('path', currentPath);
-
-      try {
-        const response = await fetch('/process_dataframe_sse', {
-          method: 'POST',
-          body: formData
-        });
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n\n');
-          buffer = lines.pop(); // Keep incomplete data
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.substring(6));
-
-                if (data.type === 'init') {
-                  progressCount.textContent = `0/${data.total}`;
-                  progressStatus.textContent = data.message || 'Processing...';
-                } else if (data.type === 'progress') {
-                  const percent = Math.round((data.current / data.total) * 100);
-                  progressBar.style.width = `${percent}%`;
-                  progressCount.textContent = `${data.current}/${data.total}`;
-                  progressStatus.textContent = `Processing item ${data.current}...`;
-                } else if (data.type === 'complete') {
-                  progressBar.style.width = '100%';
-                  progressStatus.textContent = 'Complete!';
-                  const downloadLink = buildDownloadLink('output.csv');
-                  resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p>`;
-
-                  // Update UI
-                  completeStep('extraction', 'output.csv');
-                  markSectionCompleted('dataframe-section');
-                  unlockDecisionTree();
-                } else if (data.type === 'error') {
-                  progressStatus.textContent = 'Error';
-                  resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
-                }
-              } catch (e) {
-                console.error('Failed to parse SSE data:', e);
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.substring(6));
+              if (data.type === 'init') {
+                progressCount.textContent = `0/${data.total}`;
+                progressStatus.textContent = data.message || 'Processing...';
+              } else if (data.type === 'progress') {
+                const percent = Math.round((data.current / data.total) * 100);
+                progressBar.style.width = `${percent}%`;
+                progressCount.textContent = `${data.current}/${data.total}`;
+                progressStatus.textContent = `Processing item ${data.current}...`;
+              } else if (data.type === 'complete') {
+                progressBar.style.width = '100%';
+                progressStatus.textContent = 'Complete!';
+                resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink('output.csv')}</p>`;
+                completeStep('extraction', 'output.csv');
+                markSectionCompleted('dataframe-section');
+                unlockDecisionTree();
+                showToast('CSV generated successfully!', 'success');
+              } else if (data.type === 'error') {
+                progressStatus.textContent = 'Error';
+                resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
               }
+            } catch (e) {
+              console.error('Failed to parse SSE:', e);
             }
           }
         }
-      } catch (err) {
-        progressStatus.textContent = 'Failed';
-        resultDiv.innerHTML = `<p class="error-text">Processing failed: ${err}</p>`;
       }
-    });
+    } catch (err) {
+      progressStatus.textContent = 'Failed';
+      resultDiv.innerHTML = `<p class="error-text">Processing failed: ${err}</p>`;
+    }
+  });
 
-    // Step 3.1: Initial Text Chunking
-    document.getElementById('runInitialChunkBtn').addEventListener('click', async () => {
-      const resultDiv = document.getElementById('initialChunkResult');
-      if (!ensureSessionPath(resultDiv)) {
+  // Step 3.1: Initial Chunking
+  document.getElementById('runInitialChunkBtn').addEventListener('click', async () => {
+    const resultDiv = document.getElementById('initialChunkResult');
+    if (!ensureSessionPath(resultDiv)) return;
+    resultDiv.textContent = 'Running initial chunking...';
+    const form = new URLSearchParams();
+    form.append('path', currentPath);
+    const model = document.getElementById('recodingModelInput').value.trim();
+    if (model) form.append('model', model);
+    try {
+      const res = await fetch('/initial_text_chunking', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: form.toString()
+      });
+      const json = await res.json();
+      if (res.ok && json.status === "success") {
+        const fileName = json.file.split('/').pop();
+        resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${json.count}</strong></p>`;
+        completeStep('chunking', fileName);
+        markSectionCompleted('initial-chunk-section');
+        unlockSection('dense-embedding-section');
+        showToast('Chunks generated successfully!', 'success');
+      } else {
+        resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}</p>`;
+      }
+    } catch (err) {
+      resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
+    }
+  });
+
+  document.getElementById('initialChunkUploadForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const resultDiv = document.getElementById('initialChunkResult');
+    const fileInput = document.getElementById('initialChunkUploadInput');
+    const response = await uploadStageArtifact({ stage: 'initial', fileInput, resultDiv });
+    if (!response) return;
+    resultDiv.innerHTML = `<p>✅ CSV uploaded: ${buildDownloadLink(response.filename)}</p>${formatUploadSummary(response.details)}`;
+    fileInput.value = '';
+    markSectionCompleted('initial-chunk-section');
+    unlockSection('dense-embedding-section');
+  });
+
+  // Step 3.2: Dense Embeddings
+  document.getElementById('runDenseEmbeddingBtn').addEventListener('click', async () => {
+    const resultDiv = document.getElementById('denseEmbeddingResult');
+    if (!ensureSessionPath(resultDiv)) return;
+    resultDiv.textContent = 'Generating dense embeddings...';
+    const form = new URLSearchParams();
+    form.append('path', currentPath);
+    try {
+      const res = await fetch('/dense_embedding_generation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: form.toString()
+      });
+      const json = await res.json();
+      if (res.ok && json.status === "success") {
+        const fileName = json.file.split('/').pop();
+        resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${json.count}</strong></p>`;
+        completeStep('denseEmbed', fileName);
+        markSectionCompleted('dense-embedding-section');
+        unlockSection('sparse-embedding-section');
+        showToast('Dense embeddings generated!', 'success');
+      } else {
+        resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}</p>`;
+      }
+    } catch (err) {
+      resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
+    }
+  });
+
+  document.getElementById('denseUploadForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const resultDiv = document.getElementById('denseEmbeddingResult');
+    const fileInput = document.getElementById('denseUploadInput');
+    const response = await uploadStageArtifact({ stage: 'dense', fileInput, resultDiv });
+    if (!response) return;
+    resultDiv.innerHTML = `<p>✅ Chunks JSON uploaded: ${buildDownloadLink(response.filename)}</p>${formatUploadSummary(response.details)}`;
+    fileInput.value = '';
+    markSectionCompleted('dense-embedding-section');
+    unlockSection('sparse-embedding-section');
+  });
+
+  // Step 3.3: Sparse Embeddings
+  document.getElementById('runSparseEmbeddingBtn').addEventListener('click', async () => {
+    const resultDiv = document.getElementById('sparseEmbeddingResult');
+    if (!ensureSessionPath(resultDiv)) return;
+    resultDiv.textContent = 'Generating sparse embeddings...';
+    const form = new URLSearchParams();
+    form.append('path', currentPath);
+    try {
+      const res = await fetch('/sparse_embedding_generation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: form.toString()
+      });
+      const json = await res.json();
+      if (res.ok && json.status === "success") {
+        const fileName = json.file.split('/').pop();
+        resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${json.count}</strong></p>`;
+        completeStep('sparseEmbed', fileName);
+        markSectionCompleted('sparse-embedding-section');
+        unlockSection('db-section');
+        showToast('Sparse embeddings generated!', 'success');
+      } else {
+        resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}</p>`;
+      }
+    } catch (err) {
+      resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
+    }
+  });
+
+  document.getElementById('sparseUploadForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const resultDiv = document.getElementById('sparseEmbeddingResult');
+    const fileInput = document.getElementById('sparseUploadInput');
+    const response = await uploadStageArtifact({ stage: 'sparse', fileInput, resultDiv });
+    if (!response) return;
+    resultDiv.innerHTML = `<p>✅ Dense embeddings JSON uploaded: ${buildDownloadLink(response.filename)}</p>${formatUploadSummary(response.details)}`;
+    fileInput.value = '';
+    markSectionCompleted('sparse-embedding-section');
+    unlockSection('db-section');
+  });
+
+  // Step 4: Vector DB
+  const dbChoiceSelect = document.getElementById('dbChoice');
+  const pineconeParamsDiv = document.getElementById('pineconeParams');
+  const weaviateParamsDiv = document.getElementById('weaviateParams');
+  const qdrantParamsDiv = document.getElementById('qdrantParams');
+
+  dbChoiceSelect.addEventListener('change', function() {
+    pineconeParamsDiv.style.display = 'none';
+    weaviateParamsDiv.style.display = 'none';
+    qdrantParamsDiv.style.display = 'none';
+    if (this.value === 'pinecone') pineconeParamsDiv.style.display = 'grid';
+    else if (this.value === 'weaviate') weaviateParamsDiv.style.display = 'grid';
+    else if (this.value === 'qdrant') qdrantParamsDiv.style.display = 'grid';
+  });
+  dbChoiceSelect.dispatchEvent(new Event('change'));
+
+  document.getElementById('uploadDbBtn').addEventListener('click', async () => {
+    const resultDiv = document.getElementById('dbResult');
+    if (!ensureSessionPath(resultDiv)) return;
+    resultDiv.textContent = 'Uploading to DB...';
+    const form = new URLSearchParams();
+    form.append('path', currentPath);
+    const dbChoice = dbChoiceSelect.value;
+    form.append('db_choice', dbChoice);
+
+    if (dbChoice === 'pinecone') {
+      form.append('pinecone_index_name', document.getElementById('pineconeIndexName').value);
+      form.append('pinecone_namespace', document.getElementById('pineconeNamespace').value);
+    } else if (dbChoice === 'weaviate') {
+      form.append('weaviate_class_name', document.getElementById('weaviateClassName').value);
+      form.append('weaviate_tenant_name', document.getElementById('weaviateTenantName').value);
+    } else if (dbChoice === 'qdrant') {
+      const qdrantCollection = document.getElementById('qdrantCollectionName').value;
+      if (!qdrantCollection) {
+        resultDiv.textContent = 'Error: Qdrant Collection Name is required.';
         return;
       }
-      resultDiv.textContent = 'Running initial chunking...';
-      const form = new URLSearchParams();
-      form.append('path', currentPath);
+      form.append('qdrant_collection_name', qdrantCollection);
+    }
 
-      // Get the model from the input field (if provided)
-      const modelInput = document.getElementById('recodingModelInput');
-      const model = modelInput ? modelInput.value.trim() : '';
-      if (model) {
-        form.append('model', model);
-        console.log(`Using recoding model: ${model}`);
-      }
-
-      try {
-        const res = await fetch('/initial_text_chunking', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: form.toString()
-        });
-        const json = await res.json();
-        if (res.ok && json.status === "success") {
-          const fileName = json.file.split('/').pop();
-          const downloadLink = buildDownloadLink(fileName);
-          resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
-
-          // Update UI
-          completeStep('chunking', fileName);
-          markSectionCompleted('initial-chunk-section');
-          unlockSection('dense-embedding-section');
-          updateStepTracker('chunking', 'completed');
-        } else {
-          resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}. Details: ${json.details || json.file || 'N/A'}</p>`;
-        }
-      } catch (err) {
-        resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
-      }
-    });
-
-    document.getElementById('initialChunkUploadForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const resultDiv = document.getElementById('initialChunkResult');
-      const fileInput = document.getElementById('initialChunkUploadInput');
-      const response = await uploadStageArtifact({ stage: 'initial', fileInput, resultDiv });
-      if (!response) {
+    try {
+      const res = await fetch('/upload_db', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: form.toString()
+      });
+      let json = null;
+      try { json = await res.json(); } catch (e) {
+        resultDiv.textContent = `Error: ${res.status} ${res.statusText}`;
         return;
       }
-      const downloadLink = buildDownloadLink(response.filename);
-      const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>✅ CSV uploaded: ${downloadLink}</p>${summary}`;
-      fileInput.value = '';
-
-      // Update UI
-      markSectionCompleted('initial-chunk-section');
-      unlockSection('dense-embedding-section');
-    });
-
-    // Step 3.2: Dense Embedding Generation
-    document.getElementById('runDenseEmbeddingBtn').addEventListener('click', async () => {
-      const resultDiv = document.getElementById('denseEmbeddingResult');
-      if (!ensureSessionPath(resultDiv)) {
-        return;
+      if (res.ok && json && json.status) {
+        resultDiv.innerHTML = `<p>✅ Status: <strong>${json.status}</strong>. ${json.message || ''}</p>`;
+        if (json.inserted_count !== undefined) resultDiv.innerHTML += `<p>Items inserted: ${json.inserted_count}</p>`;
+        completeStep('vectorDb', null);
+        markSectionCompleted('db-section');
+        showToast('Uploaded to vector DB!', 'success');
+      } else {
+        resultDiv.textContent = `Error: ${json?.error || res.statusText}`;
       }
-      resultDiv.textContent = 'Generating dense embeddings...';
-      const form = new URLSearchParams();
-      form.append('path', currentPath);
+    } catch (err) {
+      resultDiv.textContent = 'DB upload failed: ' + err.message;
+    }
+  });
 
-      try {
-        const res = await fetch('/dense_embedding_generation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: form.toString()
-        });
-        const json = await res.json();
-        if (res.ok && json.status === "success") {
-          const fileName = json.file.split('/').pop();
-          const downloadLink = buildDownloadLink(fileName);
-          resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
+  // Zotero Notes
+  document.getElementById('generateZoteroNotesBtn').addEventListener('click', async () => {
+    const resultDiv = document.getElementById('zoteroLog');
+    const progressDiv = document.getElementById('zoteroProgress');
+    const progressBar = document.getElementById('zoteroProgressBar');
+    const progressCount = document.getElementById('zoteroProgressCount');
+    const progressStatus = document.getElementById('zoteroProgressStatus');
+    const progressText = document.getElementById('zoteroProgressText');
 
-          // Update UI
-          completeStep('denseEmbed', fileName);
-          markSectionCompleted('dense-embedding-section');
-          unlockSection('sparse-embedding-section');
-        } else {
-          resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}. Details: ${json.details || json.file || 'N/A'}</p>`;
-        }
-      } catch (err) {
-        resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
-      }
-    });
+    if (!ensureSessionPath(resultDiv)) return;
 
-    document.getElementById('denseUploadForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const resultDiv = document.getElementById('denseEmbeddingResult');
-      const fileInput = document.getElementById('denseUploadInput');
-      const response = await uploadStageArtifact({ stage: 'dense', fileInput, resultDiv });
-      if (!response) {
-        return;
-      }
-      const downloadLink = buildDownloadLink(response.filename);
-      const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>✅ Chunks JSON uploaded: ${downloadLink}</p>${summary}`;
-      fileInput.value = '';
+    resultDiv.innerHTML = '';
+    progressDiv.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressCount.textContent = '0/0';
+    progressStatus.textContent = 'Starting...';
+    progressText.textContent = '';
 
-      // Update UI
-      markSectionCompleted('dense-embedding-section');
-      unlockSection('sparse-embedding-section');
-    });
+    const model = document.getElementById('zoteroModelInput').value.trim();
+    const extendedAnalysis = document.getElementById('extendedAnalysisCheckbox').checked;
 
-    // Step 3.3: Sparse Embedding Generation
-    document.getElementById('runSparseEmbeddingBtn').addEventListener('click', async () => {
-      const resultDiv = document.getElementById('sparseEmbeddingResult');
-      if (!ensureSessionPath(resultDiv)) {
-        return;
-      }
-      resultDiv.textContent = 'Generating sparse embeddings...';
-      const form = new URLSearchParams();
-      form.append('path', currentPath);
+    const formData = new FormData();
+    formData.append('session', currentPath);
+    formData.append('model', model);
+    formData.append('extended_analysis', extendedAnalysis ? 'true' : 'false');
 
-      try {
-        const res = await fetch('/sparse_embedding_generation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: form.toString()
-        });
-        const json = await res.json();
-        if (res.ok && json.status === "success") {
-          const fileName = json.file.split('/').pop();
-          const downloadLink = buildDownloadLink(fileName);
-          resultDiv.innerHTML = `<p>✅ Fichier genere : ${downloadLink}</p><p>Nombre de chunks : <strong>${json.count}</strong></p>`;
+    const processedItems = [];
 
-          // Update UI
-          completeStep('sparseEmbed', fileName);
-          markSectionCompleted('sparse-embedding-section');
-          unlockSection('db-section');
-          updateStepTracker('sparseEmbed', 'completed');
-        } else {
-          resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}. Details: ${json.details || json.file || 'N/A'}</p>`;
-        }
-      } catch (err) {
-        resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
-      }
-    });
+    try {
+      const response = await fetch('/generate_zotero_notes_sse', { method: 'POST', body: formData });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-    document.getElementById('sparseUploadForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const resultDiv = document.getElementById('sparseEmbeddingResult');
-      const fileInput = document.getElementById('sparseUploadInput');
-      const response = await uploadStageArtifact({ stage: 'sparse', fileInput, resultDiv });
-      if (!response) {
-        return;
-      }
-      const downloadLink = buildDownloadLink(response.filename);
-      const summary = formatUploadSummary(response.details);
-      resultDiv.innerHTML = `<p>✅ Dense embeddings JSON uploaded: ${downloadLink}</p>${summary}`;
-      fileInput.value = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop();
 
-      // Update UI
-      markSectionCompleted('sparse-embedding-section');
-      unlockSection('db-section');
-    });
-
-    // Step 4: Upload to DB
-    const dbChoiceSelect = document.getElementById('dbChoice');
-    const pineconeParamsDiv = document.getElementById('pineconeParams');
-    const weaviateParamsDiv = document.getElementById('weaviateParams');
-    const qdrantParamsDiv = document.getElementById('qdrantParams');
-
-    dbChoiceSelect.addEventListener('change', function() {
-      pineconeParamsDiv.style.display = 'none';
-      weaviateParamsDiv.style.display = 'none';
-      qdrantParamsDiv.style.display = 'none';
-
-      if (this.value === 'pinecone') {
-        pineconeParamsDiv.style.display = 'block';
-      } else if (this.value === 'weaviate') {
-        weaviateParamsDiv.style.display = 'block';
-      } else if (this.value === 'qdrant') {
-        qdrantParamsDiv.style.display = 'block';
-      }
-    });
-
-    // Trigger change event on load to show default params
-    dbChoiceSelect.dispatchEvent(new Event('change'));
-
-    document.getElementById('uploadDbBtn').addEventListener('click', async () => {
-      const resultDiv = document.getElementById('dbResult');
-      if (!ensureSessionPath(resultDiv)) {
-        return;
-      }
-      resultDiv.textContent = 'Uploading to DB...';
-      const form = new URLSearchParams();
-      form.append('path', currentPath);
-      const dbChoice = dbChoiceSelect.value;
-      form.append('db_choice', dbChoice);
-
-      if (dbChoice === 'pinecone') {
-        form.append('pinecone_index_name', document.getElementById('pineconeIndexName').value);
-        form.append('pinecone_namespace', document.getElementById('pineconeNamespace').value);
-      } else if (dbChoice === 'weaviate') {
-        form.append('weaviate_class_name', document.getElementById('weaviateClassName').value);
-        form.append('weaviate_tenant_name', document.getElementById('weaviateTenantName').value);
-      } else if (dbChoice === 'qdrant') {
-        const qdrantCollectionName = document.getElementById('qdrantCollectionName').value;
-        if (!qdrantCollectionName) {
-          resultDiv.textContent = 'Error: Qdrant Collection Name is required.';
-          return;
-        }
-        form.append('qdrant_collection_name', qdrantCollectionName);
-      }
-
-      try {
-        const res = await fetch('/upload_db', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: form.toString()
-        });
-
-        // Try to parse JSON regardless, but handle errors carefully
-        let json = null;
-        try {
-          json = await res.json();
-        } catch (e) {
-          // Failed to parse JSON, maybe it's a non-JSON error response
-          console.error("Failed to parse JSON response:", e);
-          // If res.ok is also false, then it's likely a server error with non-JSON body
-          if (!res.ok) {
-            resultDiv.textContent = `Error: ${res.status} ${res.statusText}. Response body was not valid JSON.`;
-            return;
-          }
-          // If res.ok is true but JSON parsing failed, that's unexpected.
-          resultDiv.textContent = 'Error: Received OK status but failed to parse JSON response.';
-          return;
-        }
-
-        // Now 'json' is either the parsed object or null if parsing failed but res.ok was true (unlikely path)
-        if (res.ok) {
-          if (json && typeof json.status === 'string' && json.status.trim() !== '') { // More robust check for status
-            let messageText = json.message || 'Operation completed.';
-            let countText = (json.inserted_count !== undefined) ? `Items processed/inserted: ${json.inserted_count}` : '';
-            resultDiv.innerHTML = `<p>✅ Status: <strong>${String(json.status)}</strong>. Message: ${String(messageText)}</p>`;
-            if (countText) {
-                 resultDiv.innerHTML += `<p>${String(countText)}</p>`;
-            }
-            if (json && Object.prototype.hasOwnProperty.call(json, 'namespace')) {
-              const nsLabel = json.namespace ? String(json.namespace) : '(default namespace)';
-              resultDiv.innerHTML += `<p>Pinecone namespace: <strong>${nsLabel}</strong></p>`;
-            }
-
-            // Update UI
-            completeStep('vectorDb', null);
-            markSectionCompleted('db-section');
-            updateStepTracker('vectorDb', 'completed');
-          } else {
-            // This case means res.ok was true, but json is null or lacks a status.
-            // This indicates an issue with the server sending a 2xx response with unexpected/empty JSON.
-            resultDiv.textContent = 'Error: Received success status but response format is unexpected.';
-            console.error("Unexpected success response format:", json);
-          }
-        } else { // res.ok is false (e.g., 4xx, 5xx errors)
-          // 'json' here would be the parsed error response from Flask (e.g., {"error": ..., "status": ...})
-          let errorMsg = 'Error: ';
-          if (json && json.error) {
-            errorMsg += json.error;
-          } else if (json && json.message) { // Some of my Flask error responses might use 'message'
-            errorMsg += json.message;
-          } else {
-            errorMsg += `${res.status} ${res.statusText}`;
-          }
-          resultDiv.textContent = errorMsg;
-          if (json && json.details) {
-            resultDiv.innerHTML += `<br><small>Details: ${String(json.details)}</small>`;
-          }
-           if (json && json.status) { // The nested status from Pinecone error
-            resultDiv.innerHTML += `<br><small>Original Status: ${String(json.status)}</small>`;
-          }
-        }
-      } catch (err) { // Catch network errors or other unhandled issues from fetch itself
-        resultDiv.textContent = 'DB upload request failed: ' + err.message;
-        console.error("Fetch request error:", err);
-      }
-    });
-
-    // Zotero Notes - Generation with SSE Progress
-    document.getElementById('generateZoteroNotesBtn').addEventListener('click', async () => {
-      const resultDiv = document.getElementById('zoteroLog');
-      const progressDiv = document.getElementById('zoteroProgress');
-      const progressBar = document.getElementById('zoteroProgressBar');
-      const progressCount = document.getElementById('zoteroProgressCount');
-      const progressStatus = document.getElementById('zoteroProgressStatus');
-      const progressText = document.getElementById('zoteroProgressText');
-
-      if (!ensureSessionPath(resultDiv)) {
-        return;
-      }
-
-      // Clear previous results
-      resultDiv.innerHTML = '';
-      progressDiv.style.display = 'block';
-      progressBar.style.width = '0%';
-      progressCount.textContent = '0/0';
-      progressStatus.textContent = 'Starting...';
-      progressText.textContent = '';
-
-      const modelInput = document.getElementById('zoteroModelInput').value.trim();
-      const model = modelInput || '';
-      const extendedAnalysis = document.getElementById('extendedAnalysisCheckbox').checked;
-
-      const formData = new FormData();
-      formData.append('session', currentPath);
-      formData.append('model', model);
-      formData.append('extended_analysis', extendedAnalysis ? 'true' : 'false');
-
-      // Track items for final display
-      const processedItems = [];
-
-      try {
-        const response = await fetch('/generate_zotero_notes_sse', {
-          method: 'POST',
-          body: formData
-        });
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n\n');
-          buffer = lines.pop();
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.substring(6));
-
-                if (data.type === 'init') {
-                  progressCount.textContent = `0/${data.total}`;
-                  progressStatus.textContent = data.message || 'Processing...';
-                } else if (data.type === 'progress') {
-                  const percent = Math.round((data.current / data.total) * 100);
-                  progressBar.style.width = `${percent}%`;
-                  progressCount.textContent = `${data.current}/${data.total}`;
-
-                  // Status icon based on result
-                  let statusIcon = '';
-                  switch (data.status) {
-                    case 'created': statusIcon = '✅'; break;
-                    case 'exists': statusIcon = 'ℹ️'; break;
-                    case 'skipped': statusIcon = '⏭️'; break;
-                    case 'error': statusIcon = '❌'; break;
-                    default: statusIcon = '⏳';
-                  }
-
-                  progressStatus.textContent = `${statusIcon} ${data.item || 'Processing...'}`;
-                  progressText.textContent = data.status ? `Status: ${data.status}` : '';
-
-                  // Track for final display
-                  if (data.item) {
-                    processedItems.push(data);
-                  }
-                } else if (data.type === 'complete') {
-                  progressBar.style.width = '100%';
-                  progressStatus.textContent = 'Complete!';
-
-                  const summary = data.summary;
-                  let summaryHTML = `<div style="background: #e8f5e9; border-radius: 4px; padding: 10px; margin-bottom: 15px;">
-                    <strong>Summary:</strong><br>
-                    ✅ Created: ${summary.created}<br>
-                    ℹ️ Already exists: ${summary.exists}<br>
-                    ⏭️ Skipped: ${summary.skipped}<br>
-                    ❌ Errors: ${summary.errors}
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.substring(6));
+              if (data.type === 'init') {
+                progressCount.textContent = `0/${data.total}`;
+                progressStatus.textContent = data.message || 'Processing...';
+              } else if (data.type === 'progress') {
+                const percent = Math.round((data.current / data.total) * 100);
+                progressBar.style.width = `${percent}%`;
+                progressCount.textContent = `${data.current}/${data.total}`;
+                const statusIcon = { created: '✅', exists: 'ℹ️', skipped: '⏭️', error: '❌' }[data.status] || '⏳';
+                progressStatus.textContent = `${statusIcon} ${data.item || 'Processing...'}`;
+                progressText.textContent = data.status ? `Status: ${data.status}` : '';
+                if (data.item) processedItems.push(data);
+              } else if (data.type === 'complete') {
+                progressBar.style.width = '100%';
+                progressStatus.textContent = 'Complete!';
+                const s = data.summary;
+                let html = `<div class="alert alert-success mb-4"><strong>Summary:</strong> ✅ Created: ${s.created} | ℹ️ Exists: ${s.exists} | ⏭️ Skipped: ${s.skipped} | ❌ Errors: ${s.errors}</div>`;
+                html += '<div class="text-sm"><strong>Details:</strong>';
+                processedItems.forEach(item => {
+                  const icon = { created: '✅', exists: 'ℹ️', skipped: '⏭️', error: '❌' }[item.status] || '❓';
+                  const color = { created: 'var(--color-success)', exists: 'var(--color-brand-primary)', skipped: 'var(--color-warning)', error: 'var(--color-error)' }[item.status] || 'var(--color-text-tertiary)';
+                  html += `<div style="margin: 8px 0; padding: 8px; background: var(--color-bg-tertiary); border-left: 3px solid ${color}; border-radius: 4px;">
+                    ${icon} <strong>${item.item}</strong><br><small class="text-secondary">Status: ${item.status}</small>
+                    ${item.message ? `<br><small class="text-tertiary">${item.message}</small>` : ''}
                   </div>`;
-
-                  // Display detailed results
-                  let detailsHTML = '<div style="font-size: 0.9em;"><strong>Details:</strong><br>';
-
-                  processedItems.forEach((item) => {
-                    let statusIcon = '';
-                    let statusColor = '';
-
-                    switch (item.status) {
-                      case 'created': statusIcon = '✅'; statusColor = '#4caf50'; break;
-                      case 'exists': statusIcon = 'ℹ️'; statusColor = '#2196f3'; break;
-                      case 'skipped': statusIcon = '⏭️'; statusColor = '#ff9800'; break;
-                      case 'error': statusIcon = '❌'; statusColor = '#f44336'; break;
-                      default: statusIcon = '❓'; statusColor = '#9e9e9e';
-                    }
-
-                    detailsHTML += `<div style="margin: 8px 0; padding: 8px; background: #f5f5f5; border-left: 4px solid ${statusColor};">
-                      ${statusIcon} <strong>${item.item}</strong><br>
-                      <small style="color: #666;">Status: ${item.status}</small>
-                      ${item.message ? `<br><small style="color: #666;">${item.message}</small>` : ''}
-                    </div>`;
-                  });
-
-                  detailsHTML += '</div>';
-                  resultDiv.innerHTML = summaryHTML + detailsHTML;
-
-                  // Update UI
-                  completeStep('zoteroNotes', null);
-                  markSectionCompleted('zotero-notes-section');
-                  updateStepTracker('zoteroNotes', 'completed');
-
-                } else if (data.type === 'error') {
-                  progressStatus.textContent = 'Error';
-                  resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
-                }
-              } catch (e) {
-                console.error('Failed to parse SSE data:', e);
+                });
+                html += '</div>';
+                resultDiv.innerHTML = html;
+                completeStep('zoteroNotes', null);
+                markSectionCompleted('zotero-notes-section');
+                showToast('Zotero notes generated!', 'success');
+              } else if (data.type === 'error') {
+                progressStatus.textContent = 'Error';
+                resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
               }
+            } catch (e) {
+              console.error('Failed to parse SSE:', e);
             }
           }
         }
-      } catch (err) {
-        progressStatus.textContent = 'Failed';
-        resultDiv.innerHTML = `<p class="error-text">Request failed: ${err.message}</p>`;
-        console.error("Zotero notes generation error:", err);
       }
-    });
+    } catch (err) {
+      progressStatus.textContent = 'Failed';
+      resultDiv.innerHTML = `<p class="error-text">Request failed: ${err.message}</p>`;
+    }
+  });
 
-    // Global Stop Button
-    document.getElementById('stopAllScriptsBtn').addEventListener('click', async () => {
-      const stopResultDiv = document.getElementById('stopScriptsResult');
-      stopResultDiv.textContent = 'Attempting to stop scripts...';
-      stopResultDiv.style.display = 'block';
-      try {
-        const res = await fetch('/stop_all_scripts', { method: 'POST' });
-        const json = await res.json();
-        if (res.ok) {
-          stopResultDiv.textContent = `Stop command sent. Status: ${json.status}. Details: ${json.details || 'N/A'}`;
-        } else {
-          stopResultDiv.textContent = `Error stopping scripts: ${json.error || res.statusText}`;
-        }
-      } catch (err) {
-        stopResultDiv.textContent = 'Failed to send stop command: ' + err;
+  // Stop All Scripts
+  document.getElementById('stopAllScriptsBtn').addEventListener('click', async () => {
+    const stopResultDiv = document.getElementById('stopScriptsResult');
+    stopResultDiv.textContent = 'Stopping scripts...';
+    stopResultDiv.style.display = 'block';
+    try {
+      const res = await fetch('/stop_all_scripts', { method: 'POST' });
+      const json = await res.json();
+      if (res.ok) {
+        stopResultDiv.textContent = `Stop command sent. Status: ${json.status}`;
+        showToast('Scripts stopped', 'info');
+      } else {
+        stopResultDiv.textContent = `Error: ${json.error || res.statusText}`;
       }
-    });
-  </script>
-</body>
-</html>
+    } catch (err) {
+      stopResultDiv.textContent = 'Failed to stop: ' + err;
+    }
+  });
+</script>
+{% endblock %}

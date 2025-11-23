@@ -1,163 +1,429 @@
 {% extends "base.html" %}
 
-{% block title %}{{ project.name }} - MyDoc Intelligence{% endblock %}
+{% block title %}{{ project.name }} - RAGpy{% endblock %}
+
+{% set show_sidebar = true %}
 
 {% block content %}
-<div class="container-fluid">
-    <!-- Project header -->
-    <div class="d-flex justify-content-between align-items-start mb-4">
-        <div>
-            <nav aria-label="breadcrumb">
-                <ol class="breadcrumb">
-                    <li class="breadcrumb-item"><a href="/">Accueil</a></li>
-                    <li class="breadcrumb-item"><a href="/my-projects">Mes projets</a></li>
-                    <li class="breadcrumb-item active">{{ project.name }}</li>
-                </ol>
-            </nav>
-            <h1>{{ project.name }}</h1>
+<div class="page-container">
+    <!-- Breadcrumb -->
+    <nav class="breadcrumb-nav">
+        <a href="/" class="breadcrumb-link">Accueil</a>
+        <i class="bi bi-chevron-right breadcrumb-sep"></i>
+        <a href="/projects" class="breadcrumb-link">Mes projets</a>
+        <i class="bi bi-chevron-right breadcrumb-sep"></i>
+        <span class="breadcrumb-current">{{ project.name }}</span>
+    </nav>
+
+    <!-- Page Header -->
+    <div class="page-header-flex">
+        <div class="page-header-content">
+            <h1 class="page-title">{{ project.name }}</h1>
             {% if project.description %}
-            <p class="text-muted">{{ project.description }}</p>
+            <p class="page-subtitle">{{ project.description }}</p>
             {% endif %}
         </div>
-        <div>
-            <span class="badge bg-secondary">{{ user_role }}</span>
+        <div class="page-header-actions">
+            <span class="badge badge-secondary badge-lg">{{ user_role }}</span>
         </div>
     </div>
 
-    <!-- Project info -->
-    <div class="row mb-4">
-        <div class="col-md-8">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0"><i class="bi bi-info-circle"></i> Informations du projet</h5>
-                </div>
-                <div class="card-body">
-                    <div class="row">
-                        <div class="col-md-6">
-                            <p><strong>Propri&eacute;taire :</strong> {{ owner.full_name if owner else 'Inconnu' }}</p>
-                            <p><strong>Cr&eacute;&eacute; le :</strong> {{ project.created_at.strftime('%d/%m/%Y') if project.created_at else '-' }}</p>
-                        </div>
-                        <div class="col-md-6">
-                            <p><strong>Dossier de session :</strong> {{ project.session_folder or 'Non d&eacute;fini' }}</p>
-                            <p><strong>Base vectorielle :</strong> {{ project.vector_db_type or 'Non configur&eacute;e' }}</p>
-                        </div>
+    <!-- Info Grid -->
+    <div class="info-grid">
+        <!-- Project Info Card -->
+        <div class="card">
+            <div class="card-header">
+                <h2 class="card-title">
+                    <i class="bi bi-info-circle"></i>
+                    Informations
+                </h2>
+            </div>
+            <div class="card-body">
+                <div class="info-list">
+                    <div class="info-item">
+                        <span class="info-label">Proprietaire</span>
+                        <span class="info-value">{{ owner.full_name if owner else 'Inconnu' }}</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Cree le</span>
+                        <span class="info-value">{{ project.created_at.strftime('%d/%m/%Y') if project.created_at else '-' }}</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Dossier de session</span>
+                        <span class="info-value">
+                            <code>{{ project.session_folder or 'Non defini' }}</code>
+                        </span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Base vectorielle</span>
+                        <span class="info-value">{{ project.vector_db_type or 'Non configuree' }}</span>
                     </div>
                 </div>
             </div>
         </div>
-        <div class="col-md-4">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0"><i class="bi bi-gear"></i> Actions</h5>
-                </div>
-                <div class="card-body">
-                    <div class="d-grid gap-2">
-                        {% if user_role == 'owner' or current_user.is_admin %}
-                        <button class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editProjectModal">
-                            <i class="bi bi-pencil"></i> Modifier le projet
-                        </button>
-                        <button class="btn btn-outline-danger" onclick="confirmDelete()">
-                            <i class="bi bi-trash"></i> Supprimer le projet
-                        </button>
-                        {% endif %}
-                    </div>
+
+        <!-- Actions Card -->
+        <div class="card">
+            <div class="card-header">
+                <h2 class="card-title">
+                    <i class="bi bi-gear"></i>
+                    Actions
+                </h2>
+            </div>
+            <div class="card-body">
+                <div class="actions-stack">
+                    <a href="/?project={{ project.id }}" class="btn btn-primary btn-full">
+                        <i class="bi bi-play-circle"></i>
+                        Lancer un pipeline
+                    </a>
+                    {% if user_role == 'owner' or current_user.is_admin %}
+                    <button class="btn btn-secondary btn-full" onclick="openModal('editProjectModal')">
+                        <i class="bi bi-pencil"></i>
+                        Modifier le projet
+                    </button>
+                    <button class="btn btn-danger btn-full" onclick="openModal('deleteModal')">
+                        <i class="bi bi-trash"></i>
+                        Supprimer le projet
+                    </button>
+                    {% endif %}
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Pipeline Sessions section -->
-    <div class="card mb-4">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="mb-0"><i class="bi bi-diagram-3"></i> Sessions de pipeline</h5>
-            <a href="/pipeline?project={{ project.id }}" class="btn btn-sm btn-primary">
-                <i class="bi bi-plus-lg"></i> Nouvelle session
+    <!-- Pipeline Sessions -->
+    <div class="section">
+        <div class="section-header-flex">
+            <h2 class="section-title">
+                <i class="bi bi-diagram-3"></i>
+                Sessions de pipeline
+            </h2>
+            <a href="/?project={{ project.id }}" class="btn btn-primary btn-sm">
+                <i class="bi bi-plus-lg"></i>
+                Nouvelle session
             </a>
         </div>
-        <div class="card-body">
-            <div id="sessionsList">
-                <p class="text-muted">Chargement...</p>
+        <div class="card">
+            <div class="card-body" id="sessionsList">
+                <div class="loading-placeholder">
+                    <span class="spinner"></span>
+                    <span>Chargement des sessions...</span>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- Members section -->
-    <div class="card mb-4">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="mb-0"><i class="bi bi-people"></i> Membres du projet</h5>
+    <!-- Members -->
+    <div class="section">
+        <div class="section-header-flex">
+            <h2 class="section-title">
+                <i class="bi bi-people"></i>
+                Membres du projet
+            </h2>
             {% if user_role == 'owner' or current_user.is_admin %}
-            <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addMemberModal">
-                <i class="bi bi-plus-lg"></i> Ajouter
+            <button class="btn btn-primary btn-sm" onclick="openModal('addMemberModal')">
+                <i class="bi bi-plus-lg"></i>
+                Ajouter
             </button>
             {% endif %}
         </div>
-        <div class="card-body">
-            <div id="membersList">
-                <p class="text-muted">Chargement...</p>
+        <div class="card">
+            <div class="card-body" id="membersList">
+                <div class="loading-placeholder">
+                    <span class="spinner"></span>
+                    <span>Chargement des membres...</span>
+                </div>
             </div>
         </div>
     </div>
 </div>
 
 <!-- Edit Project Modal -->
-<div class="modal fade" id="editProjectModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Modifier le projet</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form id="editProjectForm">
-                    <div class="mb-3">
-                        <label for="editProjectName" class="form-label">Nom du projet</label>
-                        <input type="text" class="form-control" id="editProjectName" value="{{ project.name }}" required>
-                    </div>
-                    <div class="mb-3">
-                        <label for="editProjectDescription" class="form-label">Description</label>
-                        <textarea class="form-control" id="editProjectDescription" rows="3">{{ project.description or '' }}</textarea>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
-                <button type="button" class="btn btn-primary" onclick="updateProject()">Enregistrer</button>
-            </div>
+<div class="modal" id="editProjectModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Modifier le projet</h3>
+            <button class="modal-close" onclick="closeModal('editProjectModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <form id="editProjectForm">
+                <div class="form-group">
+                    <label for="editProjectName" class="form-label">Nom du projet</label>
+                    <input type="text" class="form-input" id="editProjectName" value="{{ project.name }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="editProjectDescription" class="form-label">Description</label>
+                    <textarea class="form-textarea" id="editProjectDescription" rows="3">{{ project.description or '' }}</textarea>
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('editProjectModal')">Annuler</button>
+            <button type="button" class="btn btn-primary" onclick="updateProject()">Enregistrer</button>
         </div>
     </div>
 </div>
 
 <!-- Add Member Modal -->
-<div class="modal fade" id="addMemberModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Ajouter un membre</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form id="addMemberForm">
-                    <div class="mb-3">
-                        <label for="memberEmail" class="form-label">Email de l'utilisateur</label>
-                        <input type="email" class="form-control" id="memberEmail" required placeholder="utilisateur@email.com">
-                    </div>
-                    <div class="mb-3">
-                        <label for="memberRole" class="form-label">R&ocirc;le</label>
-                        <select class="form-select" id="memberRole">
-                            <option value="viewer">Lecteur</option>
-                            <option value="collaborator">Collaborateur</option>
-                        </select>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
-                <button type="button" class="btn btn-primary" onclick="addMember()">Ajouter</button>
-            </div>
+<div class="modal" id="addMemberModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Ajouter un membre</h3>
+            <button class="modal-close" onclick="closeModal('addMemberModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <form id="addMemberForm">
+                <div class="form-group">
+                    <label for="memberEmail" class="form-label">Email de l'utilisateur</label>
+                    <input type="email" class="form-input" id="memberEmail" required placeholder="utilisateur@email.com">
+                </div>
+                <div class="form-group">
+                    <label for="memberRole" class="form-label">Role</label>
+                    <select class="form-select" id="memberRole">
+                        <option value="viewer">Lecteur</option>
+                        <option value="collaborator">Collaborateur</option>
+                    </select>
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('addMemberModal')">Annuler</button>
+            <button type="button" class="btn btn-primary" onclick="addMember()">Ajouter</button>
         </div>
     </div>
 </div>
 
+<!-- Delete Project Modal -->
+<div class="modal" id="deleteModal">
+    <div class="modal-content modal-sm">
+        <div class="modal-header">
+            <h3 class="modal-title">Supprimer le projet</h3>
+            <button class="modal-close" onclick="closeModal('deleteModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div class="delete-warning">
+                <div class="delete-warning-icon">
+                    <i class="bi bi-exclamation-triangle"></i>
+                </div>
+                <p>Supprimer ce projet?</p>
+                <p class="text-danger text-sm"><strong>Cette action est irreversible.</strong></p>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('deleteModal')">Annuler</button>
+            <button type="button" class="btn btn-danger" onclick="confirmDelete()">Supprimer</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    .page-container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: var(--space-6);
+    }
+
+    /* Breadcrumb */
+    .breadcrumb-nav {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        margin-bottom: var(--space-4);
+        font-size: var(--font-size-sm);
+    }
+
+    .breadcrumb-link {
+        color: var(--color-text-secondary);
+        text-decoration: none;
+    }
+
+    .breadcrumb-link:hover {
+        color: var(--color-brand-primary);
+    }
+
+    .breadcrumb-sep {
+        color: var(--color-text-muted);
+        font-size: var(--font-size-xs);
+    }
+
+    .breadcrumb-current {
+        color: var(--color-text-primary);
+        font-weight: var(--font-weight-medium);
+    }
+
+    /* Page Header */
+    .page-header-flex {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: var(--space-4);
+        margin-bottom: var(--space-6);
+    }
+
+    .page-title {
+        font-size: var(--font-size-2xl);
+        font-weight: var(--font-weight-bold);
+        color: var(--color-text-primary);
+        margin-bottom: var(--space-2);
+    }
+
+    .page-subtitle {
+        color: var(--color-text-secondary);
+    }
+
+    .badge-lg {
+        padding: var(--space-2) var(--space-3);
+        font-size: var(--font-size-sm);
+    }
+
+    /* Info Grid */
+    .info-grid {
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        gap: var(--space-6);
+        margin-bottom: var(--space-8);
+    }
+
+    @media (max-width: 768px) {
+        .info-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .card-title {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        font-size: var(--font-size-base);
+        font-weight: var(--font-weight-semibold);
+        margin: 0;
+    }
+
+    .info-list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-4);
+    }
+
+    .info-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-bottom: var(--space-3);
+        border-bottom: 1px solid var(--color-border-light);
+    }
+
+    .info-item:last-child {
+        border-bottom: none;
+        padding-bottom: 0;
+    }
+
+    .info-label {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+    }
+
+    .info-value {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+    }
+
+    .info-value code {
+        font-size: var(--font-size-xs);
+        background: var(--color-surface-hover);
+        padding: var(--space-1) var(--space-2);
+        border-radius: var(--radius-sm);
+    }
+
+    .actions-stack {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+    }
+
+    .btn-full {
+        width: 100%;
+        justify-content: center;
+    }
+
+    /* Sections */
+    .section {
+        margin-bottom: var(--space-8);
+    }
+
+    .section-header-flex {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: var(--space-4);
+    }
+
+    .section-title {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+        margin: 0;
+    }
+
+    .loading-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-3);
+        padding: var(--space-8);
+        color: var(--color-text-secondary);
+    }
+
+    /* Modal */
+    .modal-sm .modal-content {
+        max-width: 400px;
+    }
+
+    .delete-warning {
+        text-align: center;
+        padding: var(--space-4) 0;
+    }
+
+    .delete-warning-icon {
+        width: 64px;
+        height: 64px;
+        margin: 0 auto var(--space-4);
+        background: var(--color-danger-bg);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--color-danger);
+        font-size: 1.75rem;
+    }
+
+    .text-sm {
+        font-size: var(--font-size-sm);
+    }
+
+    /* Sessions & Members Table */
+    .empty-state-small {
+        text-align: center;
+        padding: var(--space-8);
+    }
+
+    .empty-state-small-icon {
+        font-size: 2.5rem;
+        color: var(--color-text-muted);
+        margin-bottom: var(--space-3);
+    }
+</style>
 {% endblock %}
 
 {% block extra_js %}
@@ -184,38 +450,45 @@ async function loadMembers() {
 function renderMembers(members) {
     const container = document.getElementById('membersList');
 
-    if (members.length === 0) {
-        container.innerHTML = '<p class="text-muted">Aucun membre</p>';
+    if (!members || members.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state-small">
+                <div class="empty-state-small-icon"><i class="bi bi-people"></i></div>
+                <p class="text-muted">Aucun membre</p>
+            </div>
+        `;
         return;
     }
 
     container.innerHTML = `
-        <table class="table table-hover mb-0">
-            <thead>
-                <tr>
-                    <th>Nom</th>
-                    <th>Email</th>
-                    <th>R&ocirc;le</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${members.map(m => `
+        <div class="table-container">
+            <table class="table">
+                <thead>
                     <tr>
-                        <td>${escapeHtml(m.full_name)}</td>
-                        <td>${escapeHtml(m.email)}</td>
-                        <td><span class="badge bg-secondary">${m.role}</span></td>
-                        <td>
-                            ${m.role !== 'owner' ? `
-                                <button class="btn btn-sm btn-outline-danger" onclick="removeMember(${m.user_id})">
-                                    <i class="bi bi-x"></i>
-                                </button>
-                            ` : ''}
-                        </td>
+                        <th>Nom</th>
+                        <th>Email</th>
+                        <th>Role</th>
+                        <th class="text-right">Actions</th>
                     </tr>
-                `).join('')}
-            </tbody>
-        </table>
+                </thead>
+                <tbody>
+                    ${members.map(m => `
+                        <tr>
+                            <td>${escapeHtml(m.full_name)}</td>
+                            <td>${escapeHtml(m.email)}</td>
+                            <td><span class="badge badge-secondary">${m.role}</span></td>
+                            <td class="text-right">
+                                ${m.role !== 'owner' ? `
+                                    <button class="btn btn-ghost btn-sm" onclick="removeMember(${m.user_id})">
+                                        <i class="bi bi-x-lg"></i>
+                                    </button>
+                                ` : ''}
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
     `;
 }
 
@@ -237,11 +510,11 @@ async function updateProject() {
             location.reload();
         } else {
             const data = await response.json();
-            showFlash(data.detail || 'Erreur', 'danger');
+            showToast(data.detail || 'Erreur', 'error');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFlash('Erreur lors de la mise &agrave; jour', 'danger');
+        showToast('Erreur lors de la mise a jour', 'error');
     }
 }
 
@@ -260,22 +533,22 @@ async function addMember() {
         });
 
         if (response.ok) {
-            bootstrap.Modal.getInstance(document.getElementById('addMemberModal')).hide();
+            closeModal('addMemberModal');
             document.getElementById('addMemberForm').reset();
             loadMembers();
-            showFlash('Membre ajout&eacute;', 'success');
+            showToast('Membre ajoute', 'success');
         } else {
             const data = await response.json();
-            showFlash(data.detail || 'Erreur', 'danger');
+            showToast(data.detail || 'Erreur', 'error');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFlash('Erreur lors de l\'ajout', 'danger');
+        showToast('Erreur lors de l\'ajout', 'error');
     }
 }
 
 async function removeMember(userId) {
-    if (!confirm('Retirer ce membre du projet ?')) return;
+    if (!confirm('Retirer ce membre du projet?')) return;
 
     try {
         const response = await fetch(`/projects/${projectId}/members/${userId}`, {
@@ -287,20 +560,18 @@ async function removeMember(userId) {
 
         if (response.ok) {
             loadMembers();
-            showFlash('Membre retir&eacute;', 'success');
+            showToast('Membre retire', 'success');
         } else {
             const data = await response.json();
-            showFlash(data.detail || 'Erreur', 'danger');
+            showToast(data.detail || 'Erreur', 'error');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFlash('Erreur lors de la suppression', 'danger');
+        showToast('Erreur lors de la suppression', 'error');
     }
 }
 
 async function confirmDelete() {
-    if (!confirm('Supprimer ce projet ? Cette action est irr&eacute;versible.')) return;
-
     try {
         const response = await fetch(`/projects/${projectId}`, {
             method: 'DELETE',
@@ -310,14 +581,14 @@ async function confirmDelete() {
         });
 
         if (response.ok) {
-            window.location.href = '/my-projects';
+            window.location.href = '/projects';
         } else {
             const data = await response.json();
-            showFlash(data.detail || 'Erreur', 'danger');
+            showToast(data.detail || 'Erreur', 'error');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFlash('Erreur lors de la suppression', 'danger');
+        showToast('Erreur lors de la suppression', 'error');
     }
 }
 
@@ -327,8 +598,7 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// --- Sessions Management ---
-
+// Sessions Management
 async function loadSessions() {
     try {
         const response = await fetch(`/api/pipeline/projects/${projectId}/sessions`, {
@@ -341,30 +611,31 @@ async function loadSessions() {
             const data = await response.json();
             renderSessions(data.sessions);
         } else {
-            document.getElementById('sessionsList').innerHTML =
-                '<p class="text-muted">Impossible de charger les sessions</p>';
+            document.getElementById('sessionsList').innerHTML = `
+                <div class="empty-state-small">
+                    <p class="text-muted">Impossible de charger les sessions</p>
+                </div>
+            `;
         }
     } catch (error) {
         console.error('Error loading sessions:', error);
-        document.getElementById('sessionsList').innerHTML =
-            '<p class="text-muted">Erreur de chargement</p>';
     }
 }
 
 function getStatusBadge(status) {
     const statusMap = {
-        'created': { class: 'bg-secondary', label: 'Créé' },
-        'extracting': { class: 'bg-info', label: 'Extraction...' },
-        'extracted': { class: 'bg-primary', label: 'Extrait' },
-        'chunking': { class: 'bg-info', label: 'Chunking...' },
-        'chunked': { class: 'bg-primary', label: 'Chunké' },
-        'embedding': { class: 'bg-info', label: 'Embeddings...' },
-        'embedded': { class: 'bg-primary', label: 'Embeddings OK' },
-        'uploading': { class: 'bg-info', label: 'Upload...' },
-        'completed': { class: 'bg-success', label: 'Terminé' },
-        'error': { class: 'bg-danger', label: 'Erreur' }
+        'created': { class: 'badge-secondary', label: 'Cree' },
+        'extracting': { class: 'badge-info', label: 'Extraction...' },
+        'extracted': { class: 'badge-primary', label: 'Extrait' },
+        'chunking': { class: 'badge-info', label: 'Chunking...' },
+        'chunked': { class: 'badge-primary', label: 'Chunke' },
+        'embedding': { class: 'badge-info', label: 'Embeddings...' },
+        'embedded': { class: 'badge-primary', label: 'Embeddings OK' },
+        'uploading': { class: 'badge-info', label: 'Upload...' },
+        'completed': { class: 'badge-success', label: 'Termine' },
+        'error': { class: 'badge-danger', label: 'Erreur' }
     };
-    const info = statusMap[status] || { class: 'bg-secondary', label: status };
+    const info = statusMap[status] || { class: 'badge-secondary', label: status };
     return `<span class="badge ${info.class}">${info.label}</span>`;
 }
 
@@ -373,11 +644,12 @@ function renderSessions(sessions) {
 
     if (!sessions || sessions.length === 0) {
         container.innerHTML = `
-            <div class="text-center py-4">
-                <i class="bi bi-inbox text-muted" style="font-size: 3rem;"></i>
-                <p class="text-muted mt-2">Aucune session de pipeline</p>
-                <a href="/pipeline?project=${projectId}" class="btn btn-primary">
-                    <i class="bi bi-play-circle"></i> Démarrer un pipeline
+            <div class="empty-state-small">
+                <div class="empty-state-small-icon"><i class="bi bi-inbox"></i></div>
+                <p class="text-muted">Aucune session de pipeline</p>
+                <a href="/?project=${projectId}" class="btn btn-primary btn-sm">
+                    <i class="bi bi-play-circle"></i>
+                    Demarrer un pipeline
                 </a>
             </div>
         `;
@@ -385,23 +657,23 @@ function renderSessions(sessions) {
     }
 
     container.innerHTML = `
-        <div class="table-responsive">
-            <table class="table table-hover mb-0">
+        <div class="table-container">
+            <table class="table">
                 <thead>
                     <tr>
                         <th>Session</th>
                         <th>Source</th>
                         <th>Statut</th>
                         <th>Documents</th>
-                        <th>Créé le</th>
-                        <th>Actions</th>
+                        <th>Date</th>
+                        <th class="text-right">Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     ${sessions.map(s => `
                         <tr>
                             <td>
-                                <code class="small">${escapeHtml(s.session_folder)}</code>
+                                <code class="text-sm">${escapeHtml(s.session_folder)}</code>
                                 ${s.original_filename ? `<br><small class="text-muted">${escapeHtml(s.original_filename)}</small>` : ''}
                             </td>
                             <td>
@@ -410,17 +682,16 @@ function renderSessions(sessions) {
                             </td>
                             <td>${getStatusBadge(s.status)}</td>
                             <td>
-                                ${s.row_count ? `<span class="badge bg-light text-dark">${s.row_count} docs</span>` : '-'}
-                                ${s.chunk_count ? `<span class="badge bg-light text-dark">${s.chunk_count} chunks</span>` : ''}
+                                ${s.row_count ? `<span class="badge badge-light">${s.row_count} docs</span>` : '-'}
+                                ${s.chunk_count ? `<span class="badge badge-light">${s.chunk_count} chunks</span>` : ''}
                             </td>
                             <td><small>${formatDate(s.created_at)}</small></td>
-                            <td>
-                                <a href="/pipeline?project=${projectId}&session=${encodeURIComponent(s.session_folder)}"
-                                   class="btn btn-sm btn-outline-primary" title="Reprendre">
+                            <td class="text-right">
+                                <a href="/?project=${projectId}&session=${encodeURIComponent(s.session_folder)}"
+                                   class="btn btn-ghost btn-sm" title="Reprendre">
                                     <i class="bi bi-play-circle"></i>
                                 </a>
-                                <button class="btn btn-sm btn-outline-danger"
-                                        onclick="deleteSession(${s.id})" title="Supprimer">
+                                <button class="btn btn-ghost btn-sm" onclick="deleteSession(${s.id})" title="Supprimer">
                                     <i class="bi bi-trash"></i>
                                 </button>
                             </td>
@@ -436,16 +707,13 @@ function formatDate(dateStr) {
     if (!dateStr) return '-';
     const date = new Date(dateStr);
     return date.toLocaleDateString('fr-FR', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit'
     });
 }
 
 async function deleteSession(sessionId) {
-    if (!confirm('Supprimer cette session et tous ses fichiers ?')) return;
+    if (!confirm('Supprimer cette session et tous ses fichiers?')) return;
 
     try {
         const response = await fetch(`/api/pipeline/sessions/${sessionId}`, {
@@ -457,14 +725,14 @@ async function deleteSession(sessionId) {
 
         if (response.ok) {
             loadSessions();
-            showFlash('Session supprimée', 'success');
+            showToast('Session supprimee', 'success');
         } else {
             const data = await response.json();
-            showFlash(data.detail || 'Erreur', 'danger');
+            showToast(data.detail || 'Erreur', 'error');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFlash('Erreur lors de la suppression', 'danger');
+        showToast('Erreur lors de la suppression', 'error');
     }
 }
 
