@@ -9,69 +9,123 @@
     <!-- Page Header -->
     <div class="page-header">
         <div class="page-header-content">
-            <h1 class="page-title">Utilisateurs</h1>
-            <p class="page-subtitle">Gerer les comptes utilisateurs de la plateforme</p>
+            <h1 class="page-title">Gestion des utilisateurs</h1>
+            <p class="page-subtitle">Gerez les comptes utilisateurs de la plateforme</p>
         </div>
     </div>
 
-    <!-- Filters -->
-    <div class="filters-bar">
-        <div class="filter-group filter-search">
-            <div class="input-with-icon">
-                <i class="bi bi-search input-icon"></i>
-                <input type="text"
-                       class="form-input"
-                       id="searchInput"
-                       placeholder="Rechercher un utilisateur...">
+    <!-- Section Administrateurs -->
+    <div class="users-section">
+        <div class="section-header-with-badge">
+            <h2 class="section-title">
+                <i class="bi bi-shield-check"></i>
+                Administrateurs
+            </h2>
+            <span class="section-count" id="adminCount">0</span>
+        </div>
+        <div class="card">
+            <div class="table-container">
+                <table class="table table-compact">
+                    <thead>
+                        <tr>
+                            <th class="col-id">ID</th>
+                            <th>Prenom</th>
+                            <th>Nom</th>
+                            <th>Email</th>
+                            <th>Roles</th>
+                            <th>Statut</th>
+                            <th class="col-verified">Email</th>
+                            <th class="col-actions">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="adminTableBody">
+                        <tr>
+                            <td colspan="8">
+                                <div class="table-loading">
+                                    <span class="spinner"></span>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
         </div>
-        <div class="filter-group">
-            <select class="form-select" id="statusFilter">
-                <option value="">Tous les statuts</option>
-                <option value="active">Actifs</option>
-                <option value="inactive">Inactifs</option>
-            </select>
+    </div>
+
+    <!-- Section Utilisateurs -->
+    <div class="users-section">
+        <div class="section-header-with-badge">
+            <h2 class="section-title">
+                <i class="bi bi-people"></i>
+                Utilisateurs
+            </h2>
+            <span class="section-count" id="userCount">0</span>
         </div>
-        <div class="filter-group">
-            <select class="form-select" id="roleFilter">
-                <option value="">Tous les roles</option>
-                <option value="admin">Administrateurs</option>
-                <option value="user">Utilisateurs</option>
-            </select>
+        <div class="card">
+            <div class="table-container">
+                <table class="table table-compact">
+                    <thead>
+                        <tr>
+                            <th class="col-id">ID</th>
+                            <th>Prenom</th>
+                            <th>Nom</th>
+                            <th>Email</th>
+                            <th>Roles</th>
+                            <th>Statut</th>
+                            <th class="col-verified">Email</th>
+                            <th class="col-actions">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="userTableBody">
+                        <tr>
+                            <td colspan="8">
+                                <div class="table-loading">
+                                    <span class="spinner"></span>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 
-    <!-- Users Table -->
-    <div class="card">
-        <div class="table-container">
-            <table class="table">
-                <thead>
-                    <tr>
-                        <th>Utilisateur</th>
-                        <th>Email</th>
-                        <th>Role</th>
-                        <th>Statut</th>
-                        <th>Verifie</th>
-                        <th class="text-right">Actions</th>
-                    </tr>
-                </thead>
-                <tbody id="usersTableBody">
-                    <tr>
-                        <td colspan="6">
-                            <div class="table-loading">
-                                <span class="spinner"></span>
-                                <span>Chargement des utilisateurs...</span>
-                            </div>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
+    <!-- Section Bloques -->
+    <div class="users-section">
+        <div class="section-header-with-badge">
+            <h2 class="section-title">
+                <i class="bi bi-slash-circle"></i>
+                Bloques
+            </h2>
+            <span class="section-count section-count-danger" id="blockedCount">0</span>
         </div>
-    </div>
-
-    <!-- Pagination -->
-    <div class="pagination-container" id="pagination">
-        <div class="pagination"></div>
+        <div class="card">
+            <div class="table-container">
+                <table class="table table-compact">
+                    <thead>
+                        <tr>
+                            <th class="col-id">ID</th>
+                            <th>Prenom</th>
+                            <th>Nom</th>
+                            <th>Email</th>
+                            <th>Roles</th>
+                            <th>Statut</th>
+                            <th class="col-verified">Email</th>
+                            <th class="col-actions">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="blockedTableBody">
+                        <tr>
+                            <td colspan="8">
+                                <div class="table-loading">
+                                    <span class="spinner"></span>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -141,13 +195,13 @@
 {% block extra_css %}
 <style>
     .page-container {
-        max-width: 1200px;
+        max-width: 1400px;
         margin: 0 auto;
         padding: var(--space-6);
     }
 
     .page-header {
-        margin-bottom: var(--space-6);
+        margin-bottom: var(--space-8);
     }
 
     .page-title {
@@ -162,183 +216,181 @@
         color: var(--color-text-secondary);
     }
 
-    /* Filters */
-    .filters-bar {
+    /* Sections */
+    .users-section {
+        margin-bottom: var(--space-8);
+    }
+
+    .section-header-with-badge {
         display: flex;
-        gap: var(--space-4);
-        margin-bottom: var(--space-6);
-        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-3);
+        margin-bottom: var(--space-4);
     }
 
-    .filter-group {
-        min-width: 180px;
+    .section-title {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+        margin: 0;
     }
 
-    .filter-search {
-        flex: 1;
-        min-width: 280px;
-    }
-
-    .input-with-icon {
-        position: relative;
-    }
-
-    .input-icon {
-        position: absolute;
-        left: var(--space-3);
-        top: 50%;
-        transform: translateY(-50%);
+    .section-title i {
         color: var(--color-text-muted);
-        pointer-events: none;
     }
 
-    .input-with-icon .form-input {
-        padding-left: var(--space-10);
+    .section-count {
+        background: var(--color-brand-bg);
+        color: var(--color-brand-primary);
+        padding: 2px 10px;
+        border-radius: var(--radius-full);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-semibold);
     }
 
-    /* Table Styles */
+    .section-count-danger {
+        background: var(--color-danger-bg);
+        color: var(--color-danger);
+    }
+
+    /* Table Columns */
+    .col-id {
+        width: 60px;
+        text-align: center;
+    }
+
+    .col-verified {
+        width: 70px;
+        text-align: center;
+    }
+
+    .col-actions {
+        width: 150px;
+        text-align: center;
+    }
+
+    /* Table Compact */
+    .table-compact td,
+    .table-compact th {
+        padding: var(--space-2) var(--space-3);
+        font-size: var(--font-size-sm);
+    }
+
     .table-loading {
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: var(--space-3);
-        padding: var(--space-10);
-        color: var(--color-text-secondary);
+        padding: var(--space-6);
     }
 
     .table-empty {
         text-align: center;
-        padding: var(--space-10) var(--space-4);
-    }
-
-    .table-empty-icon {
-        font-size: 2.5rem;
+        padding: var(--space-6);
         color: var(--color-text-muted);
-        margin-bottom: var(--space-3);
     }
 
-    .table-empty-text {
-        color: var(--color-text-secondary);
+    .table-empty i {
+        font-size: 1.5rem;
+        margin-bottom: var(--space-2);
+        display: block;
     }
 
-    /* User Cell */
-    .user-cell {
-        display: flex;
-        align-items: center;
-        gap: var(--space-3);
+    /* User Data Cells */
+    .user-id {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        text-align: center;
     }
 
-    .user-avatar {
-        width: 36px;
-        height: 36px;
-        border-radius: 50%;
-        background: var(--color-brand-bg);
-        color: var(--color-brand-primary);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: var(--font-weight-medium);
-        font-size: var(--font-size-sm);
-        flex-shrink: 0;
-    }
-
-    .user-info {
-        min-width: 0;
-    }
-
-    .user-name {
+    .user-firstname,
+    .user-lastname {
         font-weight: var(--font-weight-medium);
         color: var(--color-text-primary);
     }
 
-    .user-id {
-        font-size: var(--font-size-xs);
+    .user-email {
+        color: var(--color-text-secondary);
+    }
+
+    .cell-na {
+        color: var(--color-text-muted);
+        font-style: italic;
+    }
+
+    /* Verified Icon */
+    .verified-icon {
+        font-size: 1rem;
+    }
+
+    .verified-yes {
+        color: var(--color-success);
+    }
+
+    .verified-no {
         color: var(--color-text-muted);
     }
 
-    /* Actions */
+    /* Actions Cell */
     .actions-cell {
         display: flex;
         gap: var(--space-1);
-        justify-content: flex-end;
+        justify-content: center;
     }
 
-    .btn-icon {
-        width: 32px;
-        height: 32px;
+    .btn-action {
+        width: 30px;
+        height: 30px;
         padding: 0;
         display: flex;
         align-items: center;
         justify-content: center;
         background: transparent;
-        border: 1px solid transparent;
-        border-radius: var(--radius-md);
-        color: var(--color-text-secondary);
-        cursor: pointer;
-        transition: var(--transition-fast);
-    }
-
-    .btn-icon:hover {
-        background: var(--color-surface-hover);
-        color: var(--color-text-primary);
-    }
-
-    .btn-icon-danger:hover {
-        background: var(--color-danger-bg);
-        color: var(--color-danger);
-    }
-
-    /* Pagination */
-    .pagination-container {
-        display: flex;
-        justify-content: center;
-        margin-top: var(--space-6);
-    }
-
-    .pagination {
-        display: flex;
-        gap: var(--space-1);
-    }
-
-    .page-btn {
-        min-width: 36px;
-        height: 36px;
-        padding: 0 var(--space-3);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: var(--color-surface);
         border: 1px solid var(--color-border);
         border-radius: var(--radius-md);
         color: var(--color-text-secondary);
-        font-size: var(--font-size-sm);
         cursor: pointer;
         transition: var(--transition-fast);
+        font-size: 0.875rem;
     }
 
-    .page-btn:hover:not(:disabled) {
+    .btn-action:hover {
         background: var(--color-surface-hover);
         border-color: var(--color-border-hover);
     }
 
-    .page-btn.active {
-        background: var(--color-brand-primary);
+    /* Action Button Variants */
+    .btn-action-block:hover {
+        background: var(--color-danger-bg);
+        border-color: var(--color-danger);
+        color: var(--color-danger);
+    }
+
+    .btn-action-unblock:hover {
+        background: var(--color-success-bg);
+        border-color: var(--color-success);
+        color: var(--color-success);
+    }
+
+    .btn-action-admin:hover {
+        background: var(--color-brand-bg);
         border-color: var(--color-brand-primary);
-        color: white;
+        color: var(--color-brand-primary);
     }
 
-    .page-btn:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
+    .btn-action-password:hover {
+        background: var(--color-warning-bg);
+        border-color: var(--color-warning);
+        color: var(--color-warning);
     }
 
-    .page-ellipsis {
-        min-width: 36px;
-        height: 36px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: var(--color-text-muted);
+    .btn-action-delete:hover {
+        background: var(--color-danger-bg);
+        border-color: var(--color-danger);
+        color: var(--color-danger);
     }
 
     /* Modal Styles */
@@ -375,10 +427,6 @@
         font-size: 1.75rem;
     }
 
-    .text-right {
-        text-align: right;
-    }
-
     .text-sm {
         font-size: var(--font-size-sm);
     }
@@ -386,28 +434,29 @@
     .text-secondary {
         color: var(--color-text-secondary);
     }
+
+    /* Responsive */
+    @media (max-width: 1024px) {
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .table-compact {
+            min-width: 800px;
+        }
+    }
 </style>
 {% endblock %}
 
 {% block extra_js %}
 <script>
-let currentPage = 1;
 let currentUserId = null;
+let allUsers = [];
 
-async function loadUsers(page = 1) {
-    const search = document.getElementById('searchInput').value;
-    const status = document.getElementById('statusFilter').value;
-    const role = document.getElementById('roleFilter').value;
-
-    let url = `/admin/users?page=${page}&per_page=20`;
-    if (search) url += `&search=${encodeURIComponent(search)}`;
-    if (status === 'active') url += '&is_active=true';
-    if (status === 'inactive') url += '&is_active=false';
-    if (role === 'admin') url += '&is_admin=true';
-    if (role === 'user') url += '&is_admin=false';
-
+async function loadAllUsers() {
     try {
-        const response = await fetch(url, {
+        // Charger tous les utilisateurs (max 100)
+        const response = await fetch('/admin/users?per_page=100', {
             headers: {
                 'Authorization': 'Bearer ' + localStorage.getItem('access_token')
             }
@@ -415,9 +464,8 @@ async function loadUsers(page = 1) {
 
         if (response.ok) {
             const data = await response.json();
-            renderUsers(data.users);
-            renderPagination(data.page, data.pages);
-            currentPage = page;
+            allUsers = data.users;
+            categorizeAndRender();
         } else if (response.status === 401 || response.status === 403) {
             window.location.href = '/login';
         }
@@ -427,18 +475,33 @@ async function loadUsers(page = 1) {
     }
 }
 
-function renderUsers(users) {
-    const tbody = document.getElementById('usersTableBody');
+function categorizeAndRender() {
+    // Categoriser les utilisateurs
+    const admins = allUsers.filter(u => u.is_admin && u.is_active);
+    const users = allUsers.filter(u => !u.is_admin && u.is_active);
+    const blocked = allUsers.filter(u => !u.is_active);
+
+    // Mettre a jour les compteurs
+    document.getElementById('adminCount').textContent = admins.length;
+    document.getElementById('userCount').textContent = users.length;
+    document.getElementById('blockedCount').textContent = blocked.length;
+
+    // Rendre les tableaux
+    renderTable('adminTableBody', admins, 'Aucun administrateur');
+    renderTable('userTableBody', users, 'Aucun utilisateur actif');
+    renderTable('blockedTableBody', blocked, 'Aucun utilisateur bloque');
+}
+
+function renderTable(tableId, users, emptyMessage) {
+    const tbody = document.getElementById(tableId);
 
     if (users.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="6">
+                <td colspan="8">
                     <div class="table-empty">
-                        <div class="table-empty-icon">
-                            <i class="bi bi-people"></i>
-                        </div>
-                        <p class="table-empty-text">Aucun utilisateur trouve</p>
+                        <i class="bi bi-inbox"></i>
+                        <p>${emptyMessage}</p>
                     </div>
                 </td>
             </tr>
@@ -446,108 +509,53 @@ function renderUsers(users) {
         return;
     }
 
-    tbody.innerHTML = users.map(user => {
-        const initials = getInitials(user.first_name, user.last_name, user.email);
-        const displayName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email.split('@')[0];
-
-        return `
-            <tr>
-                <td>
-                    <div class="user-cell">
-                        <div class="user-avatar">${initials}</div>
-                        <div class="user-info">
-                            <div class="user-name">${displayName}</div>
-                            <div class="user-id">ID: ${user.id}</div>
-                        </div>
-                    </div>
-                </td>
-                <td>${user.email}</td>
-                <td>
-                    ${user.roles.map(role => `
-                        <span class="badge ${role === 'ADMIN' ? 'badge-primary' : 'badge-secondary'}">
-                            ${role}
-                        </span>
-                    `).join(' ')}
-                </td>
-                <td>
-                    <span class="badge ${user.is_active ? 'badge-success' : 'badge-danger'}">
-                        ${user.is_active ? 'Actif' : 'Inactif'}
+    tbody.innerHTML = users.map(user => `
+        <tr>
+            <td class="user-id">${user.id}</td>
+            <td class="${user.first_name ? 'user-firstname' : 'cell-na'}">${user.first_name || '-'}</td>
+            <td class="${user.last_name ? 'user-lastname' : 'cell-na'}">${user.last_name || '-'}</td>
+            <td class="user-email">${user.email}</td>
+            <td>
+                ${user.roles.map(role => `
+                    <span class="badge ${role === 'ADMIN' ? 'badge-primary' : 'badge-secondary'}">
+                        ${role}
                     </span>
-                </td>
-                <td>
-                    ${user.is_verified
-                        ? '<i class="bi bi-check-circle-fill text-success"></i>'
-                        : '<i class="bi bi-x-circle text-muted"></i>'}
-                </td>
-                <td>
-                    <div class="actions-cell">
-                        <button class="btn-icon tooltip" data-tooltip="${user.is_active ? 'Desactiver' : 'Activer'}" onclick="toggleActive(${user.id})">
-                            <i class="bi bi-${user.is_active ? 'lock' : 'unlock'}"></i>
-                        </button>
-                        <button class="btn-icon tooltip" data-tooltip="${user.is_admin ? 'Retirer admin' : 'Promouvoir admin'}" onclick="toggleAdmin(${user.id})">
-                            <i class="bi bi-shield${user.is_admin ? '-fill' : ''}"></i>
-                        </button>
-                        <button class="btn-icon tooltip" data-tooltip="Reinitialiser mot de passe" onclick="showResetPassword(${user.id})">
-                            <i class="bi bi-key"></i>
-                        </button>
-                        <button class="btn-icon btn-icon-danger tooltip" data-tooltip="Supprimer" onclick="showDeleteConfirm(${user.id})">
-                            <i class="bi bi-trash"></i>
-                        </button>
-                    </div>
-                </td>
-            </tr>
-        `;
-    }).join('');
-}
-
-function getInitials(firstName, lastName, email) {
-    if (firstName && lastName) {
-        return (firstName[0] + lastName[0]).toUpperCase();
-    }
-    if (firstName) {
-        return firstName[0].toUpperCase();
-    }
-    return email[0].toUpperCase();
-}
-
-function renderPagination(currentPage, totalPages) {
-    const pagination = document.querySelector('.pagination');
-
-    if (totalPages <= 1) {
-        pagination.innerHTML = '';
-        return;
-    }
-
-    let html = '';
-
-    // Previous button
-    html += `
-        <button class="page-btn" onclick="loadUsers(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>
-            <i class="bi bi-chevron-left"></i>
-        </button>
-    `;
-
-    // Page numbers
-    for (let i = 1; i <= totalPages; i++) {
-        if (i === 1 || i === totalPages || (i >= currentPage - 2 && i <= currentPage + 2)) {
-            html += `
-                <button class="page-btn ${i === currentPage ? 'active' : ''}" onclick="loadUsers(${i})">
-                    ${i}
-                </button>
-            `;
-        } else if (i === currentPage - 3 || i === currentPage + 3) {
-            html += '<span class="page-ellipsis">...</span>';
-        }
-    }
-
-    // Next button
-    html += `
-        <button class="page-btn" onclick="loadUsers(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''}>
-            <i class="bi bi-chevron-right"></i>
-        </button>
-    `;
-
-    pagination.innerHTML = html;
+                `).join(' ')}
+            </td>
+            <td>
+                <span class="badge ${user.is_active ? 'badge-success' : 'badge-danger'}">
+                    ${user.is_active ? 'Actif' : 'Bloque'}
+                </span>
+            </td>
+            <td class="text-center">
+                <i class="bi ${user.is_verified ? 'bi-check-circle-fill verified-yes' : 'bi-x-circle verified-no'} verified-icon"></i>
+            </td>
+            <td>
+                <div class="actions-cell">
+                    <button class="btn-action ${user.is_active ? 'btn-action-block' : 'btn-action-unblock'}"
+                            onclick="toggleActive(${user.id})"
+                            title="${user.is_active ? 'Bloquer' : 'Debloquer'}">
+                        <i class="bi bi-${user.is_active ? 'lock' : 'unlock'}"></i>
+                    </button>
+                    <button class="btn-action btn-action-admin"
+                            onclick="toggleAdmin(${user.id})"
+                            title="${user.is_admin ? 'Retirer admin' : 'Promouvoir admin'}">
+                        <i class="bi bi-shield${user.is_admin ? '-fill' : ''}"></i>
+                    </button>
+                    <button class="btn-action btn-action-password"
+                            onclick="showResetPassword(${user.id})"
+                            title="Reinitialiser mot de passe">
+                        <i class="bi bi-key"></i>
+                    </button>
+                    <button class="btn-action btn-action-delete"
+                            onclick="showDeleteConfirm(${user.id})"
+                            title="Supprimer">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </td>
+        </tr>
+    `).join('');
 }
 
 async function toggleActive(userId) {
@@ -560,8 +568,14 @@ async function toggleActive(userId) {
         });
 
         if (response.ok) {
-            loadUsers(currentPage);
-            showToast('Statut utilisateur modifie', 'success');
+            const data = await response.json();
+            // Mettre a jour l'utilisateur localement
+            const user = allUsers.find(u => u.id === userId);
+            if (user) {
+                user.is_active = data.is_active;
+            }
+            categorizeAndRender();
+            showToast(data.message, 'success');
         } else {
             const data = await response.json();
             showToast(data.detail || 'Erreur', 'error');
@@ -582,8 +596,19 @@ async function toggleAdmin(userId) {
         });
 
         if (response.ok) {
-            loadUsers(currentPage);
-            showToast('Role utilisateur modifie', 'success');
+            const data = await response.json();
+            // Mettre a jour l'utilisateur localement
+            const user = allUsers.find(u => u.id === userId);
+            if (user) {
+                user.is_admin = data.is_admin;
+                if (data.is_admin && !user.roles.includes('ADMIN')) {
+                    user.roles.push('ADMIN');
+                } else if (!data.is_admin) {
+                    user.roles = user.roles.filter(r => r !== 'ADMIN');
+                }
+            }
+            categorizeAndRender();
+            showToast(data.message, 'success');
         } else {
             const data = await response.json();
             showToast(data.detail || 'Erreur', 'error');
@@ -644,7 +669,9 @@ document.getElementById('confirmDeleteBtn').addEventListener('click', async func
         closeModal('deleteModal');
 
         if (response.ok) {
-            loadUsers(currentPage);
+            // Supprimer l'utilisateur localement
+            allUsers = allUsers.filter(u => u.id !== currentUserId);
+            categorizeAndRender();
             showToast('Utilisateur supprime', 'success');
         } else {
             const data = await response.json();
@@ -656,12 +683,7 @@ document.getElementById('confirmDeleteBtn').addEventListener('click', async func
     }
 });
 
-// Event listeners for filters
-document.getElementById('searchInput').addEventListener('input', debounce(() => loadUsers(1), 300));
-document.getElementById('statusFilter').addEventListener('change', () => loadUsers(1));
-document.getElementById('roleFilter').addEventListener('change', () => loadUsers(1));
-
-// Load users on page load
-loadUsers();
+// Charger les utilisateurs au chargement de la page
+loadAllUsers();
 </script>
 {% endblock %}
