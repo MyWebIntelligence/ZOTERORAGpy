@@ -55,7 +55,8 @@ class User(Base, TimestampMixin):
     project_memberships = relationship(
         "ProjectMember",
         back_populates="user",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
+        primaryjoin="User.id == ProjectMember.user_id"
     )
     audit_logs = relationship(
         "AuditLog",
