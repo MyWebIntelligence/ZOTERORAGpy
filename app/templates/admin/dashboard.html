@@ -1,96 +1,327 @@
 {% extends "base.html" %}
 
-{% block title %}Tableau de bord - Administration - MyDoc Intelligence{% endblock %}
+{% block title %}Tableau de bord - Administration - RAGpy{% endblock %}
 
 {% set show_sidebar = true %}
 
-{% block sidebar %}
-<aside class="sidebar">
-    <div class="sidebar-header">MyDoc Intelligence</div>
-    <nav class="nav flex-column">
-        <a class="nav-link active" href="/admin">
-            <i class="bi bi-speedometer2"></i> Tableau de bord
-        </a>
-        <a class="nav-link" href="/admin/users">
-            <i class="bi bi-people"></i> Utilisateurs
-        </a>
-        <a class="nav-link" href="/admin/projects">
-            <i class="bi bi-folder"></i> Projets
-        </a>
-        <a class="nav-link" href="/admin/settings">
-            <i class="bi bi-gear"></i> Param&egrave;tres
-        </a>
-    </nav>
-</aside>
+{% block content %}
+<div class="page-container">
+    <!-- Page Header -->
+    <div class="page-header">
+        <div class="page-header-content">
+            <h1 class="page-title">Tableau de bord</h1>
+            <p class="page-subtitle">Vue d'ensemble de l'activite de la plateforme</p>
+        </div>
+    </div>
+
+    <!-- Stats Grid -->
+    <div class="stats-grid">
+        <!-- Users card -->
+        <div class="stat-card">
+            <div class="stat-card-icon stat-card-icon-primary">
+                <i class="bi bi-people"></i>
+            </div>
+            <div class="stat-card-content">
+                <div class="stat-card-value" id="totalUsers">
+                    <span class="skeleton skeleton-text" style="width: 60px;"></span>
+                </div>
+                <div class="stat-card-label">Utilisateurs</div>
+            </div>
+        </div>
+
+        <!-- Projects card -->
+        <div class="stat-card">
+            <div class="stat-card-icon stat-card-icon-success">
+                <i class="bi bi-folder"></i>
+            </div>
+            <div class="stat-card-content">
+                <div class="stat-card-value" id="totalProjects">
+                    <span class="skeleton skeleton-text" style="width: 60px;"></span>
+                </div>
+                <div class="stat-card-label">Projets</div>
+            </div>
+        </div>
+
+        <!-- Active users card -->
+        <div class="stat-card">
+            <div class="stat-card-icon stat-card-icon-info">
+                <i class="bi bi-person-check"></i>
+            </div>
+            <div class="stat-card-content">
+                <div class="stat-card-value" id="activeUsers">
+                    <span class="skeleton skeleton-text" style="width: 60px;"></span>
+                </div>
+                <div class="stat-card-label">Actifs cette semaine</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recent Activity Section -->
+    <div class="section">
+        <div class="section-header">
+            <h2 class="section-title">Activite recente</h2>
+        </div>
+
+        <div class="card">
+            <div class="table-container">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Utilisateur</th>
+                            <th>Action</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recentActivity">
+                        <tr>
+                            <td colspan="3">
+                                <div class="table-empty">
+                                    <div class="table-empty-icon">
+                                        <i class="bi bi-clock-history"></i>
+                                    </div>
+                                    <p class="table-empty-text">Chargement de l'activite...</p>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="section">
+        <div class="section-header">
+            <h2 class="section-title">Actions rapides</h2>
+        </div>
+
+        <div class="quick-actions-grid">
+            <a href="/admin/users" class="quick-action-card">
+                <div class="quick-action-icon">
+                    <i class="bi bi-people"></i>
+                </div>
+                <div class="quick-action-content">
+                    <div class="quick-action-title">Gerer les utilisateurs</div>
+                    <div class="quick-action-desc">Voir, modifier ou supprimer des comptes</div>
+                </div>
+                <i class="bi bi-chevron-right quick-action-arrow"></i>
+            </a>
+
+            <a href="/projects" class="quick-action-card">
+                <div class="quick-action-icon">
+                    <i class="bi bi-folder"></i>
+                </div>
+                <div class="quick-action-content">
+                    <div class="quick-action-title">Voir les projets</div>
+                    <div class="quick-action-desc">Parcourir tous les projets</div>
+                </div>
+                <i class="bi bi-chevron-right quick-action-arrow"></i>
+            </a>
+
+            <a href="/" class="quick-action-card">
+                <div class="quick-action-icon">
+                    <i class="bi bi-play-circle"></i>
+                </div>
+                <div class="quick-action-content">
+                    <div class="quick-action-title">Pipeline RAG</div>
+                    <div class="quick-action-desc">Lancer un nouveau traitement</div>
+                </div>
+                <i class="bi bi-chevron-right quick-action-arrow"></i>
+            </a>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
-{% block content %}
-<h1 class="mb-4">Tableau de bord</h1>
+{% block extra_css %}
+<style>
+    .page-container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: var(--space-6);
+    }
 
-<div class="row g-4">
-    <!-- Users card -->
-    <div class="col-md-6 col-lg-4">
-        <div class="stat-card">
-            <div class="card-header">
-                <i class="bi bi-people-fill"></i> Utilisateurs
-            </div>
-            <div class="card-body">
-                <div class="stat-number" id="totalUsers">-</div>
-                <div class="stat-label">Nombre total d'utilisateurs enregistr&eacute;s.</div>
-            </div>
-        </div>
-    </div>
+    .page-header {
+        margin-bottom: var(--space-8);
+    }
 
-    <!-- Projects card -->
-    <div class="col-md-6 col-lg-4">
-        <div class="stat-card">
-            <div class="card-header">
-                <i class="bi bi-folder-fill"></i> Projets
-            </div>
-            <div class="card-body">
-                <div class="stat-number" id="totalProjects">-</div>
-                <div class="stat-label">Nombre total de projets cr&eacute;&eacute;s.</div>
-            </div>
-        </div>
-    </div>
+    .page-title {
+        font-size: var(--font-size-2xl);
+        font-weight: var(--font-weight-bold);
+        color: var(--color-text-primary);
+        margin-bottom: var(--space-2);
+    }
 
-    <!-- Active users card -->
-    <div class="col-md-6 col-lg-4">
-        <div class="stat-card">
-            <div class="card-header">
-                <i class="bi bi-person-check-fill"></i> Utilisateurs actifs
-            </div>
-            <div class="card-body">
-                <div class="stat-number" id="activeUsers">-</div>
-                <div class="stat-label">Utilisateurs actifs cette semaine.</div>
-            </div>
-        </div>
-    </div>
-</div>
+    .page-subtitle {
+        font-size: var(--font-size-base);
+        color: var(--color-text-secondary);
+    }
 
-<!-- Recent activity -->
-<div class="mt-5">
-    <h2 class="h4 mb-3">Activit&eacute; r&eacute;cente</h2>
-    <div class="table-container">
-        <table class="table table-hover mb-0">
-            <thead>
-                <tr>
-                    <th>Utilisateur</th>
-                    <th>Action</th>
-                    <th>Date</th>
-                </tr>
-            </thead>
-            <tbody id="recentActivity">
-                <tr>
-                    <td colspan="3" class="text-center text-muted py-4">
-                        Chargement...
-                    </td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-</div>
+    /* Stats Grid */
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: var(--space-6);
+        margin-bottom: var(--space-8);
+    }
 
+    .stat-card {
+        display: flex;
+        align-items: center;
+        gap: var(--space-4);
+        padding: var(--space-6);
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        transition: var(--transition-normal);
+    }
+
+    .stat-card:hover {
+        box-shadow: var(--shadow-md);
+        transform: translateY(-2px);
+    }
+
+    .stat-card-icon {
+        width: 56px;
+        height: 56px;
+        border-radius: var(--radius-md);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.5rem;
+        flex-shrink: 0;
+    }
+
+    .stat-card-icon-primary {
+        background: var(--color-brand-bg);
+        color: var(--color-brand-primary);
+    }
+
+    .stat-card-icon-success {
+        background: var(--color-success-bg);
+        color: var(--color-success);
+    }
+
+    .stat-card-icon-info {
+        background: var(--color-info-bg);
+        color: var(--color-info);
+    }
+
+    .stat-card-content {
+        flex: 1;
+    }
+
+    .stat-card-value {
+        font-size: var(--font-size-2xl);
+        font-weight: var(--font-weight-bold);
+        color: var(--color-text-primary);
+        line-height: 1.2;
+    }
+
+    .stat-card-label {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        margin-top: var(--space-1);
+    }
+
+    /* Sections */
+    .section {
+        margin-bottom: var(--space-8);
+    }
+
+    .section-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: var(--space-4);
+    }
+
+    .section-title {
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+    }
+
+    /* Table Styles */
+    .table-empty {
+        text-align: center;
+        padding: var(--space-10) var(--space-4);
+    }
+
+    .table-empty-icon {
+        font-size: 2.5rem;
+        color: var(--color-text-muted);
+        margin-bottom: var(--space-3);
+    }
+
+    .table-empty-text {
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+    }
+
+    /* Quick Actions */
+    .quick-actions-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: var(--space-4);
+    }
+
+    .quick-action-card {
+        display: flex;
+        align-items: center;
+        gap: var(--space-4);
+        padding: var(--space-4);
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        text-decoration: none;
+        transition: var(--transition-normal);
+    }
+
+    .quick-action-card:hover {
+        border-color: var(--color-brand-primary);
+        background: var(--color-surface-hover);
+    }
+
+    .quick-action-icon {
+        width: 48px;
+        height: 48px;
+        border-radius: var(--radius-md);
+        background: var(--color-brand-bg);
+        color: var(--color-brand-primary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.25rem;
+        flex-shrink: 0;
+    }
+
+    .quick-action-content {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .quick-action-title {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+        margin-bottom: var(--space-1);
+    }
+
+    .quick-action-desc {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+    }
+
+    .quick-action-arrow {
+        color: var(--color-text-muted);
+        transition: var(--transition-fast);
+    }
+
+    .quick-action-card:hover .quick-action-arrow {
+        color: var(--color-brand-primary);
+        transform: translateX(4px);
+    }
+</style>
 {% endblock %}
 
 {% block extra_js %}
@@ -105,18 +336,41 @@ async function loadStats() {
 
         if (response.ok) {
             const stats = await response.json();
-            document.getElementById('totalUsers').textContent = stats.total_users;
-            document.getElementById('totalProjects').textContent = stats.total_projects;
-            document.getElementById('activeUsers').textContent = stats.recent_logins;
+            document.getElementById('totalUsers').textContent = formatNumber(stats.total_users);
+            document.getElementById('totalProjects').textContent = formatNumber(stats.total_projects);
+            document.getElementById('activeUsers').textContent = formatNumber(stats.recent_logins);
         } else if (response.status === 401 || response.status === 403) {
             window.location.href = '/login';
         }
     } catch (error) {
         console.error('Error loading stats:', error);
+        document.getElementById('totalUsers').textContent = '-';
+        document.getElementById('totalProjects').textContent = '-';
+        document.getElementById('activeUsers').textContent = '-';
     }
 }
 
-// Load stats on page load
+async function loadRecentActivity() {
+    const tbody = document.getElementById('recentActivity');
+
+    // For now, show a placeholder message
+    // This would be replaced with actual API call
+    tbody.innerHTML = `
+        <tr>
+            <td colspan="3">
+                <div class="table-empty">
+                    <div class="table-empty-icon">
+                        <i class="bi bi-check-circle"></i>
+                    </div>
+                    <p class="table-empty-text">Aucune activite recente</p>
+                </div>
+            </td>
+        </tr>
+    `;
+}
+
+// Load data on page load
 loadStats();
+loadRecentActivity();
 </script>
 {% endblock %}

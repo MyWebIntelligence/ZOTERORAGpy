@@ -1,59 +1,204 @@
 {% extends "base.html" %}
 
-{% block title %}Connexion - MyDoc Intelligence{% endblock %}
+{% block title %}Connexion - RAGpy{% endblock %}
+
+{% block main_class %}auth-layout{% endblock %}
 
 {% block content %}
 <div class="auth-container">
-    <h1>Connexion</h1>
-
-    {% if error %}
-    <div class="alert alert-danger" role="alert">
-        {{ error }}
-    </div>
-    {% endif %}
-
-    {% if verified %}
-    <div class="alert alert-success" role="alert">
-        Votre email a &eacute;t&eacute; v&eacute;rifi&eacute; avec succ&egrave;s. Vous pouvez maintenant vous connecter.
-    </div>
-    {% endif %}
-
-    <form id="loginForm" method="post">
-        <div class="mb-3">
-            <label for="email" class="form-label">E-mail</label>
-            <input type="email" class="form-control" id="email" name="email" required
-                   placeholder="votre@email.com" value="{{ email or '' }}">
+    <div class="auth-card">
+        <!-- Logo -->
+        <div class="auth-logo">
+            <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" width="48" height="48">
+                <rect width="48" height="48" rx="12" fill="var(--color-brand-primary)"/>
+                <path d="M12 15h24M12 24h18M12 33h12" stroke="white" stroke-width="3" stroke-linecap="round"/>
+            </svg>
         </div>
 
-        <div class="mb-3">
-            <label for="password" class="form-label">Mot de passe</label>
-            <input type="password" class="form-control" id="password" name="password" required>
+        <!-- Header -->
+        <div class="auth-header">
+            <h1 class="auth-title">Connexion</h1>
+            <p class="auth-subtitle">Connectez-vous pour acceder a votre espace</p>
         </div>
 
-        <div class="mb-3 form-check">
-            <input type="checkbox" class="form-check-input" id="remember_me" name="remember_me">
-            <label class="form-check-label" for="remember_me">Rester connect&eacute;</label>
+        <!-- Alerts -->
+        {% if error %}
+        <div class="alert alert-danger">
+            <i class="bi bi-exclamation-circle"></i>
+            <span>{{ error }}</span>
         </div>
+        {% endif %}
 
-        <div class="mb-3">
-            <a href="/forgot-password" class="text-decoration-none">Mot de passe oubli&eacute;</a>
+        {% if verified %}
+        <div class="alert alert-success">
+            <i class="bi bi-check-circle"></i>
+            <span>Votre email a ete verifie avec succes. Vous pouvez maintenant vous connecter.</span>
         </div>
+        {% endif %}
 
-        <button type="submit" class="btn btn-primary w-100">Connexion</button>
-    </form>
+        <!-- Form -->
+        <form id="loginForm" class="auth-form" method="post">
+            <div class="form-group">
+                <label for="email" class="form-label">Adresse email</label>
+                <div class="input-with-icon">
+                    <i class="bi bi-envelope input-icon"></i>
+                    <input type="email"
+                           class="form-input"
+                           id="email"
+                           name="email"
+                           required
+                           placeholder="vous@exemple.com"
+                           value="{{ email or '' }}"
+                           autocomplete="email">
+                </div>
+            </div>
 
-    <div class="mt-3 text-center">
-        <span class="text-muted">Pas encore de compte ?</span>
-        <a href="/register" class="text-decoration-none">Cr&eacute;er un compte</a>
+            <div class="form-group">
+                <div class="form-label-row">
+                    <label for="password" class="form-label">Mot de passe</label>
+                    <a href="/forgot-password" class="form-link">Mot de passe oublie?</a>
+                </div>
+                <div class="input-with-icon">
+                    <i class="bi bi-lock input-icon"></i>
+                    <input type="password"
+                           class="form-input"
+                           id="password"
+                           name="password"
+                           required
+                           placeholder="••••••••"
+                           autocomplete="current-password">
+                    <button type="button" class="input-action" onclick="togglePassword('password', this)" aria-label="Afficher le mot de passe">
+                        <i class="bi bi-eye"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" class="checkbox-input" id="remember_me" name="remember_me">
+                    <span class="checkbox-custom"></span>
+                    <span class="checkbox-text">Rester connecte</span>
+                </label>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-lg btn-full" id="submitBtn">
+                <span class="btn-text">Se connecter</span>
+                <span class="btn-loader" style="display: none;">
+                    <span class="spinner"></span>
+                </span>
+            </button>
+        </form>
+
+        <!-- Footer -->
+        <div class="auth-footer">
+            <p class="auth-footer-text">
+                Pas encore de compte?
+                <a href="/register" class="auth-footer-link">Creer un compte</a>
+            </p>
+        </div>
     </div>
 </div>
+{% endblock %}
 
+{% block extra_css %}
+<style>
+    .form-label-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .form-link {
+        font-size: var(--font-size-sm);
+        color: var(--color-brand-primary);
+        text-decoration: none;
+        font-weight: 500;
+    }
+
+    .form-link:hover {
+        text-decoration: underline;
+    }
+
+    .input-with-icon {
+        position: relative;
+        display: flex;
+        align-items: center;
+    }
+
+    .input-icon {
+        position: absolute;
+        left: var(--space-3);
+        color: var(--color-text-muted);
+        pointer-events: none;
+        z-index: 1;
+    }
+
+    .input-with-icon .form-input {
+        padding-left: var(--space-10);
+    }
+
+    .input-action {
+        position: absolute;
+        right: var(--space-2);
+        background: none;
+        border: none;
+        color: var(--color-text-muted);
+        cursor: pointer;
+        padding: var(--space-2);
+        border-radius: var(--radius-sm);
+        transition: color var(--transition-fast);
+    }
+
+    .input-action:hover {
+        color: var(--color-text-secondary);
+    }
+
+    .btn-full {
+        width: 100%;
+    }
+
+    .btn-text,
+    .btn-loader {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-2);
+    }
+
+    .auth-logo {
+        display: flex;
+        justify-content: center;
+        margin-bottom: var(--space-6);
+    }
+</style>
 {% endblock %}
 
 {% block extra_js %}
 <script>
+function togglePassword(inputId, button) {
+    const input = document.getElementById(inputId);
+    const icon = button.querySelector('i');
+
+    if (input.type === 'password') {
+        input.type = 'text';
+        icon.className = 'bi bi-eye-slash';
+    } else {
+        input.type = 'password';
+        icon.className = 'bi bi-eye';
+    }
+}
+
 document.getElementById('loginForm').addEventListener('submit', async function(e) {
     e.preventDefault();
+
+    const submitBtn = document.getElementById('submitBtn');
+    const btnText = submitBtn.querySelector('.btn-text');
+    const btnLoader = submitBtn.querySelector('.btn-loader');
+
+    // Show loading state
+    btnText.style.display = 'none';
+    btnLoader.style.display = 'flex';
+    submitBtn.disabled = true;
 
     const formData = {
         email: document.getElementById('email').value,
@@ -80,21 +225,22 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
             // Redirect to home or dashboard
             window.location.href = '/';
         } else {
-            // Show error
-            const alertDiv = document.createElement('div');
-            alertDiv.className = 'alert alert-danger';
-            alertDiv.textContent = data.detail || 'Erreur de connexion';
+            // Show error using toast
+            showToast(data.detail || 'Erreur de connexion', 'error');
 
-            const existingAlert = document.querySelector('.auth-container .alert-danger');
-            if (existingAlert) {
-                existingAlert.remove();
-            }
-
-            document.querySelector('.auth-container h1').after(alertDiv);
+            // Reset button
+            btnText.style.display = 'flex';
+            btnLoader.style.display = 'none';
+            submitBtn.disabled = false;
         }
     } catch (error) {
         console.error('Login error:', error);
-        alert('Erreur de connexion. Veuillez r&eacute;essayer.');
+        showToast('Erreur de connexion. Veuillez reessayer.', 'error');
+
+        // Reset button
+        btnText.style.display = 'flex';
+        btnLoader.style.display = 'none';
+        submitBtn.disabled = false;
     }
 });
 </script>
