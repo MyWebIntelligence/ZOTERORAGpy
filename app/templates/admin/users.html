@@ -456,7 +456,7 @@ let allUsers = [];
 async function loadAllUsers() {
     try {
         // Charger tous les utilisateurs (max 100)
-        const response = await fetch('/admin/users?per_page=100', {
+        const response = await fetch('/api/admin/users?per_page=100', {
             headers: {
                 'Authorization': 'Bearer ' + localStorage.getItem('access_token')
             }
@@ -560,7 +560,7 @@ function renderTable(tableId, users, emptyMessage) {
 
 async function toggleActive(userId) {
     try {
-        const response = await fetch(`/admin/users/${userId}/toggle-active`, {
+        const response = await fetch(`/api/admin/users/${userId}/toggle-active`, {
             method: 'POST',
             headers: {
                 'Authorization': 'Bearer ' + localStorage.getItem('access_token')
@@ -588,7 +588,7 @@ async function toggleActive(userId) {
 
 async function toggleAdmin(userId) {
     try {
-        const response = await fetch(`/admin/users/${userId}/toggle-admin`, {
+        const response = await fetch(`/api/admin/users/${userId}/toggle-admin`, {
             method: 'POST',
             headers: {
                 'Authorization': 'Bearer ' + localStorage.getItem('access_token')
@@ -629,7 +629,7 @@ function showResetPassword(userId) {
 
 document.getElementById('confirmResetBtn').addEventListener('click', async function() {
     try {
-        const response = await fetch(`/admin/users/${currentUserId}/reset-password`, {
+        const response = await fetch(`/api/admin/users/${currentUserId}/reset-password`, {
             method: 'POST',
             headers: {
                 'Authorization': 'Bearer ' + localStorage.getItem('access_token')
@@ -659,7 +659,7 @@ function showDeleteConfirm(userId) {
 
 document.getElementById('confirmDeleteBtn').addEventListener('click', async function() {
     try {
-        const response = await fetch(`/admin/users/${currentUserId}`, {
+        const response = await fetch(`/api/admin/users/${currentUserId}`, {
             method: 'DELETE',
             headers: {
                 'Authorization': 'Bearer ' + localStorage.getItem('access_token')
