@@ -580,55 +580,221 @@ async def generate_zotero_notes_sse(
 ):
     """
     Generate Zotero notes with SSE progress updates.
-    This implementation reads the Zotero JSON export, counts items, and streams
-    dummy progress events for each item (simulating note generation).
+
+    This implementation:
+    1. Reads output.csv (contains texteocr for each document)
+    2. Generates notes via LLM using build_note_html()
+    3. Creates notes in Zotero via API (if credentials available)
+    4. Streams real-time progress via SSE
     """
+    from dotenv import load_dotenv
+    from app.utils.llm_note_generator import build_note_html, sentinel_in_html
+    from app.utils.zotero_client import (
+        verify_api_key, create_child_note, check_note_exists,
+        ZoteroAPIError
+    )
+
+    # Reload .env to pick up any credential changes
+    load_dotenv(override=True)
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, session))
-    logger.info(f"Zotero notes generation for session: '{session}'")
-    
+    logger.info(f"Zotero notes generation for session: '{session}', extended: {extended_analysis}, model: {model}")
+
+    # Parse extended_analysis flag
+    use_extended = extended_analysis.lower() in ("true", "1", "yes")
+
     async def event_generator():
         try:
-            # Find Zotero JSON export (first .json file, ignoring chunks file)
-            json_files = [f for f in os.listdir(absolute_processing_path) if f.endswith('.json') and f != 'output_chunks.json']
-            if not json_files:
-                yield f"data: {{\"type\": \"error\", \"message\": \"No Zotero JSON found. This feature requires a Zotero export.\"}}\n\n"
+            # Check for output.csv (contains texteocr from pipeline)
+            csv_path = os.path.join(absolute_processing_path, 'output.csv')
+            if not os.path.exists(csv_path):
+                yield f"data: {{\"type\": \"error\", \"message\": \"output.csv not found. Please complete the extraction step first.\"}}\n\n"
                 return
 
-            json_path = os.path.join(absolute_processing_path, json_files[0])
-            # Load JSON content
-            with open(json_path, 'r', encoding='utf-8') as jf:
-                data = json.load(jf)
+            # Load CSV with documents
+            try:
+                df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+            except Exception as e:
+                yield f"data: {{\"type\": \"error\", \"message\": \"Failed to read CSV: {str(e)}\"}}\n\n"
+                return
 
-            # Zotero export can be a list of items or a dict with 'items'
-            items = data if isinstance(data, list) else data.get('items', [])
-            total_items = len(items)
+            if df.empty:
+                yield f"data: {{\"type\": \"error\", \"message\": \"CSV file is empty.\"}}\n\n"
+                return
+
+            # Check required columns
+            if 'texteocr' not in df.columns:
+                yield f"data: {{\"type\": \"error\", \"message\": \"CSV missing 'texteocr' column.\"}}\n\n"
+                return
+
+            total_items = len(df)
+
+            # Check Zotero credentials
+            zotero_api_key = os.getenv("ZOTERO_API_KEY", "")
+            zotero_user_id = os.getenv("ZOTERO_USER_ID", "")
+            zotero_group_id = os.getenv("ZOTERO_GROUP_ID", "")
+
+            # Determine library type and ID
+            has_zotero_creds = bool(zotero_api_key)
+            library_type = "groups" if zotero_group_id else "users"
+            library_id = zotero_group_id if zotero_group_id else zotero_user_id
+
+            if has_zotero_creds and library_id:
+                try:
+                    verify_api_key(zotero_api_key)
+                    zotero_mode = "api"
+                    logger.info(f"Zotero API verified. Library: {library_type}/{library_id}")
+                except ZoteroAPIError as e:
+                    logger.warning(f"Zotero API verification failed: {e}. Falling back to local-only mode.")
+                    zotero_mode = "local"
+            else:
+                zotero_mode = "local"
+                logger.info("No Zotero credentials. Notes will be generated locally only.")
 
             # Init event
-            yield f"data: {{\"type\": \"init\", \"total\": {total_items}, \"message\": \"Starting Zotero notes generation...\"}}\n\n"
+            mode_msg = "with Zotero sync" if zotero_mode == "api" else "local only (no Zotero credentials)"
+            yield f"data: {{\"type\": \"init\", \"total\": {total_items}, \"message\": \"Starting note generation ({mode_msg})...\"}}\n\n"
 
-            # Simulate processing each item
-            for idx, item in enumerate(items, start=1):
-                # Simulate some work (could be replaced by real processing)
-                await asyncio.sleep(0.05)
-                # Emit progress event with current/total and a simple message
-                title = item.get('title') if isinstance(item, dict) else str(item)
-                safe_title = title.replace('"', '\\"') if isinstance(title, str) else ''
-                # Simulated status; in real implementation this would reflect actual processing outcome
-                status = "created"
-                yield f"data: {{\"type\": \"progress\", \"current\": {idx}, \"total\": {total_items}, \"item\": \"{safe_title}\", \"status\": \"{status}\", \"message\": \"Processing {idx}/{total_items}: {safe_title}\"}}\n\n"
+            # Counters for summary
+            created = 0
+            exists = 0
+            skipped = 0
+            errors = 0
 
-            # Completion event with summary counts
+            # Storage for generated notes (if local mode or for backup)
+            generated_notes = []
+
+            # Process each document
+            for idx, row in df.iterrows():
+                doc_num = idx + 1
+                title = str(row.get('title', f'Document {doc_num}'))[:100]
+                safe_title = title.replace('"', '\\"').replace('\n', ' ')
+                item_key = str(row.get('itemKey', ''))
+                texteocr = str(row.get('texteocr', ''))
+
+                # Skip if no text content
+                if not texteocr.strip():
+                    skipped += 1
+                    yield f"data: {{\"type\": \"progress\", \"current\": {doc_num}, \"total\": {total_items}, \"item\": \"{safe_title}\", \"status\": \"skipped\", \"message\": \"Skipped (no text): {safe_title}\"}}\n\n"
+                    continue
+
+                try:
+                    # Prepare metadata for note generation
+                    metadata = {
+                        "title": row.get('title', ''),
+                        "authors": row.get('authors', ''),
+                        "date": row.get('date', ''),
+                        "abstract": row.get('abstract', ''),
+                        "doi": row.get('doi', ''),
+                        "url": row.get('url', ''),
+                        "language": row.get('language', 'fr'),
+                    }
+
+                    # Generate note with LLM
+                    # Run in executor to avoid blocking async loop
+                    # Use default args to capture current values (avoid closure issues)
+                    loop = asyncio.get_event_loop()
+                    sentinel, note_html = await loop.run_in_executor(
+                        None,
+                        lambda m=metadata, t=texteocr, mo=model, ext=use_extended: build_note_html(
+                            metadata=m,
+                            text_content=t,
+                            model=mo,
+                            use_llm=True,
+                            extended_analysis=ext
+                        )
+                    )
+
+                    # Store generated note
+                    generated_notes.append({
+                        "item_key": item_key,
+                        "title": title,
+                        "sentinel": sentinel,
+                        "note_html": note_html
+                    })
+
+                    # If Zotero API mode and we have itemKey, try to create note
+                    status = "created"
+                    if zotero_mode == "api" and item_key:
+                        try:
+                            # Check if note already exists
+                            # Use default args to capture current values
+                            note_exists = await loop.run_in_executor(
+                                None,
+                                lambda lt=library_type, lid=library_id, ik=item_key, s=sentinel, ak=zotero_api_key: check_note_exists(
+                                    lt, lid, ik, s, ak
+                                )
+                            )
+
+                            if note_exists:
+                                exists += 1
+                                status = "exists"
+                            else:
+                                # Create the note
+                                # Use default args to capture current values
+                                result = await loop.run_in_executor(
+                                    None,
+                                    lambda lt=library_type, lid=library_id, ik=item_key, nh=note_html, ak=zotero_api_key: create_child_note(
+                                        library_type=lt,
+                                        library_id=lid,
+                                        item_key=ik,
+                                        note_html=nh,
+                                        tags=["ragpy-generated"],
+                                        api_key=ak
+                                    )
+                                )
+
+                                if result.get("success"):
+                                    created += 1
+                                    status = "created"
+                                else:
+                                    errors += 1
+                                    status = "error"
+                                    logger.warning(f"Failed to create Zotero note for {item_key}: {result.get('message')}")
+                        except ZoteroAPIError as e:
+                            errors += 1
+                            status = "error"
+                            logger.error(f"Zotero API error for {item_key}: {e}")
+                    else:
+                        # Local mode - just count as created
+                        created += 1
+
+                    yield f"data: {{\"type\": \"progress\", \"current\": {doc_num}, \"total\": {total_items}, \"item\": \"{safe_title}\", \"status\": \"{status}\", \"message\": \"Processed {doc_num}/{total_items}: {safe_title}\"}}\n\n"
+
+                except Exception as e:
+                    errors += 1
+                    error_msg = str(e).replace('"', '\\"').replace('\n', ' ')[:100]
+                    logger.error(f"Error processing document {doc_num}: {e}", exc_info=True)
+                    yield f"data: {{\"type\": \"progress\", \"current\": {doc_num}, \"total\": {total_items}, \"item\": \"{safe_title}\", \"status\": \"error\", \"message\": \"Error: {error_msg}\"}}\n\n"
+
+                # Small delay to prevent overwhelming the API
+                await asyncio.sleep(0.1)
+
+            # Save generated notes to file for backup/review
+            if generated_notes:
+                notes_file = os.path.join(absolute_processing_path, 'generated_notes.json')
+                try:
+                    with open(notes_file, 'w', encoding='utf-8') as f:
+                        json.dump(generated_notes, f, ensure_ascii=False, indent=2)
+                    logger.info(f"Saved {len(generated_notes)} notes to {notes_file}")
+                except Exception as e:
+                    logger.warning(f"Could not save notes file: {e}")
+
+            # Completion event with summary
             summary = {
-                "created": total_items,
-                "exists": 0,
-                "skipped": 0,
-                "errors": 0
+                "created": created,
+                "exists": exists,
+                "skipped": skipped,
+                "errors": errors,
+                "mode": zotero_mode
             }
-            yield f"data: {{\"type\": \"complete\", \"message\": \"Zotero notes generation completed successfully\", \"summary\": {json.dumps(summary)}}}\n\n"
+            yield f"data: {{\"type\": \"complete\", \"message\": \"Note generation completed\", \"summary\": {json.dumps(summary)}}}\n\n"
+
         except Exception as e:
             logger.error(f"Zotero notes SSE error: {e}", exc_info=True)
-            yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
-    
+            error_msg = str(e).replace('"', '\\"').replace('\n', ' ')
+            yield f"data: {{\"type\": \"error\", \"message\": \"{error_msg}\"}}\n\n"
+
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
