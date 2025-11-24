@@ -1,18 +1,93 @@
-# Fichiers de configuration et secrets
-.env
-
-# Logs et fichiers temporaires
-logs/
-*.log
+# ══════════════════════════════════════════════════════════════
+# Environnement Python
+# ══════════════════════════════════════════════════════════════
+.venv/
+venv/
+env/
+ENV/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
 
 # Fichiers Python compilés
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
 
-# Fichiers générés par l'application
+# ══════════════════════════════════════════════════════════════
+# Configuration et secrets
+# ══════════════════════════════════════════════════════════════
+.env
+.env.local
+.env.*.local
+*.env
+secrets/
+credentials.json
+
+# ══════════════════════════════════════════════════════════════
+# Données et fichiers générés
+# ══════════════════════════════════════════════════════════════
+data/
 uploads/
-pdf_processing.log
-ragpy_cli.sh
+sources/
+logs/
+*.log
 
-# Fichiers de l'environnement local
+# Base de données
+*.db
+*.sqlite
+*.sqlite3
+
+# ══════════════════════════════════════════════════════════════
+# Tests et couverture
+# ══════════════════════════════════════════════════════════════
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ══════════════════════════════════════════════════════════════
+# IDE et éditeurs
+# ══════════════════════════════════════════════════════════════
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ══════════════════════════════════════════════════════════════
+# macOS
+# ══════════════════════════════════════════════════════════════
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ══════════════════════════════════════════════════════════════
+# Autres
+# ══════════════════════════════════════════════════════════════
 .Rhistory
+*.bak
+*.tmp
+*.temp
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Script CLI (généré localement)
+ragpy_cli.sh
