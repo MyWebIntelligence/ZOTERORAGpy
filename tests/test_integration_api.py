@@ -37,7 +37,7 @@ class TestIntegrationAPI(unittest.TestCase):
 
     def test_upload_csv_success(self):
         # Test uploading a valid csv file
-        csv_content = b"header1,header2\nval1,val2"
+        csv_content = b"header1,text\nval1,some text content"
         files = {'file': ('test.csv', csv_content, 'text/csv')}
         response = self.client.post("/upload_csv", files=files)
         self.assertEqual(response.status_code, 200)
