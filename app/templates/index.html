@@ -574,6 +574,51 @@
     background: linear-gradient(90deg, #8B5CF6, #A78BFA);
   }
 
+  /* Secondary Progress Bar (for chunk-level progress) */
+  .progress-secondary {
+    margin-top: var(--space-3);
+    opacity: 0;
+    max-height: 0;
+    overflow: hidden;
+    transition: all 0.3s ease;
+  }
+
+  .progress-secondary.active {
+    opacity: 1;
+    max-height: 100px;
+  }
+
+  .progress-secondary .progress-header {
+    margin-bottom: var(--space-2);
+  }
+
+  .progress-secondary .progress-count {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    min-width: 50px;
+  }
+
+  .progress-secondary .progress-status {
+    font-size: var(--text-xs);
+  }
+
+  .progress-secondary .progress-bar-wrapper {
+    height: 4px;
+  }
+
+  .progress-secondary .progress-bar-fill {
+    background: linear-gradient(90deg, #10B981, #34D399);
+  }
+
+  .progress-label {
+    font-size: var(--text-xs);
+    font-weight: var(--font-medium);
+    color: var(--color-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: var(--space-1);
+  }
+
   /* Result Box */
   .result {
     margin-top: var(--space-4);
@@ -930,12 +975,27 @@
       </button>
 
       <div id="csvProgress" class="progress-container" style="display:none;">
-        <div class="progress-header">
-          <span id="csvProgressCount" class="progress-count">0/0</span>
-          <span id="csvProgressStatus" class="progress-status">Processing...</span>
+        <!-- Primary progress (rows/documents) -->
+        <div class="progress-primary">
+          <div class="progress-label">Documents</div>
+          <div class="progress-header">
+            <span id="csvProgressCount" class="progress-count">0/0</span>
+            <span id="csvProgressStatus" class="progress-status">Processing...</span>
+          </div>
+          <div class="progress-bar-wrapper">
+            <div id="csvProgressBar" class="progress-bar-fill"></div>
+          </div>
         </div>
-        <div class="progress-bar-wrapper">
-          <div id="csvProgressBar" class="progress-bar-fill"></div>
+        <!-- Secondary progress (chunks/pages) -->
+        <div id="csvProgressSecondary" class="progress-secondary">
+          <div class="progress-label">Chunks</div>
+          <div class="progress-header">
+            <span id="csvProgressSecondaryCount" class="progress-count">0/0</span>
+            <span id="csvProgressSecondaryStatus" class="progress-status"></span>
+          </div>
+          <div class="progress-bar-wrapper">
+            <div id="csvProgressSecondaryBar" class="progress-bar-fill"></div>
+          </div>
         </div>
       </div>
 
@@ -983,6 +1043,32 @@
             <button id="runInitialChunkBtn" class="btn btn-primary">
               <i class="bi bi-scissors"></i> Generate Chunks
             </button>
+
+            <div id="initialChunkProgress" class="progress-container" style="display:none;">
+              <!-- Primary progress (rows/documents) -->
+              <div class="progress-primary">
+                <div class="progress-label">Documents</div>
+                <div class="progress-header">
+                  <span id="initialChunkProgressCount" class="progress-count">0/0</span>
+                  <span id="initialChunkProgressStatus" class="progress-status">Processing...</span>
+                </div>
+                <div class="progress-bar-wrapper">
+                  <div id="initialChunkProgressBar" class="progress-bar-fill"></div>
+                </div>
+              </div>
+              <!-- Secondary progress (chunks) -->
+              <div id="initialChunkProgressSecondary" class="progress-secondary">
+                <div class="progress-label">Chunks</div>
+                <div class="progress-header">
+                  <span id="initialChunkProgressSecondaryCount" class="progress-count">0/0</span>
+                  <span id="initialChunkProgressSecondaryStatus" class="progress-status"></span>
+                </div>
+                <div class="progress-bar-wrapper">
+                  <div id="initialChunkProgressSecondaryBar" class="progress-bar-fill"></div>
+                </div>
+              </div>
+            </div>
+
             <div id="initialChunkResult" class="result"></div>
           </div>
 
@@ -996,6 +1082,21 @@
             <button id="runDenseEmbeddingBtn" class="btn btn-primary">
               <i class="bi bi-grid-3x3-gap"></i> Generate Dense Embeddings
             </button>
+
+            <div id="denseEmbeddingProgress" class="progress-container" style="display:none;">
+              <!-- Primary progress (chunks only - documents were processed in 3.1) -->
+              <div class="progress-primary">
+                <div class="progress-label">Chunks</div>
+                <div class="progress-header">
+                  <span id="denseEmbeddingProgressCount" class="progress-count">0/0</span>
+                  <span id="denseEmbeddingProgressStatus" class="progress-status">Processing...</span>
+                </div>
+                <div class="progress-bar-wrapper">
+                  <div id="denseEmbeddingProgressBar" class="progress-bar-fill"></div>
+                </div>
+              </div>
+            </div>
+
             <div id="denseEmbeddingResult" class="result"></div>
           </div>
 
@@ -1009,6 +1110,21 @@
             <button id="runSparseEmbeddingBtn" class="btn btn-primary">
               <i class="bi bi-grid"></i> Generate Sparse Embeddings
             </button>
+
+            <div id="sparseEmbeddingProgress" class="progress-container" style="display:none;">
+              <!-- Primary progress (chunks) -->
+              <div class="progress-primary">
+                <div class="progress-label">Chunks</div>
+                <div class="progress-header">
+                  <span id="sparseEmbeddingProgressCount" class="progress-count">0/0</span>
+                  <span id="sparseEmbeddingProgressStatus" class="progress-status">Processing...</span>
+                </div>
+                <div class="progress-bar-wrapper">
+                  <div id="sparseEmbeddingProgressBar" class="progress-bar-fill"></div>
+                </div>
+              </div>
+            </div>
+
             <div id="sparseEmbeddingResult" class="result"></div>
           </div>
 
@@ -1509,6 +1625,62 @@
     }
   });
 
+  // ========================================
+  // MULTILEVEL PROGRESS HANDLER
+  // ========================================
+  function createMultilevelProgressHandler(config) {
+    /**
+     * Creates a handler for multilevel SSE progress events.
+     *
+     * config: {
+     *   primaryBar, primaryCount, primaryStatus,
+     *   secondaryContainer, secondaryBar, secondaryCount, secondaryStatus (optional),
+     *   primaryLabel (default: 'row'), secondaryLabel (default: 'chunk')
+     * }
+     */
+    let primaryTotal = 0;
+    let secondaryTotal = 0;
+
+    return function handleProgressEvent(data) {
+      const level = data.level || 'row';  // Default to row if no level specified
+
+      if (data.type === 'init') {
+        primaryTotal = data.total || 0;
+        config.primaryCount.textContent = `0/${primaryTotal}`;
+        config.primaryStatus.textContent = data.message || 'Processing...';
+        config.primaryBar.style.width = '0%';
+        // Reset secondary
+        if (config.secondaryContainer) {
+          config.secondaryContainer.classList.remove('active');
+          config.secondaryBar.style.width = '0%';
+        }
+      } else if (data.type === 'progress') {
+        if (level === 'row' || level === config.primaryLabel) {
+          // Primary progress (documents/rows)
+          const percent = data.percent || Math.round((data.current / data.total) * 100);
+          config.primaryBar.style.width = `${percent}%`;
+          config.primaryCount.textContent = `${data.current}/${data.total}`;
+          config.primaryStatus.textContent = data.message || `Processing ${data.current}/${data.total}`;
+          primaryTotal = data.total;
+          // Reset secondary when moving to new row
+          if (config.secondaryContainer && config.secondaryBar) {
+            config.secondaryBar.style.width = '0%';
+          }
+        } else if ((level === 'chunk' || level === config.secondaryLabel) && config.secondaryContainer) {
+          // Secondary progress (chunks)
+          config.secondaryContainer.classList.add('active');
+          const percent = data.percent || Math.round((data.current / data.total) * 100);
+          config.secondaryBar.style.width = `${percent}%`;
+          config.secondaryCount.textContent = `${data.current}/${data.total}`;
+          config.secondaryStatus.textContent = data.message || `Chunk ${data.current}/${data.total}`;
+          secondaryTotal = data.total;
+        }
+      }
+
+      return { primaryTotal, secondaryTotal };
+    };
+  }
+
   // Step 2: Process DataFrame with SSE
   document.getElementById('processDataframeBtn').addEventListener('click', async () => {
     const resultDiv = document.getElementById('dataframeResult');
@@ -1516,6 +1688,10 @@
     const progressBar = document.getElementById('csvProgressBar');
     const progressCount = document.getElementById('csvProgressCount');
     const progressStatus = document.getElementById('csvProgressStatus');
+    const secondaryContainer = document.getElementById('csvProgressSecondary');
+    const secondaryBar = document.getElementById('csvProgressSecondaryBar');
+    const secondaryCount = document.getElementById('csvProgressSecondaryCount');
+    const secondaryStatus = document.getElementById('csvProgressSecondaryStatus');
 
     if (!ensureSessionPath(resultDiv)) return;
 
@@ -1524,6 +1700,22 @@
     progressBar.style.width = '0%';
     progressCount.textContent = '0/0';
     progressStatus.textContent = 'Starting...';
+    secondaryContainer.classList.remove('active');
+
+    // Track document total for final count display
+    let lastTotal = 0;
+
+    const handleProgress = createMultilevelProgressHandler({
+      primaryBar: progressBar,
+      primaryCount: progressCount,
+      primaryStatus: progressStatus,
+      secondaryContainer: secondaryContainer,
+      secondaryBar: secondaryBar,
+      secondaryCount: secondaryCount,
+      secondaryStatus: secondaryStatus,
+      primaryLabel: 'row',
+      secondaryLabel: 'chunk'
+    });
 
     const formData = new FormData();
     formData.append('path', currentPath);
@@ -1545,17 +1737,20 @@
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.substring(6));
-              if (data.type === 'init') {
-                progressCount.textContent = `0/${data.total}`;
-                progressStatus.textContent = data.message || 'Processing...';
-              } else if (data.type === 'progress') {
-                const percent = Math.round((data.current / data.total) * 100);
-                progressBar.style.width = `${percent}%`;
-                progressCount.textContent = `${data.current}/${data.total}`;
-                progressStatus.textContent = `Processing item ${data.current}...`;
+              if (data.type === 'init' || data.type === 'progress') {
+                handleProgress(data);
+                // Track total for final display
+                if (data.total) {
+                  lastTotal = data.total;
+                }
               } else if (data.type === 'complete') {
                 progressBar.style.width = '100%';
+                // Update count to show final total
+                if (lastTotal > 0) {
+                  progressCount.textContent = `${lastTotal}/${lastTotal}`;
+                }
                 progressStatus.textContent = 'Complete!';
+                secondaryContainer.classList.remove('active');
                 resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink('output.csv')}</p>`;
                 completeStep('extraction', 'output.csv');
                 markSectionCompleted('dataframe-section');
@@ -1577,33 +1772,98 @@
     }
   });
 
-  // Step 3.1: Initial Chunking
+  // Step 3.1: Initial Chunking with SSE
   document.getElementById('runInitialChunkBtn').addEventListener('click', async () => {
     const resultDiv = document.getElementById('initialChunkResult');
+    const progressDiv = document.getElementById('initialChunkProgress');
+    const progressBar = document.getElementById('initialChunkProgressBar');
+    const progressCount = document.getElementById('initialChunkProgressCount');
+    const progressStatus = document.getElementById('initialChunkProgressStatus');
+    const secondaryContainer = document.getElementById('initialChunkProgressSecondary');
+    const secondaryBar = document.getElementById('initialChunkProgressSecondaryBar');
+    const secondaryCount = document.getElementById('initialChunkProgressSecondaryCount');
+    const secondaryStatus = document.getElementById('initialChunkProgressSecondaryStatus');
+
     if (!ensureSessionPath(resultDiv)) return;
-    resultDiv.textContent = 'Running initial chunking...';
-    const form = new URLSearchParams();
-    form.append('path', currentPath);
+
+    resultDiv.innerHTML = '';
+    progressDiv.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressCount.textContent = '0/0';
+    progressStatus.textContent = 'Starting chunking...';
+    secondaryContainer.classList.remove('active');
+
+    // Track document total for final count display
+    let lastDocumentTotal = 0;
+
+    const handleProgress = createMultilevelProgressHandler({
+      primaryBar: progressBar,
+      primaryCount: progressCount,
+      primaryStatus: progressStatus,
+      secondaryContainer: secondaryContainer,
+      secondaryBar: secondaryBar,
+      secondaryCount: secondaryCount,
+      secondaryStatus: secondaryStatus,
+      primaryLabel: 'row',
+      secondaryLabel: 'chunk'
+    });
+
+    const formData = new FormData();
+    formData.append('path', currentPath);
     const model = document.getElementById('recodingModelInput').value.trim();
-    if (model) form.append('model', model);
+    if (model) formData.append('model', model);
+
     try {
-      const res = await fetch('/initial_text_chunking', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: form.toString()
-      });
-      const json = await res.json();
-      if (res.ok && json.status === "success") {
-        const fileName = json.file.split('/').pop();
-        resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${json.count}</strong></p>`;
-        completeStep('chunking', fileName);
-        markSectionCompleted('initial-chunk-section');
-        unlockSection('dense-embedding-section');
-        showToast('Chunks generated successfully!', 'success');
-      } else {
-        resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}</p>`;
+      const response = await fetch('/initial_text_chunking_sse', { method: 'POST', body: formData });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.substring(6));
+              if (data.type === 'init' || data.type === 'progress') {
+                handleProgress(data);
+                // Track document total for final display
+                if (data.level === 'row' && data.total) {
+                  lastDocumentTotal = data.total;
+                } else if (data.type === 'init' && data.total) {
+                  lastDocumentTotal = data.total;
+                }
+              } else if (data.type === 'complete') {
+                progressBar.style.width = '100%';
+                // Update count to show final document count
+                if (lastDocumentTotal > 0) {
+                  progressCount.textContent = `${lastDocumentTotal}/${lastDocumentTotal}`;
+                }
+                progressStatus.textContent = 'Complete!';
+                secondaryContainer.classList.remove('active');
+                const fileName = 'output_chunks.json';
+                resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${data.count || 'N/A'}</strong></p>`;
+                completeStep('chunking', fileName);
+                markSectionCompleted('initial-chunk-section');
+                unlockSection('dense-embedding-section');
+                showToast('Chunks generated successfully!', 'success');
+              } else if (data.type === 'error') {
+                progressStatus.textContent = 'Error';
+                resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+              }
+            } catch (e) {
+              console.error('Failed to parse SSE:', e);
+            }
+          }
+        }
       }
     } catch (err) {
+      progressStatus.textContent = 'Failed';
       resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
     }
   });
@@ -1620,31 +1880,78 @@
     unlockSection('dense-embedding-section');
   });
 
-  // Step 3.2: Dense Embeddings
+  // Step 3.2: Dense Embeddings with SSE (chunks only - documents were processed in 3.1)
   document.getElementById('runDenseEmbeddingBtn').addEventListener('click', async () => {
     const resultDiv = document.getElementById('denseEmbeddingResult');
+    const progressDiv = document.getElementById('denseEmbeddingProgress');
+    const progressBar = document.getElementById('denseEmbeddingProgressBar');
+    const progressCount = document.getElementById('denseEmbeddingProgressCount');
+    const progressStatus = document.getElementById('denseEmbeddingProgressStatus');
+
     if (!ensureSessionPath(resultDiv)) return;
-    resultDiv.textContent = 'Generating dense embeddings...';
-    const form = new URLSearchParams();
-    form.append('path', currentPath);
+
+    resultDiv.innerHTML = '';
+    progressDiv.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressCount.textContent = '0/0';
+    progressStatus.textContent = 'Generating dense embeddings...';
+
+    const handleProgress = createMultilevelProgressHandler({
+      primaryBar: progressBar,
+      primaryCount: progressCount,
+      primaryStatus: progressStatus,
+      secondaryContainer: null,
+      primaryLabel: 'chunk',
+      secondaryLabel: null
+    });
+
+    const formData = new FormData();
+    formData.append('path', currentPath);
+
     try {
-      const res = await fetch('/dense_embedding_generation', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: form.toString()
-      });
-      const json = await res.json();
-      if (res.ok && json.status === "success") {
-        const fileName = json.file.split('/').pop();
-        resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${json.count}</strong></p>`;
-        completeStep('denseEmbed', fileName);
-        markSectionCompleted('dense-embedding-section');
-        unlockSection('sparse-embedding-section');
-        showToast('Dense embeddings generated!', 'success');
-      } else {
-        resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}</p>`;
+      const response = await fetch('/dense_embedding_generation_sse', { method: 'POST', body: formData });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.substring(6));
+              if (data.type === 'init' || data.type === 'progress') {
+                handleProgress(data);
+              } else if (data.type === 'complete') {
+                progressBar.style.width = '100%';
+                // Update count to show final value
+                if (data.count) {
+                  progressCount.textContent = `${data.count}/${data.count}`;
+                }
+                progressStatus.textContent = 'Complete!';
+                const fileName = 'output_chunks_with_embeddings.json';
+                resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${data.count || 'N/A'}</strong></p>`;
+                completeStep('denseEmbed', fileName);
+                markSectionCompleted('dense-embedding-section');
+                unlockSection('sparse-embedding-section');
+                showToast('Dense embeddings generated!', 'success');
+              } else if (data.type === 'error') {
+                progressStatus.textContent = 'Error';
+                resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+              }
+            } catch (e) {
+              console.error('Failed to parse SSE:', e);
+            }
+          }
+        }
       }
     } catch (err) {
+      progressStatus.textContent = 'Failed';
       resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
     }
   });
@@ -1661,31 +1968,78 @@
     unlockSection('sparse-embedding-section');
   });
 
-  // Step 3.3: Sparse Embeddings
+  // Step 3.3: Sparse Embeddings with SSE
   document.getElementById('runSparseEmbeddingBtn').addEventListener('click', async () => {
     const resultDiv = document.getElementById('sparseEmbeddingResult');
+    const progressDiv = document.getElementById('sparseEmbeddingProgress');
+    const progressBar = document.getElementById('sparseEmbeddingProgressBar');
+    const progressCount = document.getElementById('sparseEmbeddingProgressCount');
+    const progressStatus = document.getElementById('sparseEmbeddingProgressStatus');
+
     if (!ensureSessionPath(resultDiv)) return;
-    resultDiv.textContent = 'Generating sparse embeddings...';
-    const form = new URLSearchParams();
-    form.append('path', currentPath);
+
+    resultDiv.innerHTML = '';
+    progressDiv.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressCount.textContent = '0/0';
+    progressStatus.textContent = 'Generating sparse embeddings...';
+
+    const handleProgress = createMultilevelProgressHandler({
+      primaryBar: progressBar,
+      primaryCount: progressCount,
+      primaryStatus: progressStatus,
+      secondaryContainer: null,
+      primaryLabel: 'chunk',
+      secondaryLabel: null
+    });
+
+    const formData = new FormData();
+    formData.append('path', currentPath);
+
     try {
-      const res = await fetch('/sparse_embedding_generation', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: form.toString()
-      });
-      const json = await res.json();
-      if (res.ok && json.status === "success") {
-        const fileName = json.file.split('/').pop();
-        resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${json.count}</strong></p>`;
-        completeStep('sparseEmbed', fileName);
-        markSectionCompleted('sparse-embedding-section');
-        unlockSection('db-section');
-        showToast('Sparse embeddings generated!', 'success');
-      } else {
-        resultDiv.innerHTML = `<p class="error-text">Error: ${json.error || "Unknown error"}</p>`;
+      const response = await fetch('/sparse_embedding_generation_sse', { method: 'POST', body: formData });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.substring(6));
+              if (data.type === 'init' || data.type === 'progress') {
+                handleProgress(data);
+              } else if (data.type === 'complete') {
+                progressBar.style.width = '100%';
+                // Update count to show final value
+                if (data.count) {
+                  progressCount.textContent = `${data.count}/${data.count}`;
+                }
+                progressStatus.textContent = 'Complete!';
+                const fileName = 'output_chunks_with_embeddings_sparse.json';
+                resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${data.count || 'N/A'}</strong></p>`;
+                completeStep('sparseEmbed', fileName);
+                markSectionCompleted('sparse-embedding-section');
+                unlockSection('db-section');
+                showToast('Sparse embeddings generated!', 'success');
+              } else if (data.type === 'error') {
+                progressStatus.textContent = 'Error';
+                resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+              }
+            } catch (e) {
+              console.error('Failed to parse SSE:', e);
+            }
+          }
+        }
       }
     } catch (err) {
+      progressStatus.textContent = 'Failed';
       resultDiv.innerHTML = `<p class="error-text">Request failed: ${err}</p>`;
     }
   });
@@ -1858,16 +2212,28 @@
     }
   });
 
-  // Stop All Scripts
+  // Stop All Scripts (session-aware)
   document.getElementById('stopAllScriptsBtn').addEventListener('click', async () => {
     const stopResultDiv = document.getElementById('stopScriptsResult');
-    stopResultDiv.textContent = 'Stopping scripts...';
     stopResultDiv.style.display = 'block';
+
+    // Vérifier qu'une session est sélectionnée
+    if (!currentPath) {
+      stopResultDiv.textContent = 'Error: No session selected. Please upload or select a session first.';
+      showToast('No session selected', 'warning');
+      return;
+    }
+
+    stopResultDiv.textContent = 'Stopping scripts for this session...';
     try {
-      const res = await fetch('/stop_all_scripts', { method: 'POST' });
+      const formData = new FormData();
+      formData.append('session', currentPath);
+      const res = await fetch('/stop_all_scripts', { method: 'POST', body: formData });
       const json = await res.json();
       if (res.ok) {
-        stopResultDiv.textContent = `Stop command sent. Status: ${json.status}`;
+        const details = json.details || {};
+        const stopped = details.total_stopped || 0;
+        stopResultDiv.textContent = `${json.status} (${stopped} process(es) stopped)`;
         showToast('Scripts stopped', 'info');
       } else {
         stopResultDiv.textContent = `Error: ${json.error || res.statusText}`;

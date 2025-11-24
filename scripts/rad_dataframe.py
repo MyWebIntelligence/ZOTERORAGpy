@@ -619,7 +619,12 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
         if already_done > 0:
             logger.info(f"Resuming: {already_done}/{total_items} items already processed")
 
+        # Emit init event for SSE progress tracking
+        print(f"PROGRESS|init|{total_items}|Found {total_items} Zotero items to process", flush=True)
+
+        item_count = 0
         for item in tqdm(items, desc="Processing Zotero items"):
+            item_count += 1
             item_key = item.get("key") or item.get("itemKey", "")
 
             # Skip if already processed (checkpoint)
@@ -717,6 +722,10 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
                     # Save progress after each item
                     save_progress(output_csv, processed_keys)
 
+                # Emit row-level progress for SSE
+                title_short = item.get("title", f"Item {item_key}")[:50]
+                print(f"PROGRESS|row|{item_count}/{total_items}|{title_short}", flush=True)
+
             except Exception as item_error:
                 logger.error(f"Error processing item {item_key}: {item_error}")
                 errors.append({
@@ -726,6 +735,8 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
                     "error_message": str(item_error),
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                 })
+                # Emit error progress
+                print(f"PROGRESS|row|{item_count}/{total_items}|Error: {item_key}", flush=True)
                 # Mark as processed to avoid infinite retry loop
                 if item_key:
                     processed_keys.add(item_key)

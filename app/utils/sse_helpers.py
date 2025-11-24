@@ -282,13 +282,79 @@ def parse_chunking_logs(line: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def parse_multilevel_progress(line: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse structured multilevel progress logs.
+
+    Format: PROGRESS|level|current/total|message
+
+    Levels:
+        - row: CSV row being processed (primary progress)
+        - chunk: Chunk being processed (secondary progress)
+        - page: PDF page being processed (secondary progress)
+        - embed: Embedding being generated (secondary progress)
+
+    Examples:
+        "PROGRESS|row|5/20|Processing: document.pdf"
+        "PROGRESS|chunk|150/500|Generating embedding"
+        "PROGRESS|page|3/15|OCR page 3"
+        "PROGRESS|init|20|Found 20 documents to process"
+    """
+    if not line.startswith("PROGRESS|"):
+        return None
+
+    try:
+        parts = line.split("|", 3)  # Max 4 parts
+        if len(parts) < 3:
+            return None
+
+        level = parts[1].strip().lower()
+
+        # Handle init event (special case: total only)
+        if level == "init":
+            total = int(parts[2].strip())
+            message = parts[3].strip() if len(parts) > 3 else f"Found {total} items"
+            return {
+                "type": "init",
+                "total": total,
+                "message": message
+            }
+
+        # Parse current/total
+        counts = parts[2].strip()
+        if "/" not in counts:
+            return None
+
+        current_str, total_str = counts.split("/", 1)
+        current = int(current_str.strip())
+        total = int(total_str.strip())
+
+        # Get message (optional)
+        message = parts[3].strip() if len(parts) > 3 else f"{level.capitalize()} {current}/{total}"
+
+        # Calculate percentage
+        percent = round((current / total) * 100) if total > 0 else 0
+
+        return {
+            "type": "progress",
+            "level": level,
+            "current": current,
+            "total": total,
+            "percent": percent,
+            "message": message
+        }
+    except (ValueError, IndexError) as e:
+        logger.debug(f"Failed to parse multilevel progress: {line} - {e}")
+        return None
+
+
 def create_combined_parser(*parsers: Callable[[str], Optional[Dict[str, Any]]]) -> Callable[[str], Optional[Dict[str, Any]]]:
     """
     Create a combined parser that tries multiple parsers in order.
-    
+
     Args:
         *parsers: Variable number of parser functions
-        
+
     Returns:
         A parser function that tries each parser until one returns a result
     """
@@ -298,5 +364,5 @@ def create_combined_parser(*parsers: Callable[[str], Optional[Dict[str, Any]]]) 
             if result:
                 return result
         return None
-    
+
     return combined
