@@ -11,6 +11,8 @@ import re
 import logging
 from typing import AsyncGenerator, Callable, Optional, Dict, Any
 
+from app.services.process_manager import process_manager
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,21 +20,23 @@ async def run_subprocess_with_sse(
     cmd: list[str],
     progress_parser: Callable[[str], Optional[Dict[str, Any]]],
     *,
+    session_folder: Optional[str] = None,
     error_keywords: Optional[list[str]] = None,
     timeout: Optional[int] = None
 ) -> AsyncGenerator[str, None]:
     """
     Execute a subprocess and stream SSE events by parsing stdout/stderr.
-    
+
     Args:
         cmd: Command and arguments to execute
         progress_parser: Function that parses log lines and returns event dict or None
+        session_folder: Session identifier for PID tracking (enables session-aware stop)
         error_keywords: List of keywords that indicate errors in output
         timeout: Optional timeout in seconds
-    
+
     Yields:
         SSE-formatted strings: "data: {JSON}\\n\\n"
-        
+
     Event types emitted:
         - init: Initial setup with total count if known
         - progress: Progress updates with current/total
@@ -40,7 +44,7 @@ async def run_subprocess_with_sse(
         - error: Error occurred
     """
     error_keywords = error_keywords or ["error", "failed", "exception", "traceback"]
-    
+
     try:
         # Create subprocess with both stdout and stderr captured
         process = await asyncio.create_subprocess_exec(
@@ -48,7 +52,12 @@ async def run_subprocess_with_sse(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        
+
+        # Register PID for session-aware process management
+        if session_folder:
+            process_manager.register(session_folder, process.pid)
+            logger.info(f"Registered async PID {process.pid} for session '{session_folder}'")
+
         logger.info(f"Started subprocess: {' '.join(cmd)}")
         
         async def read_stream(stream, stream_name):
@@ -125,17 +134,31 @@ async def run_subprocess_with_sse(
             await asyncio.wait_for(process.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             process.kill()
+            # Cleanup PID tracking on timeout
+            if session_folder:
+                process_manager.unregister(session_folder, process.pid)
             yield f"data: {{\"type\": \"error\", \"message\": \"Process timed out\"}}\n\n"
             return
-        
+
+        # Cleanup PID tracking on completion
+        if session_folder:
+            process_manager.unregister(session_folder, process.pid)
+            logger.info(f"Unregistered async PID {process.pid} for session '{session_folder}'")
+
         # Check exit code
         if process.returncode != 0:
             yield f"data: {{\"type\": \"error\", \"message\": \"Process failed with code {process.returncode}\"}}\n\n"
         else:
             yield f"data: {{\"type\": \"complete\", \"message\": \"Process completed successfully\"}}\n\n"
-            
+
     except Exception as e:
         logger.error(f"Subprocess error: {e}", exc_info=True)
+        # Try to cleanup PID tracking on error (process may not exist)
+        try:
+            if session_folder and 'process' in locals():
+                process_manager.unregister(session_folder, process.pid)
+        except Exception:
+            pass
         yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
 
 

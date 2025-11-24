@@ -8,6 +8,7 @@ from fastapi import APIRouter, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import APP_DIR, RAGPY_DIR, UPLOAD_DIR
+from app.services.process_manager import process_manager
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -15,38 +16,96 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post("/stop_all_scripts")
-async def stop_all_scripts():
-    command = 'pkill -SIGTERM -f "python3 scripts/rad_"'
-    action_taken = False
-    details = ""
-    status_message = "Attempting to stop scripts..."
-    try:
-        # Using shell=True for pkill with pattern matching.
-        process = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=900)
-        
-        if process.returncode == 0:
-            logger.info(f"Successfully sent SIGTERM to processes matching 'python3 scripts/rad_'. stdout: {process.stdout.strip()}, stderr: {process.stderr.strip()}")
-            action_taken = True
-            details = f"SIGTERM signal sent. pkill stdout: '{process.stdout.strip()}', stderr: '{process.stderr.strip()}'"
-            status_message = "Stop signal sent to running scripts."
-        elif process.returncode == 1: # No processes matched
-            logger.info("No 'python3 scripts/rad_' processes found by pkill.")
-            details = "No matching script processes were found running."
-            status_message = "No relevant scripts found running."
-        else: # Other pkill errors
-            logger.error(f"pkill command failed with return code {process.returncode}. stderr: {process.stderr.strip()}")
-            details = f"pkill command error (code {process.returncode}): {process.stderr.strip()}"
-            status_message = "Error attempting to stop scripts."
-        
-        return JSONResponse({"status": status_message, "action_taken": action_taken, "details": details})
+def run_tracked_subprocess(
+    cmd: list,
+    session_folder: str,
+    timeout: int = 1800
+) -> subprocess.CompletedProcess:
+    """
+    Lance un subprocess avec tracking PID pour permettre l'arrêt par session.
 
+    Args:
+        cmd: Commande à exécuter (liste d'arguments)
+        session_folder: Identifiant de la session pour le tracking
+        timeout: Timeout en secondes (défaut: 30 min)
+
+    Returns:
+        subprocess.CompletedProcess avec stdout, stderr, returncode
+    """
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    # Enregistrer le PID pour permettre l'arrêt
+    process_manager.register(session_folder, process.pid)
+    logger.info(f"Started process PID {process.pid} for session '{session_folder}'")
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=process.returncode,
+            stdout=stdout,
+            stderr=stderr
+        )
     except subprocess.TimeoutExpired:
-        logger.error("pkill command timed out.")
-        return JSONResponse(status_code=500, content={"error": "Stop command timed out.", "details": "pkill command took too long to execute."})
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    finally:
+        # Toujours désenregistrer le PID à la fin
+        process_manager.unregister(session_folder, process.pid)
+        logger.info(f"Process PID {process.pid} finished for session '{session_folder}'")
+
+
+@router.post("/stop_all_scripts")
+async def stop_all_scripts(session: str = Form(...)):
+    """
+    Arrête les processus de traitement d'une session spécifique.
+
+    IMPORTANT: Le paramètre session est OBLIGATOIRE pour garantir l'isolation
+    entre utilisateurs. Chaque utilisateur ne peut arrêter que les processus
+    de sa propre session.
+
+    Args:
+        session: Identifiant de la session (chemin relatif du dossier session)
+
+    Returns:
+        JSONResponse avec le statut de l'opération
+    """
+    if not session or not session.strip():
+        logger.warning("stop_all_scripts called without session parameter")
+        return JSONResponse(status_code=400, content={
+            "error": "Session parameter is required",
+            "details": "You must specify which session's processes to stop."
+        })
+
+    session = session.strip()
+
+    # Valider que le dossier session existe
+    session_path = os.path.join(UPLOAD_DIR, session)
+    if not os.path.isdir(session_path):
+        logger.warning(f"stop_all_scripts: session not found: {session}")
+        return JSONResponse(status_code=404, content={
+            "error": f"Session not found: {session}",
+            "details": "The specified session directory does not exist."
+        })
+
+    try:
+        # Utiliser le ProcessManager pour arrêter uniquement les processus de cette session
+        result = process_manager.stop_session(session)
+        logger.info(f"stop_all_scripts result for session '{session}': {result}")
+        return JSONResponse(result)
+
     except Exception as e:
-        logger.error(f"Exception while trying to stop scripts: {str(e)}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": "Failed to execute stop command.", "details": str(e)})
+        logger.error(f"Exception in stop_all_scripts for session '{session}': {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={
+            "error": "Failed to execute stop command.",
+            "details": str(e)
+        })
 
 
 @router.post("/process_dataframe")
@@ -140,13 +199,17 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
 
                 logger.info(f"Executing rad_dataframe.py with command: python3 {script_path} ...")
 
-                # Use shell=False for better security and explicit argument passing
-                result = subprocess.run([
-                    "python3", script_path,
-                    "--json", json_path,
-                    "--dir", absolute_processing_path,
-                    "--output", out_csv
-                ], check=False, capture_output=True, text=True)
+                # Use tracked subprocess for session-aware process management
+                result = run_tracked_subprocess(
+                    cmd=[
+                        "python3", script_path,
+                        "--json", json_path,
+                        "--dir", absolute_processing_path,
+                        "--output", out_csv
+                    ],
+                    session_folder=path,
+                    timeout=1800
+                )
 
                 # Manually check the return code and handle
                 if result.returncode != 0:
@@ -261,15 +324,19 @@ async def initial_text_chunking(path: str = Form(...), model: str = Form(None)):
     logger.info(f"  Model: {model}")
     
     try:
-        # Run rad_chunk.py with phase=initial
-        result = subprocess.run([
-            "python3", script_path,
-            "--input", input_csv,
-            "--output", absolute_processing_path,
-            "--phase", "initial",
-            "--model", model
-        ], check=False, capture_output=True, text=True, timeout=1800)  # 30 min timeout
-        
+        # Run rad_chunk.py with phase=initial (tracked for session-aware stop)
+        result = run_tracked_subprocess(
+            cmd=[
+                "python3", script_path,
+                "--input", input_csv,
+                "--output", absolute_processing_path,
+                "--phase", "initial",
+                "--model", model
+            ],
+            session_folder=path,
+            timeout=1800
+        )
+
         if result.returncode != 0:
             logger.error(f"Chunking script failed with code {result.returncode}")
             logger.error(f"stderr: {result.stderr}")
@@ -359,9 +426,9 @@ async def process_dataframe_sse(path: str = Form(...)):
     
     # Use combined parser for tqdm and custom logs
     parser = create_combined_parser(parse_tqdm_progress, parse_dataframe_logs)
-    
+
     return StreamingResponse(
-        run_subprocess_with_sse(cmd, parser, timeout=1800),
+        run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800),
         media_type="text/event-stream"
     )
 
@@ -388,13 +455,17 @@ async def dense_embedding_generation(path: str = Form(...)):
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     
     try:
-        result = subprocess.run([
-            "python3", script_path,
-            "--input", input_chunks,
-            "--output", absolute_processing_path,
-            "--phase", "dense"
-        ], check=False, capture_output=True, text=True, timeout=1800)
-        
+        result = run_tracked_subprocess(
+            cmd=[
+                "python3", script_path,
+                "--input", input_chunks,
+                "--output", absolute_processing_path,
+                "--phase", "dense"
+            ],
+            session_folder=path,
+            timeout=1800
+        )
+
         if result.returncode != 0:
             logger.error(f"Dense embedding failed: {result.stderr}")
             return JSONResponse(status_code=500, content={
@@ -449,13 +520,17 @@ async def sparse_embedding_generation(path: str = Form(...)):
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     
     try:
-        result = subprocess.run([
-            "python3", script_path,
-            "--input", input_file,
-            "--output", absolute_processing_path,
-            "--phase", "sparse"
-        ], check=False, capture_output=True, text=True, timeout=1800)
-        
+        result = run_tracked_subprocess(
+            cmd=[
+                "python3", script_path,
+                "--input", input_file,
+                "--output", absolute_processing_path,
+                "--phase", "sparse"
+            ],
+            session_folder=path,
+            timeout=1800
+        )
+
         if result.returncode != 0:
             logger.error(f"Sparse embedding failed: {result.stderr}")
             return JSONResponse(status_code=500, content={
@@ -536,8 +611,12 @@ async def upload_db(
             cmd.extend(["--collection", qdrant_collection_name])
     
     try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=3600)
-        
+        result = run_tracked_subprocess(
+            cmd=cmd,
+            session_folder=path,
+            timeout=3600  # 1h for large uploads
+        )
+
         if result.returncode != 0:
             logger.error(f"Vector DB upload failed: {result.stderr}")
             return JSONResponse(status_code=500, content={
@@ -835,9 +914,9 @@ async def initial_text_chunking_sse(path: str = Form(...), model: str = Form(Non
     ]
     
     parser = create_combined_parser(parse_tqdm_progress, parse_chunking_logs)
-    
+
     return StreamingResponse(
-        run_subprocess_with_sse(cmd, parser, timeout=1800),
+        run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800),
         media_type="text/event-stream"
     )
 
@@ -864,11 +943,11 @@ async def dense_embedding_generation_sse(path: str = Form(...)):
         "--output", absolute_processing_path,
         "--phase", "dense"
     ]
-    
+
     parser = create_combined_parser(parse_tqdm_progress, parse_chunking_logs)
-    
+
     return StreamingResponse(
-        run_subprocess_with_sse(cmd, parser, timeout=1800),
+        run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800),
         media_type="text/event-stream"
     )
 
@@ -897,9 +976,8 @@ async def sparse_embedding_generation_sse(path: str = Form(...)):
     ]
     
     parser = create_combined_parser(parse_tqdm_progress, parse_chunking_logs)
-    
+
     return StreamingResponse(
-        run_subprocess_with_sse(cmd, parser, timeout=1800),
+        run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800),
         media_type="text/event-stream"
     )
-
