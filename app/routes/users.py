@@ -115,13 +115,15 @@ async def delete_my_account(
     """
     if current_user.is_admin:
         # Vérifier s'il y a d'autres admins
-        admin_count = db.query(User).filter(
-            User.roles.contains(["ADMIN"]),
+        # Note: On utilise is_admin property car JSON contains peut etre peu fiable sur SQLite
+        other_users = db.query(User).filter(
             User.id != current_user.id,
             User.is_active == True
-        ).count()
+        ).all()
 
-        if admin_count == 0:
+        other_admins = [u for u in other_users if u.is_admin]
+
+        if len(other_admins) == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Impossible de supprimer le dernier administrateur"
