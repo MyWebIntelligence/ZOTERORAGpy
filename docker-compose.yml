@@ -1,0 +1,46 @@
+# RAGpy - Docker Compose Configuration
+# Usage: docker compose up -d
+
+services:
+  ragpy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ragpy
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persistance des données
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      # Sources pour traitement (optionnel)
+      - ./sources:/app/sources
+    env_file:
+      - .env
+    environment:
+      - APP_URL=${APP_URL:-http://localhost:8000}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Service Qdrant local (optionnel - décommenter si besoin)
+  # qdrant:
+  #   image: qdrant/qdrant:latest
+  #   container_name: ragpy-qdrant
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6333:6333"
+  #     - "6334:6334"
+  #   volumes:
+  #     - qdrant_data:/qdrant/storage
+  #   environment:
+  #     - QDRANT__SERVICE__GRPC_PORT=6334
+
+volumes:
+  qdrant_data:
+    driver: local

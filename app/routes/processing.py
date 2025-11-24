@@ -1,0 +1,215 @@
+import os
+import subprocess
+import logging
+import json
+import pandas as pd
+from fastapi import APIRouter, Form
+from fastapi.responses import JSONResponse
+
+from app.core.config import APP_DIR, RAGPY_DIR, UPLOAD_DIR
+
+# Setup logger
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+@app.post("/stop_all_scripts")
+@router.post("/stop_all_scripts")
+async def stop_all_scripts():
+    command = 'pkill -SIGTERM -f "python3 scripts/rad_"'
+    action_taken = False
+    details = ""
+    status_message = "Attempting to stop scripts..."
+    try:
+        # Using shell=True for pkill with pattern matching.
+        process = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=900)
+        
+        if process.returncode == 0:
+            logger.info(f"Successfully sent SIGTERM to processes matching 'python3 scripts/rad_'. stdout: {process.stdout.strip()}, stderr: {process.stderr.strip()}")
+            action_taken = True
+            details = f"SIGTERM signal sent. pkill stdout: '{process.stdout.strip()}', stderr: '{process.stderr.strip()}'"
+            status_message = "Stop signal sent to running scripts."
+        elif process.returncode == 1: # No processes matched
+            logger.info("No 'python3 scripts/rad_' processes found by pkill.")
+            details = "No matching script processes were found running."
+            status_message = "No relevant scripts found running."
+        else: # Other pkill errors
+            logger.error(f"pkill command failed with return code {process.returncode}. stderr: {process.stderr.strip()}")
+            details = f"pkill command error (code {process.returncode}): {process.stderr.strip()}"
+            status_message = "Error attempting to stop scripts."
+        
+        return JSONResponse({"status": status_message, "action_taken": action_taken, "details": details})
+
+    except subprocess.TimeoutExpired:
+        logger.error("pkill command timed out.")
+        return JSONResponse(status_code=500, content={"error": "Stop command timed out.", "details": "pkill command took too long to execute."})
+    except Exception as e:
+        logger.error(f"Exception while trying to stop scripts: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "Failed to execute stop command.", "details": str(e)})
+
+
+@router.post("/process_dataframe")
+async def process_dataframe(path: str = Form(...)): # path is now relative to UPLOAD_DIR
+    absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
+    logger.info(f"Received relative path: '{path}', resolved to absolute: '{absolute_processing_path}'")
+
+    # Find first JSON in directory
+    try:
+        if not os.path.isdir(absolute_processing_path):
+            logger.error(f"Processing directory does not exist: {absolute_processing_path}")
+            return JSONResponse(status_code=400, content={"error": f"Processing directory not found: {path}"})
+
+        out_csv = os.path.join(absolute_processing_path, 'output.csv')
+
+        # Check if output.csv already exists with texteocr content
+        # Determine OCR mode: "full", "skip", or "csv_cleanup"
+        ocr_mode = "full"  # Default: run full OCR via rad_dataframe.py
+        existing_df = None
+        removed_rows_info = []  # Info about removed rows for user feedback
+
+        if os.path.exists(out_csv):
+            try:
+                existing_df = pd.read_csv(out_csv, dtype=str, keep_default_na=False)
+                if 'texteocr' in existing_df.columns:
+                    # Check which rows have empty texteocr
+                    empty_mask = existing_df['texteocr'].str.strip().str.len() == 0
+                    empty_count = empty_mask.sum()
+                    total_count = len(existing_df)
+                    non_empty_count = total_count - empty_count
+
+                    if empty_count == 0:
+                        # All rows have texteocr → skip OCR entirely
+                        ocr_mode = "skip"
+                        logger.info(
+                            f"output.csv contains 'texteocr' for all {total_count} rows. "
+                            f"Skipping OCR extraction."
+                        )
+                    elif non_empty_count > 0:
+                        # Some rows have texteocr, some don't → remove empty rows
+                        ocr_mode = "csv_cleanup"
+
+                        # Collect info about rows to be removed
+                        empty_rows = existing_df[empty_mask]
+                        for idx, row in empty_rows.iterrows():
+                            # Try to get identifying info (title, id, or row index)
+                            row_id = row.get('title', row.get('id', f"Row {idx + 1}"))
+                            removed_rows_info.append(str(row_id))
+
+                        # Remove empty rows
+                        existing_df = existing_df[~empty_mask].reset_index(drop=True)
+                        existing_df.to_csv(out_csv, index=False, encoding='utf-8-sig')
+
+                        logger.info(
+                            f"CSV cleanup: removed {empty_count} rows with empty 'texteocr'. "
+                            f"Kept {non_empty_count} rows."
+                        )
+                    else:
+                        # All texteocr empty → CSV is unusable
+                        logger.error("CSV file has 'texteocr' column but all values are empty.")
+                        return JSONResponse(status_code=400, content={
+                            "error": "Your CSV file has no text content. All 'texteocr' values are empty. "
+                                     "Please upload a CSV with text content in a column named 'texteocr', 'text', 'content', 'body', or 'description'."
+                        })
+            except Exception as e:
+                logger.warning(f"Could not check existing output.csv: {e}. Proceeding with full OCR.")
+
+        # Find JSON file only if full OCR is needed
+        json_path = None
+        if ocr_mode == "full":
+            json_files = [f for f in os.listdir(absolute_processing_path) if f.lower().endswith('.json')]
+            if not json_files:
+                logger.error(f"No JSON file found in {absolute_processing_path} and no existing texteocr content")
+                return JSONResponse(status_code=400, content={
+                    "error": "No JSON file found and output.csv does not contain texteocr content."
+                })
+            json_path = os.path.join(absolute_processing_path, json_files[0])
+            logger.info(f"Processing dataframe with JSON: {json_path}, output: {out_csv}")
+
+        if ocr_mode == "skip":
+            logger.info("OCR skipped - using existing output.csv with complete texteocr content")
+        elif ocr_mode == "csv_cleanup":
+            logger.info(f"CSV cleanup completed - removed {len(removed_rows_info)} rows with empty content")
+        else:
+            # Run extraction script with improved error handling
+            try:
+                # Construct absolute path to the script using RAGPY_DIR
+                project_scripts_dir = os.path.join(RAGPY_DIR, "scripts")
+                script_path = os.path.join(project_scripts_dir, "rad_dataframe.py")
+                script_path = os.path.abspath(script_path)
+
+                logger.info(f"Executing rad_dataframe.py with command: python3 {script_path} ...")
+
+                # Use shell=False for better security and explicit argument passing
+                result = subprocess.run([
+                    "python3", script_path,
+                    "--json", json_path,
+                    "--dir", absolute_processing_path,
+                    "--output", out_csv
+                ], check=False, capture_output=True, text=True)
+
+                # Manually check the return code and handle
+                if result.returncode != 0:
+                    logger.error(f"Extraction script failed with code {result.returncode}. stderr: {result.stderr}")
+                    return JSONResponse(status_code=500, content={
+                        "error": f"Extraction script failed with code {result.returncode}.",
+                        "details": result.stderr,
+                        "stdout": result.stdout[:500]
+                    })
+            except Exception as e:
+                logger.error(f"An unexpected error occurred during dataframe processing: {str(e)}", exc_info=True)
+                return JSONResponse(status_code=500, content={"error": "An unexpected error occurred.", "details": str(e)})
+
+        # Load and preview CSV
+        if not os.path.exists(out_csv):
+            logger.error(f"Output CSV file not found after script execution: {out_csv}")
+            return JSONResponse(status_code=500, content={"error": "Output CSV not found after script execution."})
+    except Exception as e:
+        logger.error(f"Error in process_dataframe: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"Failed to process dataframe: {str(e)}"})
+        
+    try:
+        # Try reading with escapechar and dtype=str, then adapt
+        try:
+            df = pd.read_csv(out_csv, escapechar='\\', dtype=str, keep_default_na=False)
+        except pd.errors.ParserError:
+            logger.warning(f"Failed to parse CSV {out_csv} with escapechar='\\', dtype=str. Retrying without escapechar.")
+            try:
+                df = pd.read_csv(out_csv, dtype=str, keep_default_na=False)
+            except Exception as e_inner:
+                logger.error(f"Failed to read CSV {out_csv} even with dtype=str and no escapechar: {str(e_inner)}")
+                return JSONResponse(status_code=500, content={"error": "CSV parsing failed.", "details": str(e_inner)})
+        except Exception as e_outer:
+             logger.error(f"Failed to read CSV {out_csv} with escapechar='\\', dtype=str: {str(e_outer)}")
+             return JSONResponse(status_code=500, content={"error": "CSV reading failed.", "details": str(e_outer)})
+
+            
+        if df.empty:
+            logger.warning(f"CSV file {out_csv} is empty or contains no data after reading.")
+            return JSONResponse(status_code=500, content={"error": "CSV file is empty or contains no data."})
+            
+        preview_df = df.head(5).fillna('') 
+        preview = preview_df.to_dict(orient='records')
+        
+        # Final check for JSON serializability
+        try:
+            json.dumps(preview)
+        except TypeError as te:
+            logger.error(f"Preview data is not JSON serializable even after dtype=str and fillna: {str(te)}")
+            safer_preview = []
+            for record in preview:
+                safer_record = {k: str(v) for k, v in record.items()}
+                safer_preview.append(safer_record)
+            preview = safer_preview
+            
+        response_data = {"csv": out_csv, "preview": preview}
+
+        if removed_rows_info:
+            response_data["warning"] = (
+                f"{len(removed_rows_info)} row(s) with empty text content were removed from the CSV."
+            )
+            response_data["removed_rows"] = removed_rows_info
+
+        return JSONResponse(response_data)
+    except Exception as e:
+        logger.error(f"General error in processing/previewing CSV {out_csv}: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "CSV read or preview failed.", "details": str(e)})

@@ -1,7 +1,7 @@
 # Architecture actuelle du pipeline RAGpy
 
 **Date de création** : 2025-10-21  
-**Dernière mise à jour** : 2025-11-22 (analyse complète par agents spécialisés)  
+**Dernière mise à jour** : 2025-11-24 (Refactored app/main.py, Pinned Dependencies)  
 **Objectif** : Documenter l'architecture existante complète avec analyse détaillée
 
 ---
@@ -57,22 +57,13 @@ Input Sources → Data Extraction → Document Processing → Vector Storage
 
 #### **Points d'amélioration critiques**
 - **app/main.py trop volumineux** (1,543 lignes) → refactorisation nécessaire
-- **Métadonnées hardcodées** dans 4 emplacements critiques
 - **Validation d'entrée insuffisante** sur plusieurs endpoints
 - **Dépendances non épinglées** → risques de sécurité
 - **Conventions de nommage mixtes** (français/anglais)
 
 #### **Dette technique majeure**
-```python
-# Problème: Métadonnées hardcodées limitant l'extensibilité
-# Fichier: rad_chunk.py:250-263, rad_vectordb.py (3 emplacements)
-chunk_metadata = {
-    "title": row_data.get("title", ""),
-    "authors": row_data.get("authors", ""),
-    # ... 8 autres champs hardcodés
-}
-# Impact: Colonnes CSV personnalisées perdues → Limitation CSV
-```
+- **Dépendances non épinglées** : Risque de stabilité et de sécurité (voir `requirements.txt`).
+- **Monolithe `app/main.py`** : Complexité de maintenance élevée.
 
 ### 🚀 **API et endpoints**
 
@@ -290,22 +281,27 @@ uploads/
 
 **Conclusion**: L'abstraction `texteocr` fonctionne parfaitement pour unifier toutes les sources d'ingestion.
 
-### ⚠️ **Métadonnées hardcodées (problème majeur)**
+### ✅ **Gestion des métadonnées (Résolu)**
 
-| Emplacement | Fichier | Ligne | Impact | Priorité |
-|------------|---------|-------|--------|----------|
-| Création chunks | rad_chunk.py | 250-263 | Colonnes CSV perdues | **CRITIQUE** |
-| Pinecone | rad_vectordb.py | 85-95 | Pas de métadonnées CSV | **CRITIQUE** |
-| Weaviate | rad_vectordb.py | 541-551 | Pas de métadonnées CSV | **CRITIQUE** |
-| Qdrant | rad_vectordb.py | 636-647 | Pas de métadonnées CSV | **CRITIQUE** |
+| Emplacement | Fichier | Status |
+|------------|---------|--------|
+| Création chunks | rad_chunk.py | ✅ **Dynamique** (Injection de toutes les colonnes) |
+| Pinecone | rad_vectordb.py | ✅ **Dynamique** (Injection de toutes les clés) |
+| Weaviate | rad_vectordb.py | ✅ **Dynamique** (Injection de toutes les propriétés) |
+| Qdrant | rad_vectordb.py | ✅ **Dynamique** (Injection dans payload) |
 
-**Impact**: Les métadonnées CSV personnalisées ne remontent pas dans les bases vectorielles, limitant sévèrement les capacités de filtrage.
-
-**Solution recommandée**:
+**Solution implémentée** :
 ```python
-# Remplacer les métadonnées hardcodées par injection dynamique
-metadata = {k: v for k, v in chunk.items()
-            if k not in ("id", "embedding", "sparse_embedding", "text")}
+# rad_chunk.py : Injection dynamique
+chunk_metadata = {
+    "id": f"{doc_id}_{original_chunk_index}",
+    "text": cleaned_text,
+    # ... champs techniques
+}
+# Injecter toutes les métadonnées source
+for key, value in row_data.items():
+    if key not in ("texteocr", "text", "id", ...):
+        chunk_metadata[key] = sanitize_metadata_value(value, "")
 ```
 
 ### ✅ **Optimisations de coût implémentées**
@@ -331,6 +327,15 @@ use_openrouter = "/" in model  # Auto-détection provider/model
 - ✅ **CSV ingestion pipeline** - 5 scénarios détaillés
 - ✅ **Client Zotero** - Tests intégration API
 - ✅ **Génération notes LLM** - Validation contenu
+- [x] **Refactor `app/main.py`**
+  - [x] Split into `app/routes/` modules (ingestion, processing, settings)
+  - [x] Create `app/core/config.py` for constants
+  - [x] Clean up imports and initialization
+- [x] **Pin Dependencies**
+  - [x] Update `scripts/requirements.txt` with specific versions
+- [x] **Improve Testing**
+  - [x] Add `tests/test_integration_api.py` for API endpoints
+  - [ ] Run and validate tests (requires environment setup)
 - ✅ **Classe Document** - Tests modèle de données
 - ✅ **Configuration** - Chargement settings et prompts
 
@@ -412,24 +417,9 @@ requests>=2.31.x                 # HTTP client
 
 ### 🎯 **Améliorations prioritaires**
 
-#### **Phase 1: Résolution métadonnées (CRITIQUE)**
-```python
-# Objectif: Permettre injection métadonnées CSV dans bases vectorielles
-# Effort: 2-3 jours développement + tests
-# Impact: Déblocage complet des cas d'usage CSV
-
-# Refactorisation rad_chunk.py
-chunk_metadata = {
-    "id": f"{doc_id}_{chunk_index}",
-    "text": cleaned_text,
-    **{k: v for k, v in row_data.items() 
-       if k not in ["texteocr", "id", "text"]}  # Injection dynamique
-}
-
-# Refactorisation rad_vectordb.py (3 connecteurs)
-metadata = {k: v for k, v in chunk.items()
-            if k not in ["embedding", "sparse_embedding"]}
-```
+#### **Phase 1: Résolution métadonnées (✅ TERMINÉE)**
+- **Statut** : Implémenté dans `rad_chunk.py` et `rad_vectordb.py`.
+- **Résultat** : Les colonnes CSV personnalisées sont maintenant correctement propagées dans les chunks et les bases vectorielles (Pinecone, Weaviate, Qdrant).
 
 #### **Phase 2: Refactorisation app/main.py**
 - Découpage en modules thématiques (auth, upload, processing, config)
@@ -469,16 +459,16 @@ metadata = {k: v for k, v in chunk.items()
 
 ### ⚠️ **Limitations critiques à résoudre**
 
-1. **Métadonnées hardcodées** empêchant l'exploitation complète du CSV
-2. **Monolithe app/main.py** nécessitant refactorisation urgente
-3. **Tests d'intégration insuffisants** pour garantir la fiabilité
-4. **Sécurité** inadaptée pour usage production
+1.  **Insufficient Integration Tests**: While `tests/test_integration_api.py` has been added, comprehensive integration tests for all vector database interactions are still needed.
+2.  **Security**:
+    *   Authentication is basic (OAuth2 with Password flow).
+    *   Secrets management needs review (currently in `.env` and `app/core/credentials.py`).
 
 ### 🎯 **Action immédiate recommandée**
 
-**Priorité absolue**: Résoudre le problème des métadonnées hardcodées pour débloquer complètement l'ingestion CSV. Cette refactorisation permettra aux colonnes CSV personnalisées de se propager jusqu'aux bases vectorielles, ouvrant tous les cas d'usage de filtrage avancé.
+**Priorité absolue**: Refactoriser `app/main.py` pour améliorer la maintenabilité et épingler les dépendances pour la sécurité.
 
-**Effort estimé**: 2-3 jours de développement + 1 jour de tests
-**Impact**: Transformation RAGpy en solution complètement flexible pour tout type de données structurées
+**Effort estimé**: 3-4 jours de développement
+**Impact**: Stabilité et sécurité accrues pour la production
 
 Le système RAGpy démontre déjà des **fondations architecturales excellentes** et une **vision produit claire**. Avec la résolution des limitations identifiées, il peut devenir une solution RAG de référence pour la recherche académique et au-delà.
