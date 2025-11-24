@@ -81,38 +81,62 @@ async def run_subprocess_with_sse(
                     logger.error(f"Error reading {stream_name}: {e}")
                     break
         
-        # Read both streams concurrently and merge events
-        async def merge_streams():
-            tasks = [
-                read_stream(process.stdout, "stdout"),
-                read_stream(process.stderr, "stderr")
-            ]
-            
-            for task in tasks:
-                async for event in task:
-                    yield event
         
-        # Stream events
-        async for event in merge_streams():
-            yield f"data: {json.dumps(event)}\\n\\n"
+        # Read both streams concurrently and merge events using a queue
+        event_queue = asyncio.Queue()
+        
+        async def read_and_queue(stream, stream_name):
+            """Read stream and put events into queue."""
+            async for event in read_stream(stream, stream_name):
+                await event_queue.put(event)
+        
+        # Start both readers concurrently
+        readers = [
+            asyncio.create_task(read_and_queue(process.stdout, "stdout")),
+            asyncio.create_task(read_and_queue(process.stderr, "stderr"))
+        ]
+        
+        # Stream events as they come from either stream
+        async def stream_from_queue():
+            while True:
+                # Check if both readers are done
+                if all(r.done() for r in readers) and event_queue.empty():
+                    break
+                
+                try:
+                    # Wait for event with timeout to check if readers finished
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    # No event available, check if we should continue
+                    if all(r.done() for r in readers):
+                        break
+                    continue
+        
+        # Stream all events
+        async for sse_event in stream_from_queue():
+            yield sse_event
+        
+        # Wait for both readers to finish
+        await asyncio.gather(*readers, return_exceptions=True)
         
         # Wait for process to complete
         try:
             await asyncio.wait_for(process.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             process.kill()
-            yield f"data: {{\"type\": \"error\", \"message\": \"Process timed out\"}}\\n\\n"
+            yield f"data: {{\"type\": \"error\", \"message\": \"Process timed out\"}}\n\n"
             return
         
         # Check exit code
         if process.returncode != 0:
-            yield f"data: {{\"type\": \"error\", \"message\": \"Process failed with code {process.returncode}\"}}\\n\\n"
+            yield f"data: {{\"type\": \"error\", \"message\": \"Process failed with code {process.returncode}\"}}\n\n"
         else:
-            yield f"data: {{\"type\": \"complete\", \"message\": \"Process completed successfully\"}}\\n\\n"
+            yield f"data: {{\"type\": \"complete\", \"message\": \"Process completed successfully\"}}\n\n"
             
     except Exception as e:
         logger.error(f"Subprocess error: {e}", exc_info=True)
-        yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\\n\\n"
+        yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
 
 
 # ============================================================================
