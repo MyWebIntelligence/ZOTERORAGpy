@@ -59,11 +59,20 @@ class Settings:
         "http://localhost:8000,http://127.0.0.1:8000"
     ).split(",")
 
-    # Email (optionnel)
-    SMTP_HOST: Optional[str] = os.getenv("SMTP_HOST")
-    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USER: Optional[str] = os.getenv("SMTP_USER")
-    SMTP_PASSWORD: Optional[str] = os.getenv("SMTP_PASSWORD")
+    # Email (Resend)
+    RESEND_API_KEY: Optional[str] = os.getenv("RESEND_API_KEY")
+    RESEND_FROM_EMAIL: str = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev")
+
+    # Application URL (pour les liens dans les emails)
+    APP_URL: str = os.getenv("APP_URL", "http://localhost:8000")
+
+    # Token expiration
+    EMAIL_VERIFICATION_EXPIRE_HOURS: int = int(
+        os.getenv("EMAIL_VERIFICATION_EXPIRE_HOURS", "24")
+    )
+    PASSWORD_RESET_EXPIRE_HOURS: int = int(
+        os.getenv("PASSWORD_RESET_EXPIRE_HOURS", "1")
+    )
 
     # API Keys (existantes)
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")

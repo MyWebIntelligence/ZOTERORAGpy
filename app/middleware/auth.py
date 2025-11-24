@@ -131,9 +131,11 @@ async def get_current_active_user(
     user: User = Depends(get_current_user)
 ) -> User:
     """
-    Dependency pour obtenir un utilisateur actif.
+    Dependency pour obtenir un utilisateur actif et vérifié.
 
-    Lève une exception 403 si le compte est désactivé ou verrouillé.
+    Lève une exception:
+    - 403 si le compte est désactivé ou non vérifié
+    - 423 si le compte est verrouillé
 
     Usage:
         @app.get("/active-only")
@@ -150,6 +152,15 @@ async def get_current_active_user(
         raise HTTPException(
             status_code=status.HTTP_423_LOCKED,
             detail="Compte temporairement verrouillé"
+        )
+
+    # Vérifier que l'email est confirmé
+    if not user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Veuillez vérifier votre adresse email pour accéder à cette fonctionnalité. "
+                   "Vérifiez votre boîte de réception ou demandez un nouvel email de vérification.",
+            headers={"X-Email-Verification-Required": "true"}
         )
 
     return user
