@@ -3,6 +3,8 @@
 Pipeline de traitement de documents (PDF, exports Zotero, **CSV**) et interface web pour générer des chunks de texte, produire des embeddings denses et parcimonieux, puis charger ces données dans une base vectorielle (Pinecone, Weaviate ou Qdrant) pour des usages RAG.
 
 **Nouveau** :
+- **Authentification utilisateur complète** avec vérification email (Resend) et gestion des rôles
+- **OCR Mistral** pour extraction PDF haute qualité
 - Support d'ingestion CSV directe (bypass OCR) pour économiser temps et coûts API
 - **Génération automatique de fiches de lecture Zotero** via LLM avec push automatique vers votre bibliothèque
 
@@ -13,14 +15,15 @@ Pipeline de traitement de documents (PDF, exports Zotero, **CSV**) et interface 
 - [A — Usage](#a--usage)
   - [1) Installation (débutant)](#1-installation-débutant)
   - [2) Utilisation de l'interface web](#2-utilisation-de-linterface-web)
-  - [3) Génération de fiches de lecture Zotero](#3-génération-de-fiches-de-lecture-zotero)
-  - [4) Utilisation en ligne de commande](#4-utilisation-en-ligne-de-commande)
+  - [3) Authentification et gestion utilisateurs](#3-authentification-et-gestion-utilisateurs)
+  - [4) Génération de fiches de lecture Zotero](#4-génération-de-fiches-de-lecture-zotero)
+  - [5) Utilisation en ligne de commande](#5-utilisation-en-ligne-de-commande)
 - [B — Projet](#b--projet)
-  - [5) Le projet](#5-le-projet)
-  - [6) Architecture de dev](#6-architecture-de-dev)
-  - [7) Variables d'environnement (.env)](#7-variables-denvironnement-env)
-  - [8) Dépannage (FAQ)](#8-dépannage-faq)
-  - [9) Licence](#9-licence)
+  - [6) Le projet](#6-le-projet)
+  - [7) Architecture de dev](#7-architecture-de-dev)
+  - [8) Variables d'environnement (.env)](#8-variables-denvironnement-env)
+  - [9) Dépannage (FAQ)](#9-dépannage-faq)
+  - [10) Licence](#10-licence)
 
 ---
 
@@ -68,18 +71,37 @@ copy scripts\.env.example .env
 
 Contenu minimal de `.env` (à adapter):
 ```env
-OPENAI_API_KEY=sk-...                      # Obligatoire (embeddings + recodage GPT)
-OPENROUTER_API_KEY=sk-or-v1-...            # Optionnel (alternative économique pour recodage)
-OPENROUTER_DEFAULT_MODEL=openai/gemini-2.5-flash  # Modèle par défaut OpenRouter
-PINECONE_API_KEY=pcsk-...                  # Optionnel si Pinecone
-WEAVIATE_URL=https://...                   # Optionnel si Weaviate
-WEAVIATE_API_KEY=...                       # Optionnel si Weaviate
-QDRANT_URL=https://...                     # Optionnel si Qdrant
-QDRANT_API_KEY=...                         # Optionnel (instances publiques sans clé)
-ZOTERO_API_KEY=...                         # Optionnel (génération fiches de lecture Zotero)
+# Obligatoire
+OPENAI_API_KEY=sk-...                      # Embeddings + recodage GPT
+
+# OCR (recommandé)
+MISTRAL_API_KEY=...                        # OCR haute qualité
+MISTRAL_OCR_MODEL=mistral-ocr-latest
+MISTRAL_API_BASE_URL=https://api.mistral.ai
+
+# Email (recommandé pour auth)
+RESEND_API_KEY=re_...                      # Vérification email + reset password
+RESEND_FROM_EMAIL=noreply@votredomaine.com
+APP_URL=http://localhost:8000              # URL pour les liens dans les emails
+
+# Optionnel - Alternative économique pour recodage
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_DEFAULT_MODEL=google/gemini-2.5-flash
+
+# Optionnel - Bases vectorielles (au moins une)
+PINECONE_API_KEY=pcsk-...
+WEAVIATE_URL=https://...
+WEAVIATE_API_KEY=...
+QDRANT_URL=https://...
+QDRANT_API_KEY=...
+
+# Optionnel - Zotero
+ZOTERO_API_KEY=...
 ```
 
-**Nouveau** : Support OpenRouter pour réduire les coûts de recodage de 2-3x (ex: Gemini 2.5 Flash ~$0.002/1M tokens vs GPT-4o-mini ~$0.15/1M tokens)
+**Optimisations coûts** :
+- **OpenRouter** : Réduit les coûts de recodage de 2-3x (Gemini 2.5 Flash ~$0.002/1M tokens vs GPT-4o-mini ~$0.15/1M tokens)
+- **Mistral OCR** : OCR de haute qualité intégré, avec fallback vers OpenAI Vision si besoin
 
 Notes:
 - Placez `.env` à la racine de `ragpy/`.
@@ -116,11 +138,60 @@ Où sont stockés les fichiers?
 
 **Note** : Les clés API proviennent de `.env` (réglables via le bouton « Settings ⚙️ » en haut à droite)
 
-**Réduction des coûts avec OpenRouter** : Lors de l'étape "3.1 Initial Text Chunking", vous pouvez spécifier un modèle OpenRouter (ex: `openai/gemini-2.5-flash`) pour le recodage de texte au lieu de GPT-4o-mini. Cela réduit les coûts de ~75% tout en maintenant une qualité comparable. Configurez vos credentials OpenRouter dans Settings.
+**Réduction des coûts avec OpenRouter** : Lors de l'étape "3.1 Initial Text Chunking", vous pouvez spécifier un modèle OpenRouter (ex: `google/gemini-2.5-flash`) pour le recodage de texte au lieu de GPT-4o-mini. Cela réduit les coûts de ~75% tout en maintenant une qualité comparable. Configurez vos credentials OpenRouter dans Settings.
 
 Astuce: un script shell d'aide `ragpy_cli.sh` existe pour démarrer/arrêter le serveur. Il suppose d'être exécuté depuis le dossier parent contenant `ragpy/`. Si vous êtes déjà dans `ragpy/`, préférez la commande `uvicorn app.main:app ...` ci‑dessus.
 
-### 3) Génération de fiches de lecture Zotero
+### 3) Authentification et gestion utilisateurs
+
+RAGpy intègre un système d'authentification complet avec vérification email.
+
+#### Inscription et connexion
+
+1. **Premier utilisateur** : Automatiquement promu administrateur et vérifié
+2. **Utilisateurs suivants** : Doivent vérifier leur email avant d'accéder à l'application
+
+#### Vérification email (Resend)
+
+Le système utilise [Resend](https://resend.com) pour l'envoi d'emails :
+
+- **Email de vérification** : Envoyé à l'inscription, lien valide 24h
+- **Reset password** : Lien valide 1h (demande utilisateur ou admin)
+- **Blocage automatique** : Utilisateurs non vérifiés ne peuvent pas accéder aux fonctionnalités
+
+Configuration requise dans `.env` :
+```env
+RESEND_API_KEY=re_...                      # Clé API Resend
+RESEND_FROM_EMAIL=noreply@votredomaine.com # Email expéditeur (domaine vérifié)
+APP_URL=http://localhost:8000              # URL de base pour les liens
+```
+
+> **Note** : Sans configuration Resend, les tokens sont affichés en console (mode développement).
+
+#### Administration utilisateurs
+
+Les administrateurs peuvent :
+
+- Voir la liste des utilisateurs (`/api/admin/users`)
+- Activer/désactiver des comptes
+- Promouvoir/rétrograder les rôles admin
+- Forcer un reset de mot de passe (envoie un email)
+- Vérifier manuellement un email
+
+#### Endpoints d'authentification
+
+| Endpoint | Méthode | Description |
+|----------|---------|-------------|
+| `/auth/register` | POST | Inscription + envoi email vérification |
+| `/auth/login` | POST | Connexion (retourne JWT) |
+| `/auth/logout` | POST | Déconnexion |
+| `/auth/verify-email/{token}` | GET | Vérification email |
+| `/auth/resend-verification` | POST | Renvoyer email de vérification |
+| `/auth/forgot-password` | POST | Demander reset password |
+| `/auth/reset-password` | POST | Réinitialiser avec token |
+| `/auth/me` | GET | Infos utilisateur connecté |
+
+### 4) Génération de fiches de lecture Zotero
 
 **NOUVEAU** : RAGpy peut maintenant générer automatiquement des fiches de lecture académiques et les ajouter comme notes enfants dans votre bibliothèque Zotero.
 
@@ -227,7 +298,7 @@ Texte : {TEXT}
 
 **Avantage** : Aucune modification de code nécessaire ! Le fichier est rechargé automatiquement à chaque génération.
 
-### 4) Utilisation en ligne de commande
+### 5) Utilisation en ligne de commande
 
 Traitement complet (hors interface web) à partir d’un export Zotero placé dans `sources/MaBiblio/`:
 
@@ -312,7 +383,7 @@ PY
 
 ## B — Projet
 
-### 5) Le projet
+### 6) Le projet
 
 Objectif: transformer des documents (PDFs, exports Zotero) en données exploitables pour des systèmes RAG, via un pipeline reproductible et une interface web simple à utiliser.
 
@@ -321,83 +392,139 @@ Grandes étapes:
 - Découpage en chunks, nettoyage GPT, embeddings denses et sparses (`rad_chunk.py`)
 - Insertion dans une base vectorielle (Pinecone, Weaviate, Qdrant) (`rad_vectordb.py` via l’UI)
 
-### 6) Architecture de dev
+### 7) Architecture de dev
 
 Arborescence principale:
 ```
 ragpy/
-├── app/                      # Application web FastAPI (UI)
+├── app/                      # Application web FastAPI
 │   ├── main.py               # API + orchestration des scripts
-│   ├── utils/                # Modules utilitaires (NOUVEAU)
+│   ├── config.py             # Configuration centralisée
+│   ├── core/                 # Modules core
+│   │   ├── security.py          # JWT, hashing, tokens
+│   │   └── credentials.py       # Gestion clés API utilisateur
+│   ├── database/             # Base de données SQLite
+│   │   └── session.py           # Session SQLAlchemy
+│   ├── middleware/           # Middlewares
+│   │   └── auth.py              # Authentification JWT
+│   ├── models/               # Modèles SQLAlchemy
+│   │   ├── user.py              # Utilisateurs + rôles
+│   │   ├── audit.py             # Logs d'audit
+│   │   └── project.py           # Projets
+│   ├── routes/               # Routes API
+│   │   ├── auth.py              # Inscription, login, reset password
+│   │   ├── admin.py             # Gestion utilisateurs (admin)
+│   │   └── users.py             # Profil utilisateur
+│   ├── schemas/              # Schémas Pydantic
+│   ├── services/             # Services
+│   │   └── email_service.py     # Envoi emails (Resend)
+│   ├── utils/                # Modules utilitaires
 │   │   ├── zotero_client.py     # Client API Zotero v3
-│   │   ├── llm_note_generator.py # Générateur de fiches LLM
-│   │   └── zotero_parser.py     # Parser métadonnées Zotero
+│   │   └── llm_note_generator.py # Générateur de fiches LLM
 │   ├── static/               # Assets UI (CSS/JS/images)
-│   └── templates/            # Templates Jinja2 (index.html)
+│   └── templates/            # Templates Jinja2
+│       └── emails/              # Templates emails
 ├── scripts/                  # Pipeline de traitement
-│   ├── rad_dataframe.py      # JSON Zotero + PDFs -> CSV (OCR inclus)
+│   ├── rad_dataframe.py      # JSON Zotero + PDFs -> CSV (OCR Mistral)
 │   ├── rad_chunk.py          # Chunking + recodage GPT + embeddings
-│   ├── rad_vectordb.py       # Fonctions d'insertion (Pinecone/Weaviate/Qdrant)
+│   ├── rad_vectordb.py       # Insertion (Pinecone/Weaviate/Qdrant)
 │   └── requirements.txt      # Dépendances
-├── tests/                    # Tests unitaires (NOUVEAU)
-│   ├── test_zotero_client.py
-│   └── test_llm_note_generator.py
-├── uploads/                  # Sessions de traitement depuis l'UI
-├── logs/                     # Logs (app.log, pdf_processing.log)
-├── .env                      # Clés/API (à créer)
-└── ragpy_cli.sh              # Aide au démarrage serveur (optionnel)
+├── data/                     # Base de données SQLite (ragpy.db)
+├── uploads/                  # Sessions de traitement
+├── logs/                     # Logs applicatifs
+├── .env                      # Variables d'environnement
+└── ragpy_cli.sh              # Script démarrage serveur
 ```
 
 Choix techniques clés:
-- FastAPI + Uvicorn pour l’UI backend
-- PyMuPDF (OCR léger) pour l’extraction PDF
+- FastAPI + Uvicorn pour le backend API
+- SQLAlchemy + SQLite pour la persistance utilisateurs
+- JWT (python-jose) + bcrypt pour l'authentification
+- Resend pour l'envoi d'emails transactionnels
+- Mistral OCR (avec fallback OpenAI Vision) pour l'extraction PDF
 - OpenAI API pour recodage GPT + embeddings (`text-embedding-3-large`)
-- spaCy FR (`fr_core_news_md`) pour le sparse
-- Pinecone, Weaviate (multi‑tenants), Qdrant pour le stockage
+- spaCy FR (`fr_core_news_md`) pour les embeddings sparse
+- Pinecone, Weaviate (multi-tenants), Qdrant pour le stockage vectoriel
 
 Journaux et sorties:
 - `logs/app.log`, `logs/pdf_processing.log`
 - Fichiers de session dans `uploads/<session>/`
+- Base de données dans `data/ragpy.db`
 
-### 7) Variables d'environnement (.env)
+### 8) Variables d'environnement (.env)
 
-Clés supportées par l'UI et les scripts:
+Toutes les variables supportées :
 
-- `OPENAI_API_KEY` (obligatoire - embeddings + recodage par défaut)
-- `OPENROUTER_API_KEY` (optionnel - alternative économique pour recodage)
-- `OPENROUTER_DEFAULT_MODEL` (optionnel - ex: `openai/gemini-2.5-flash`)
-- `PINECONE_API_KEY`, `PINECONE_ENV` (selon configuration Pinecone)
+**Obligatoire :**
+
+- `OPENAI_API_KEY` - Embeddings + recodage GPT par défaut
+
+**OCR (recommandé) :**
+
+- `MISTRAL_API_KEY` - OCR haute qualité Mistral
+- `MISTRAL_OCR_MODEL` - Modèle OCR (défaut: `mistral-ocr-latest`)
+- `MISTRAL_API_BASE_URL` - URL API (défaut: `https://api.mistral.ai`)
+
+**Email / Authentification (recommandé) :**
+
+- `RESEND_API_KEY` - Clé API Resend pour envoi emails
+- `RESEND_FROM_EMAIL` - Email expéditeur (défaut: `onboarding@resend.dev`)
+- `APP_URL` - URL de base pour liens emails (défaut: `http://localhost:8000`)
+
+**OpenRouter (optionnel - économie coûts) :**
+
+- `OPENROUTER_API_KEY` - Alternative économique pour recodage
+- `OPENROUTER_DEFAULT_MODEL` - Modèle par défaut (ex: `google/gemini-2.5-flash`)
+
+**Bases vectorielles (au moins une) :**
+
+- `PINECONE_API_KEY`, `PINECONE_ENV`
 - `WEAVIATE_URL`, `WEAVIATE_API_KEY`
 - `QDRANT_URL`, `QDRANT_API_KEY`
-- **`ZOTERO_API_KEY`** (optionnel - génération automatique de fiches de lecture)
-- **`ZOTERO_USER_ID`** (optionnel - auto-détecté depuis export Zotero)
-- **`ZOTERO_GROUP_ID`** (optionnel - pour bibliothèques de groupe)
 
-L'UI (« Settings ») permet de lire/écrire `.env` à la racine de `ragpy/`.
+**Zotero (optionnel) :**
 
-**OpenRouter** : Service permettant d'accéder à plusieurs LLM (Gemini, Claude, etc.) via une API unifiée. Particulièrement intéressant pour le recodage de texte grâce à des modèles comme Gemini 2.5 Flash (~75% moins cher que GPT-4o-mini). Les embeddings restent générés via OpenAI `text-embedding-3-large`.
+- `ZOTERO_API_KEY` - Génération automatique de fiches de lecture
+- `ZOTERO_USER_ID` - Auto-détecté depuis export Zotero
+- `ZOTERO_GROUP_ID` - Pour bibliothèques de groupe
 
-**Zotero API** : Permet la création automatique de notes enfants dans votre bibliothèque Zotero. Les fiches de lecture générées par LLM sont ajoutées comme notes avec idempotence (pas de doublons). Configuration requise : clé API avec permissions "library access" + "notes access".
+L'UI (« Settings ») permet de configurer ces variables via interface graphique.
 
-### 8) Dépannage (FAQ)
+### 9) Dépannage (FAQ)
 
-- Pas de clé API: vérifiez `.env` et la section « Settings » de l’UI.
-- Dépendances manquantes: `pip install -r scripts/requirements.txt` puis `pip install fastapi uvicorn jinja2 python-multipart`.
-- spaCy manquant: `python -m spacy download fr_core_news_md`.
-- Pinecone: créez l’index avec la dimension de votre modèle d’embedding.
-- Weaviate: assurez‑vous que la classe existe et que le tenant est correct.
-- Qdrant: la collection est créée si absente (dimension déduite du premier chunk).
-- Chemins: en CLI, privilégiez des chemins absolus; via l’UI, tout est relatif à `uploads/`.
+**Installation :**
 
-**Zotero** :
+- Dépendances manquantes : `pip install -r scripts/requirements.txt`
+- spaCy manquant : `python -m spacy download fr_core_news_md`
+- Pas de clé API : vérifiez `.env` et la section « Settings » de l'UI
+
+**Authentification :**
+
+- Email de vérification non reçu : Vérifiez `RESEND_API_KEY` et `RESEND_FROM_EMAIL`
+- Erreur 403 "Veuillez vérifier votre email" : Cliquez sur le lien dans l'email ou utilisez `/auth/resend-verification`
+- Reset password : Le lien expire après 1 heure
+- Sans Resend configuré : Les tokens s'affichent dans la console (mode dev)
+
+**Bases vectorielles :**
+
+- Pinecone : Créez l'index avec la dimension 3072 (text-embedding-3-large)
+- Weaviate : Assurez-vous que la classe existe et que le tenant est correct
+- Qdrant : La collection est créée automatiquement si absente
+
+**Zotero :**
+
 - Clé API invalide : Vérifiez les permissions ("library access" + "notes access")
 - Notes non créées : Vérifiez que l'export ZIP contient bien un JSON Zotero valide
 - Doublons : Le système vérifie automatiquement l'existence via sentinel unique
-- Erreur 404 : L'itemKey n'existe pas dans votre bibliothèque (vérifiez la synchronisation)
-- Rate limit (429) : Le système gère automatiquement les limites avec retry
-- "Invalid JSON format" : Le système gère automatiquement les deux formats d'export Zotero (tableau direct ou objet avec clé "items")
+- Erreur 404 : L'itemKey n'existe pas dans votre bibliothèque
+- Rate limit (429) : Géré automatiquement avec retry
 
-### 9) Licence
+**OCR :**
+
+- Mistral OCR échoue : Vérifiez `MISTRAL_API_KEY`, fallback automatique vers OpenAI Vision
+- Texte mal extrait : Essayez d'augmenter `OPENAI_OCR_MAX_PAGES` pour le fallback
+
+### 10) Licence
 
 MIT. Voir `LICENSE`.
 

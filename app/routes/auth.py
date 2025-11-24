@@ -31,6 +31,7 @@ from app.core.security import (
     generate_reset_token
 )
 from app.middleware.auth import get_current_user, get_optional_user
+from app.services.email_service import email_service
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -110,6 +111,14 @@ async def register(
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("User-Agent")
     )
+
+    # Envoyer email de vérification (sauf si auto-admin)
+    if not should_be_admin and new_user.verification_token:
+        await email_service.send_verification_email(
+            to_email=new_user.email,
+            first_name=new_user.first_name or "",
+            verification_token=new_user.verification_token
+        )
 
     return UserResponse(
         id=new_user.id,
@@ -356,9 +365,16 @@ async def forgot_password(
         user_agent=request.headers.get("User-Agent")
     )
 
-    # TODO: Envoyer l'email avec le lien de reset
-    # Pour l'instant, on log le token (en dev uniquement)
-    if settings.DEBUG:
+    # Envoyer l'email de reset
+    await email_service.send_password_reset_email(
+        to_email=user.email,
+        first_name=user.first_name or "",
+        reset_token=reset_token,
+        initiated_by_admin=False
+    )
+
+    # Log en dev si email pas configuré
+    if settings.DEBUG and not email_service.is_available:
         print(f"Password reset token for {user.email}: {reset_token}")
 
     return {"message": "Si un compte existe avec cet email, un lien de réinitialisation a été envoyé."}
@@ -446,6 +462,7 @@ async def change_password(
 @router.get("/verify-email/{token}")
 async def verify_email(
     token: str,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
@@ -456,14 +473,71 @@ async def verify_email(
     if not user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Token de vérification invalide"
+            detail="Token de vérification invalide ou expiré"
         )
 
     user.is_verified = True
     user.verification_token = None
     db.commit()
 
+    # Log d'audit
+    create_audit_log(
+        db=db,
+        action=AuditAction.USER_UPDATE,
+        user_id=user.id,
+        resource_type="user",
+        resource_id=user.id,
+        details={"action": "email_verified"},
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("User-Agent")
+    )
+
+    # Envoyer email de bienvenue (optionnel)
+    await email_service.send_welcome_email(
+        to_email=user.email,
+        first_name=user.first_name or ""
+    )
+
     return RedirectResponse(url="/login?verified=true")
+
+
+@router.post("/resend-verification")
+async def resend_verification_email(
+    data: PasswordResetRequest,  # Réutilise le schema (juste besoin de l'email)
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Renvoie l'email de vérification.
+
+    Utilisé quand l'utilisateur n'a pas reçu ou a perdu l'email initial.
+    """
+    user = db.query(User).filter(User.email == data.email.lower()).first()
+
+    # Toujours retourner succès pour éviter l'énumération d'emails
+    if not user:
+        return {"message": "Si un compte existe avec cet email, un email de vérification a été envoyé."}
+
+    # Vérifier si déjà vérifié
+    if user.is_verified:
+        return {"message": "Votre email est déjà vérifié. Vous pouvez vous connecter."}
+
+    # Générer un nouveau token de vérification
+    user.verification_token = generate_verification_token()
+    db.commit()
+
+    # Envoyer l'email
+    await email_service.send_verification_email(
+        to_email=user.email,
+        first_name=user.first_name or "",
+        verification_token=user.verification_token
+    )
+
+    # Log en dev si email pas configuré
+    if settings.DEBUG and not email_service.is_available:
+        print(f"Verification token for {user.email}: {user.verification_token}")
+
+    return {"message": "Si un compte existe avec cet email, un email de vérification a été envoyé."}
 
 
 @router.get("/me", response_model=UserResponse)

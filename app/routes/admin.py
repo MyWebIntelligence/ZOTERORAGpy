@@ -24,6 +24,8 @@ from app.schemas.user import (
 )
 from app.core.security import get_password_hash, generate_reset_token
 from app.middleware.auth import require_admin
+from app.services.email_service import email_service
+from app.config import settings
 
 # Directory configuration
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -459,10 +461,12 @@ async def admin_reset_password(
             detail="Utilisateur non trouvé"
         )
 
-    # Générer un token de reset
+    # Générer un token de reset (expire en 1 heure)
     reset_token = generate_reset_token()
     user.reset_token = reset_token
-    user.reset_token_expires = datetime.utcnow() + timedelta(hours=24)
+    user.reset_token_expires = datetime.utcnow() + timedelta(
+        hours=settings.PASSWORD_RESET_EXPIRE_HOURS
+    )
     db.commit()
 
     # Log d'audit
@@ -472,17 +476,32 @@ async def admin_reset_password(
         user_id=admin.id,
         resource_type="user",
         resource_id=user.id,
-        details={"triggered_by_admin": True},
+        details={"triggered_by_admin": True, "admin_email": admin.email},
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("User-Agent")
     )
 
-    # En production, envoyer un email
-    # Pour l'instant, retourner le token
+    # Envoyer l'email de reset (initié par admin)
+    email_sent = await email_service.send_password_reset_email(
+        to_email=user.email,
+        first_name=user.first_name or "",
+        reset_token=reset_token,
+        initiated_by_admin=True
+    )
+
+    # Log en dev si email pas configuré
+    if settings.DEBUG and not email_service.is_available:
+        print(f"Admin-triggered password reset token for {user.email}: {reset_token}")
+        return {
+            "message": "Token de réinitialisation généré (email non configuré)",
+            "reset_token": reset_token,
+            "expires_in_hours": settings.PASSWORD_RESET_EXPIRE_HOURS
+        }
+
     return {
-        "message": "Token de réinitialisation généré",
-        "reset_token": reset_token,
-        "expires_in_hours": 24
+        "message": f"Email de réinitialisation envoyé à {user.email}",
+        "email_sent": email_sent,
+        "expires_in_hours": settings.PASSWORD_RESET_EXPIRE_HOURS
     }
 
 
