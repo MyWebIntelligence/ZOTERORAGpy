@@ -12,30 +12,74 @@ Pipeline de traitement de documents (PDF, exports Zotero, **CSV**) et interface 
 
 ## Sommaire
 
-- [A — Usage](#a--usage)
-  - [1) Installation (débutant)](#1-installation-débutant)
-  - [2) Utilisation de l'interface web](#2-utilisation-de-linterface-web)
-  - [3) Authentification et gestion utilisateurs](#3-authentification-et-gestion-utilisateurs)
-  - [4) Génération de fiches de lecture Zotero](#4-génération-de-fiches-de-lecture-zotero)
-  - [5) Utilisation en ligne de commande](#5-utilisation-en-ligne-de-commande)
-- [B — Projet](#b--projet)
-  - [6) Le projet](#6-le-projet)
-  - [7) Architecture de dev](#7-architecture-de-dev)
-  - [8) Variables d'environnement (.env)](#8-variables-denvironnement-env)
-  - [9) Dépannage (FAQ)](#9-dépannage-faq)
-  - [10) Licence](#10-licence)
+- [A — Installation](#a--installation)
+  - [1) Installation Docker (recommandée)](#1-installation-docker-recommandée)
+  - [2) Installation manuelle](#2-installation-manuelle)
+  - [3) Configuration (.env)](#3-configuration-env)
+- [B — Usage](#b--usage)
+  - [4) Utilisation de l'interface web](#4-utilisation-de-linterface-web)
+  - [5) Authentification et gestion utilisateurs](#5-authentification-et-gestion-utilisateurs)
+  - [6) Génération de fiches de lecture Zotero](#6-génération-de-fiches-de-lecture-zotero)
+  - [7) Utilisation en ligne de commande](#7-utilisation-en-ligne-de-commande)
+- [C — Projet](#c--projet)
+  - [8) Le projet](#8-le-projet)
+  - [9) Architecture de dev](#9-architecture-de-dev)
+  - [10) Dépannage (FAQ)](#10-dépannage-faq)
+  - [11) Licence](#11-licence)
 
 ---
 
-## A — Usage
+## A — Installation
 
-### 1) Installation (débutant)
+### 1) Installation Docker (recommandée)
 
-Prérequis:
-- Python 3.8+
-- pip, git
+**Prérequis** : Docker et Docker Compose installés ([Get Docker](https://docs.docker.com/get-docker/))
 
-Étapes conseillées (macOS/Linux):
+```bash
+# 1. Cloner le dépôt
+git clone <URL_DU_DEPOT> && cd ragpy
+
+# 2. Créer le fichier .env
+cp .env.example .env
+# Éditer .env avec vos clés API (voir section 3)
+
+# 3. Lancer l'application
+docker compose up -d
+
+# 4. Accéder à l'interface
+open http://localhost:8000
+```
+
+**Commandes utiles** :
+```bash
+# Voir les logs
+docker compose logs -f ragpy
+
+# Arrêter l'application
+docker compose down
+
+# Reconstruire après modification
+docker compose up -d --build
+
+# Accéder au conteneur
+docker compose exec ragpy bash
+```
+
+**Volumes persistants** :
+- `./data` : Base de données SQLite
+- `./uploads` : Sessions de traitement
+- `./logs` : Journaux applicatifs
+- `./sources` : Fichiers sources (optionnel)
+
+**Qdrant local (optionnel)** : Décommentez la section `qdrant` dans `docker-compose.yml` pour une base vectorielle locale.
+
+---
+
+### 2) Installation manuelle
+
+**Prérequis** : Python 3.8+, pip, git
+
+**macOS/Linux** :
 ```bash
 # 1. Cloner le dépôt
 git clone <URL_DU_DEPOT> && cd ragpy
@@ -44,19 +88,22 @@ git clone <URL_DU_DEPOT> && cd ragpy
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 3. Mettre pip à jour et installer les dépendances
+# 3. Installer les dépendances
 pip install --upgrade pip
 pip install -r scripts/requirements.txt
-pip install fastapi uvicorn jinja2 python-multipart
 
-# 4. Installer le modèle spaCy FR (si textes FR)
+# 4. Installer le modèle spaCy FR
 python3 -m spacy download fr_core_news_md
 
-# 5. Créer le fichier .env à la racine
-cp scripts/.env.example .env  # si présent, sinon créez-le manuellement
+# 5. Configurer l'environnement
+cp .env.example .env
+# Éditer .env avec vos clés API
+
+# 6. Lancer le serveur
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Étapes (Windows PowerShell):
+**Windows PowerShell** :
 ```powershell
 git clone <URL_DU_DEPOT>
 cd ragpy
@@ -64,38 +111,55 @@ py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r scripts/requirements.txt
-pip install fastapi uvicorn jinja2 python-multipart
 python -m spacy download fr_core_news_md
-copy scripts\.env.example .env
+copy .env.example .env
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Contenu minimal de `.env` (à adapter):
+---
+
+### 3) Configuration (.env)
+
+Créez un fichier `.env` à la racine avec les variables suivantes :
+
 ```env
-# Obligatoire
+# ══════════════════════════════════════════════════════════════
+# OBLIGATOIRE
+# ══════════════════════════════════════════════════════════════
 OPENAI_API_KEY=sk-...                      # Embeddings + recodage GPT
 
+# ══════════════════════════════════════════════════════════════
 # OCR (recommandé)
+# ══════════════════════════════════════════════════════════════
 MISTRAL_API_KEY=...                        # OCR haute qualité
 MISTRAL_OCR_MODEL=mistral-ocr-latest
 MISTRAL_API_BASE_URL=https://api.mistral.ai
 
-# Email (recommandé pour auth)
+# ══════════════════════════════════════════════════════════════
+# EMAIL / AUTHENTIFICATION (recommandé)
+# ══════════════════════════════════════════════════════════════
 RESEND_API_KEY=re_...                      # Vérification email + reset password
 RESEND_FROM_EMAIL=noreply@votredomaine.com
 APP_URL=http://localhost:8000              # URL pour les liens dans les emails
 
-# Optionnel - Alternative économique pour recodage
+# ══════════════════════════════════════════════════════════════
+# OPTIONNEL - Alternative économique pour recodage
+# ══════════════════════════════════════════════════════════════
 OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_DEFAULT_MODEL=google/gemini-2.5-flash
 
-# Optionnel - Bases vectorielles (au moins une)
+# ══════════════════════════════════════════════════════════════
+# OPTIONNEL - Bases vectorielles (au moins une)
+# ══════════════════════════════════════════════════════════════
 PINECONE_API_KEY=pcsk-...
 WEAVIATE_URL=https://...
 WEAVIATE_API_KEY=...
 QDRANT_URL=https://...
 QDRANT_API_KEY=...
 
-# Optionnel - Zotero
+# ══════════════════════════════════════════════════════════════
+# OPTIONNEL - Zotero
+# ══════════════════════════════════════════════════════════════
 ZOTERO_API_KEY=...
 ```
 
@@ -103,11 +167,17 @@ ZOTERO_API_KEY=...
 - **OpenRouter** : Réduit les coûts de recodage de 2-3x (Gemini 2.5 Flash ~$0.002/1M tokens vs GPT-4o-mini ~$0.15/1M tokens)
 - **Mistral OCR** : OCR de haute qualité intégré, avec fallback vers OpenAI Vision si besoin
 
-Notes:
-- Placez `.env` à la racine de `ragpy/`.
-- `langchain-text-splitters` est requis pour le découpage; il est listé dans `scripts/requirements.txt`.
+**Notes** :
+- `OPENAI_API_KEY` est obligatoire (embeddings)
+- Au moins une base vectorielle doit être configurée
+- Sans Resend, les tokens de vérification s'affichent en console (mode dev)
+- L'UI (« Settings ⚙️ ») permet de configurer ces variables via interface graphique
 
-### 2) Utilisation de l’interface web
+---
+
+## B — Usage
+
+### 4) Utilisation de l'interface web
 
 Démarrer le serveur depuis `ragpy/`:
 ```bash
@@ -142,7 +212,7 @@ Où sont stockés les fichiers?
 
 Astuce: un script shell d'aide `ragpy_cli.sh` existe pour démarrer/arrêter le serveur. Il suppose d'être exécuté depuis le dossier parent contenant `ragpy/`. Si vous êtes déjà dans `ragpy/`, préférez la commande `uvicorn app.main:app ...` ci‑dessus.
 
-### 3) Authentification et gestion utilisateurs
+### 5) Authentification et gestion utilisateurs
 
 RAGpy intègre un système d'authentification complet avec vérification email.
 
@@ -191,7 +261,7 @@ Les administrateurs peuvent :
 | `/auth/reset-password` | POST | Réinitialiser avec token |
 | `/auth/me` | GET | Infos utilisateur connecté |
 
-### 4) Génération de fiches de lecture Zotero
+### 6) Génération de fiches de lecture Zotero
 
 **NOUVEAU** : RAGpy peut maintenant générer automatiquement des fiches de lecture académiques et les ajouter comme notes enfants dans votre bibliothèque Zotero.
 
@@ -298,9 +368,9 @@ Texte : {TEXT}
 
 **Avantage** : Aucune modification de code nécessaire ! Le fichier est rechargé automatiquement à chaque génération.
 
-### 5) Utilisation en ligne de commande
+### 7) Utilisation en ligne de commande
 
-Traitement complet (hors interface web) à partir d’un export Zotero placé dans `sources/MaBiblio/`:
+Traitement complet (hors interface web) à partir d'un export Zotero placé dans `sources/MaBiblio/`:
 
 1) Extraction PDF+Zotero vers CSV
 ```bash
@@ -332,7 +402,7 @@ Sorties attendues dans `sources/MaBiblio/`:
 
 3) Chargement en base vectorielle (optionnel, programmatique)
 
-Les fonctions d’insertion sont exposées dans `scripts/rad_vectordb.py` et sont appelées par l’interface web. Pour un usage CLI rapide, lancez‑les depuis Python:
+Les fonctions d'insertion sont exposées dans `scripts/rad_vectordb.py` et sont appelées par l'interface web. Pour un usage CLI rapide, lancez‑les depuis Python:
 
 Pinecone
 ```bash
@@ -381,18 +451,18 @@ PY
 
 ---
 
-## B — Projet
+## C — Projet
 
-### 6) Le projet
+### 8) Le projet
 
 Objectif: transformer des documents (PDFs, exports Zotero) en données exploitables pour des systèmes RAG, via un pipeline reproductible et une interface web simple à utiliser.
 
 Grandes étapes:
 - Extraction texte + métadonnées depuis Zotero/PDF (`rad_dataframe.py`)
 - Découpage en chunks, nettoyage GPT, embeddings denses et sparses (`rad_chunk.py`)
-- Insertion dans une base vectorielle (Pinecone, Weaviate, Qdrant) (`rad_vectordb.py` via l’UI)
+- Insertion dans une base vectorielle (Pinecone, Weaviate, Qdrant) (`rad_vectordb.py` via l'UI)
 
-### 7) Architecture de dev
+### 9) Architecture de dev
 
 Arborescence principale:
 ```
@@ -432,6 +502,8 @@ ragpy/
 ├── data/                     # Base de données SQLite (ragpy.db)
 ├── uploads/                  # Sessions de traitement
 ├── logs/                     # Logs applicatifs
+├── Dockerfile                # Image Docker
+├── docker-compose.yml        # Orchestration Docker
 ├── .env                      # Variables d'environnement
 └── ragpy_cli.sh              # Script démarrage serveur
 ```
@@ -451,48 +523,15 @@ Journaux et sorties:
 - Fichiers de session dans `uploads/<session>/`
 - Base de données dans `data/ragpy.db`
 
-### 8) Variables d'environnement (.env)
+### 10) Dépannage (FAQ)
 
-Toutes les variables supportées :
+**Installation Docker :**
 
-**Obligatoire :**
+- Image ne se construit pas : Vérifiez l'accès internet pour télécharger les dépendances
+- Conteneur ne démarre pas : Vérifiez que le port 8000 n'est pas utilisé (`lsof -i :8000`)
+- Erreur "file not found" : Vérifiez que `.env` existe à la racine
 
-- `OPENAI_API_KEY` - Embeddings + recodage GPT par défaut
-
-**OCR (recommandé) :**
-
-- `MISTRAL_API_KEY` - OCR haute qualité Mistral
-- `MISTRAL_OCR_MODEL` - Modèle OCR (défaut: `mistral-ocr-latest`)
-- `MISTRAL_API_BASE_URL` - URL API (défaut: `https://api.mistral.ai`)
-
-**Email / Authentification (recommandé) :**
-
-- `RESEND_API_KEY` - Clé API Resend pour envoi emails
-- `RESEND_FROM_EMAIL` - Email expéditeur (défaut: `onboarding@resend.dev`)
-- `APP_URL` - URL de base pour liens emails (défaut: `http://localhost:8000`)
-
-**OpenRouter (optionnel - économie coûts) :**
-
-- `OPENROUTER_API_KEY` - Alternative économique pour recodage
-- `OPENROUTER_DEFAULT_MODEL` - Modèle par défaut (ex: `google/gemini-2.5-flash`)
-
-**Bases vectorielles (au moins une) :**
-
-- `PINECONE_API_KEY`, `PINECONE_ENV`
-- `WEAVIATE_URL`, `WEAVIATE_API_KEY`
-- `QDRANT_URL`, `QDRANT_API_KEY`
-
-**Zotero (optionnel) :**
-
-- `ZOTERO_API_KEY` - Génération automatique de fiches de lecture
-- `ZOTERO_USER_ID` - Auto-détecté depuis export Zotero
-- `ZOTERO_GROUP_ID` - Pour bibliothèques de groupe
-
-L'UI (« Settings ») permet de configurer ces variables via interface graphique.
-
-### 9) Dépannage (FAQ)
-
-**Installation :**
+**Installation manuelle :**
 
 - Dépendances manquantes : `pip install -r scripts/requirements.txt`
 - spaCy manquant : `python -m spacy download fr_core_news_md`
@@ -524,7 +563,6 @@ L'UI (« Settings ») permet de configurer ces variables via interface graphique
 - Mistral OCR échoue : Vérifiez `MISTRAL_API_KEY`, fallback automatique vers OpenAI Vision
 - Texte mal extrait : Essayez d'augmenter `OPENAI_OCR_MAX_PAGES` pour le fallback
 
-### 10) Licence
+### 11) Licence
 
 MIT. Voir `LICENSE`.
-
