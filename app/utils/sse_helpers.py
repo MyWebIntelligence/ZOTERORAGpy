@@ -1,0 +1,255 @@
+"""
+SSE (Server-Sent Events) helper utilities for streaming subprocess progress.
+
+This module provides async generators for streaming subprocess output as SSE events,
+with specialized parsers for different script output formats.
+"""
+
+import asyncio
+import json
+import re
+import logging
+from typing import AsyncGenerator, Callable, Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+
+async def run_subprocess_with_sse(
+    cmd: list[str],
+    progress_parser: Callable[[str], Optional[Dict[str, Any]]],
+    *,
+    error_keywords: Optional[list[str]] = None,
+    timeout: Optional[int] = None
+) -> AsyncGenerator[str, None]:
+    """
+    Execute a subprocess and stream SSE events by parsing stdout/stderr.
+    
+    Args:
+        cmd: Command and arguments to execute
+        progress_parser: Function that parses log lines and returns event dict or None
+        error_keywords: List of keywords that indicate errors in output
+        timeout: Optional timeout in seconds
+    
+    Yields:
+        SSE-formatted strings: "data: {JSON}\\n\\n"
+        
+    Event types emitted:
+        - init: Initial setup with total count if known
+        - progress: Progress updates with current/total
+        - complete: Successful completion
+        - error: Error occurred
+    """
+    error_keywords = error_keywords or ["error", "failed", "exception", "traceback"]
+    
+    try:
+        # Create subprocess with both stdout and stderr captured
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        logger.info(f"Started subprocess: {' '.join(cmd)}")
+        
+        async def read_stream(stream, stream_name):
+            """Read from stdout or stderr and parse progress."""
+            while True:
+                try:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                        
+                    decoded = line.decode('utf-8', errors='replace').strip()
+                    if not decoded:
+                        continue
+                        
+                    logger.debug(f"[{stream_name}] {decoded}")
+                    
+                    # Check for error indicators
+                    if any(keyword in decoded.lower() for keyword in error_keywords):
+                        # Only emit error if it looks serious (not just a warning)
+                        if "error" in decoded.lower() and "warning" not in decoded.lower():
+                            yield {"type": "error", "message": decoded}
+                            continue
+                    
+                    # Try to parse progress
+                    event = progress_parser(decoded)
+                    if event:
+                        yield event
+                        
+                except Exception as e:
+                    logger.error(f"Error reading {stream_name}: {e}")
+                    break
+        
+        # Read both streams concurrently and merge events
+        async def merge_streams():
+            tasks = [
+                read_stream(process.stdout, "stdout"),
+                read_stream(process.stderr, "stderr")
+            ]
+            
+            for task in tasks:
+                async for event in task:
+                    yield event
+        
+        # Stream events
+        async for event in merge_streams():
+            yield f"data: {json.dumps(event)}\\n\\n"
+        
+        # Wait for process to complete
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            process.kill()
+            yield f"data: {{\"type\": \"error\", \"message\": \"Process timed out\"}}\\n\\n"
+            return
+        
+        # Check exit code
+        if process.returncode != 0:
+            yield f"data: {{\"type\": \"error\", \"message\": \"Process failed with code {process.returncode}\"}}\\n\\n"
+        else:
+            yield f"data: {{\"type\": \"complete\", \"message\": \"Process completed successfully\"}}\\n\\n"
+            
+    except Exception as e:
+        logger.error(f"Subprocess error: {e}", exc_info=True)
+        yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\\n\\n"
+
+
+# ============================================================================
+# Progress Parsers for specific scripts
+# ============================================================================
+
+def parse_tqdm_progress(line: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse tqdm progress bar output from stderr.
+    
+    Example formats:
+        "Processing Zotero items: 45%|████▌     | 45/100 [00:23<00:28,  1.98it/s]"
+        "100%|██████████| 100/100 [01:23<00:00,  1.20it/s]"
+    """
+    # Match tqdm progress bar format
+    # Pattern: <desc>: <percentage>%|<bar>| <current>/<total> [...]
+    match = re.search(r'(\d+)%\|.*?\|\s*(\d+)/(\d+)', line)
+    if match:
+        percent = int(match.group(1))
+        current = int(match.group(2))
+        total = int(match.group(3))
+        
+        # Extract description if present
+        desc_match = re.match(r'([^:]+):', line)
+        message = desc_match.group(1).strip() if desc_match else "Processing"
+        
+        return {
+            "type": "progress",
+            "current": current,
+            "total": total,
+            "percent": percent,
+            "message": f"{message}: {current}/{total}"
+        }
+    
+    return None
+
+
+def parse_dataframe_logs(line: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse rad_dataframe.py log output for progress events.
+    
+    Example formats:
+        "INFO - Chargement du fichier JSON Zotero depuis : /path/to/file.json"
+        "INFO - Detected Zotero JSON format: direct array with 150 items"
+        "INFO - Processing document 45/150: document.pdf"
+        "INFO - ✓ Item ABC123 saved (45 total)"
+    """
+    # Check for total items detected
+    match = re.search(r'(\d+)\s+items', line, re.IGNORECASE)
+    if match and 'detected' in line.lower():
+        total = int(match.group(1))
+        return {
+            "type": "init",
+            "total": total,
+            "message": f"Found {total} items to process"
+        }
+    
+    # Check for item saved (progress indicator)
+    match = re.search(r'✓\s+Item\s+\w+\s+saved\s+\((\d+)\s+total\)', line)
+    if match:
+        current = int(match.group(1))
+        return {
+            "type": "progress",
+            "current": current,
+            "message": f"Processed {current} items"
+        }
+    
+    # Check for resuming message
+    match = re.search(r'Resuming:\s+(\d+)/(\d+)\s+items\salready\sprocessed', line)
+    if match:
+        done = int(match.group(1))
+        total = int(match.group(2))
+        return {
+            "type": "init",
+            "total": total,
+            "message": f"Resuming: {done}/{total} already done"
+        }
+    
+    return None
+
+
+def parse_chunking_logs(line: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse rad_chunk.py log output for progress events.
+    
+    Example formats:
+        "Traitement de 'document.pdf': 15 chunks bruts générés."
+        "→ 15 chunks traités et sauvegardés pour le document 'doc' (doc_id=123)"
+        "Document #5 traité, 15 chunks produits."
+        "Chargement de 450 chunks depuis 'file.json' pour génération d'embeddings."
+    """
+    # Check for document processing
+    match = re.search(r'Document\s+#(\d+)\s+traité.*?(\d+)\s+chunks', line)
+    if match:
+        doc_num = int(match.group(1))
+        chunk_count = int(match.group(2))
+        return {
+            "type": "progress",
+            "current": doc_num,
+            "message": f"Document #{doc_num}: {chunk_count} chunks generated"
+        }
+    
+    # Check for embedding generation init
+    match = re.search(r'Chargement\s+de\s+(\d+)\s+chunks', line)
+    if match:
+        total = int(match.group(1))
+        return {
+            "type": "init",
+            "total": total,
+            "message": f"Loading {total} chunks for processing"
+        }
+    
+    # Check for phase start
+    if "Phase" in line and ("initial" in line.lower() or "dense" in line.lower() or "sparse" in line.lower()):
+        return {
+            "type": "init",
+            "message": line.strip()
+        }
+    
+    return None
+
+
+def create_combined_parser(*parsers: Callable[[str], Optional[Dict[str, Any]]]) -> Callable[[str], Optional[Dict[str, Any]]]:
+    """
+    Create a combined parser that tries multiple parsers in order.
+    
+    Args:
+        *parsers: Variable number of parser functions
+        
+    Returns:
+        A parser function that tries each parser until one returns a result
+    """
+    def combined(line: str) -> Optional[Dict[str, Any]]:
+        for parser in parsers:
+            result = parser(line)
+            if result:
+                return result
+        return None
+    
+    return combined

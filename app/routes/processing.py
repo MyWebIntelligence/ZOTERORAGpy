@@ -322,50 +322,48 @@ async def initial_text_chunking(path: str = Form(...), model: str = Form(None)):
 @router.post("/process_dataframe_sse")
 async def process_dataframe_sse(path: str = Form(...)):
     """
-    Process dataframe with Server-Sent Events for progress updates.
-    This is a streaming version of process_dataframe.
+    Process dataframe with Server-Sent Events for real-time progress updates.
+    Streams progress from rad_dataframe.py execution.
     """
+    from app.utils.sse_helpers import run_subprocess_with_sse, create_combined_parser, parse_tqdm_progress, parse_dataframe_logs
+    
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
-    logger.info(f"SSE dataframe processing for path: '{path}'")
-    
-    async def event_generator():
-        try:
-            # For now, just call the regular process_dataframe synchronously
-            # In a real implementation, you'd want to run the subprocess and stream progress
-            yield f"data: {{\"type\": \"init\", \"total\": 1, \"message\": \"Starting extraction...\"}}\n\n"
-            
-            # Call process_dataframe logic here
-            # For simplicity, we're delegating to the sync version
-            result = await asyncio.to_thread(
-                lambda: process_dataframe_sync(absolute_processing_path, path)
-            )
-            
-            if "error" in result:
-                yield f"data: {{\"type\": \"error\", \"message\": \"{result['error']}\"}}\n\n"
-            else:
-                yield f"data: {{\"type\": \"progress\", \"current\": 1, \"total\": 1}}\n\n"
-                yield f"data: {{\"type\": \"complete\", \"message\": \"Extraction complete\"}}\n\n"
-        except Exception as e:
-            logger.error(f"SSE error: {e}")
-            yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
-    
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-def process_dataframe_sync(absolute_processing_path: str, path: str) -> dict:
-    """Synchronous version of process_dataframe for SSE."""
-    # This is a simplified version - in production you'd want full error handling
-    out_csv = os.path.join(absolute_processing_path, 'output.csv')
+    logger.info(f"SSE dataframe processing for path: '{path}', resolved to: '{absolute_processing_path}'")
     
     if not os.path.isdir(absolute_processing_path):
-        return {"error": f"Processing directory not found: {path}"}
+        async def error_generator():
+            yield f"data: {{\"type\": \"error\", \"message\": \"Processing directory not found: {path}\"}}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
     
-    # The actual processing logic from process_dataframe would go here
-    # For now, just check if file exists
-    if os.path.exists(out_csv):
-        return {"status": "success", "file": out_csv}
+    # Find JSON file
+    try:
+        json_files = [f for f in os.listdir(absolute_processing_path) if f.lower().endswith('.json')]
+    except Exception as e:
+        async def error_generator():
+            yield f"data: {{\"type\": \"error\", \"message\": \"Failed to list directory: {str(e)}\"}}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
     
-    return {"error": "Output file not created"}
+    if not json_files:
+        async def error_generator():
+            yield f"data: {{\"type\": \"error\", \"message\": \"No JSONfile found in directory\"}}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
+    
+    json_path = os.path.join(absolute_processing_path, json_files[0])
+    out_csv = os.path.join(absolute_processing_path, 'output.csv')
+    
+    # Build command
+    script_path = os.path.join(RAGPY_DIR, "scripts", "rad_dataframe.py")
+    cmd = ["python3", script_path, "--json", json_path, "--dir", absolute_processing_path, "--output", out_csv]
+    
+    logger.info(f"Executing: {' '.join(cmd)}")
+    
+    # Use combined parser for tqdm and custom logs
+    parser = create_combined_parser(parse_tqdm_progress, parse_dataframe_logs)
+    
+    return StreamingResponse(
+        run_subprocess_with_sse(cmd, parser, timeout=1800),
+        media_type="text/event-stream"
+    )
 
 
 @router.post("/dense_embedding_generation")
@@ -607,3 +605,110 @@ async def generate_zotero_notes_sse(
             yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ============================================================================
+# Optional SSE versions for better UX on long-running operations
+# ============================================================================
+
+@router.post("/initial_text_chunking_sse")
+async def initial_text_chunking_sse(path: str = Form(...), model: str = Form(None)):
+    """
+    SSE version of initial_text_chunking for real-time progress updates.
+    """
+    from app.utils.sse_helpers import run_subprocess_with_sse, create_combined_parser, parse_tqdm_progress, parse_chunking_logs
+    
+    absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
+    logger.info(f"SSE chunking for path: '{path}'")
+    
+    if not os.path.isdir(absolute_processing_path):
+        async def error_generator():
+            yield f"data: {{\"type\": \"error\", \"message\": \"Directory not found: {path}\"}}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
+    
+    input_csv = os.path.join(absolute_processing_path, 'output.csv')
+    if not os.path.exists(input_csv):
+        async def error_generator():
+            yield f"data: {{\"type\": \"error\", \"message\": \"output.csv not found. Complete extraction first.\"}}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
+    
+    script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
+    model = model or "gpt-4o-mini"
+    
+    cmd = [
+        "python3", script_path,
+        "--input", input_csv,
+        "--output", absolute_processing_path,
+        "--phase", "initial",
+        "--model", model
+    ]
+    
+    parser = create_combined_parser(parse_tqdm_progress, parse_chunking_logs)
+    
+    return StreamingResponse(
+        run_subprocess_with_sse(cmd, parser, timeout=1800),
+        media_type="text/event-stream"
+    )
+
+
+@router.post("/dense_embedding_generation_sse")
+async def dense_embedding_generation_sse(path: str = Form(...)):
+    """
+    SSE version of dense_embedding_generation for real-time progress updates.
+    """
+    from app.utils.sse_helpers import run_subprocess_with_sse, create_combined_parser, parse_tqdm_progress, parse_chunking_logs
+    
+    absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
+    input_chunks = os.path.join(absolute_processing_path, 'output_chunks.json')
+    
+    if not os.path.exists(input_chunks):
+        async def error_generator():
+            yield f"data: {{\"type\": \"error\", \"message\": \"output_chunks.json not found\"}}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
+    
+    script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
+    cmd = [
+        "python3", script_path,
+        "--input", input_chunks,
+        "--output", absolute_processing_path,
+        "--phase", "dense"
+    ]
+    
+    parser = create_combined_parser(parse_tqdm_progress, parse_chunking_logs)
+    
+    return StreamingResponse(
+        run_subprocess_with_sse(cmd, parser, timeout=1800),
+        media_type="text/event-stream"
+    )
+
+
+@router.post("/sparse_embedding_generation_sse")
+async def sparse_embedding_generation_sse(path: str = Form(...)):
+    """
+    SSE version of sparse_embedding_generation for real-time progress updates.
+    """
+    from app.utils.sse_helpers import run_subprocess_with_sse, create_combined_parser, parse_tqdm_progress, parse_chunking_logs
+    
+    absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
+    input_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings.json')
+    
+    if not os.path.exists(input_file):
+        async def error_generator():
+            yield f"data: {{\"type\": \"error\", \"message\": \"output_chunks_with_embeddings.json not found\"}}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
+    
+    script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
+    cmd = [
+        "python3", script_path,
+        "--input", input_file,
+        "--output", absolute_processing_path,
+        "--phase", "sparse"
+    ]
+    
+    parser = create_combined_parser(parse_tqdm_progress, parse_chunking_logs)
+    
+    return StreamingResponse(
+        run_subprocess_with_sse(cmd, parser, timeout=1800),
+        media_type="text/event-stream"
+    )
+
