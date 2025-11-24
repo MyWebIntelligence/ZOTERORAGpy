@@ -16,13 +16,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def run_tracked_subprocess(
+async def run_tracked_subprocess(
     cmd: list,
     session_folder: str,
     timeout: int = 1800
 ) -> subprocess.CompletedProcess:
     """
-    Lance un subprocess avec tracking PID pour permettre l'arrêt par session.
+    Lance un subprocess ASYNC avec tracking PID pour permettre l'arrêt par session.
+
+    IMPORTANT: Cette fonction est async pour ne pas bloquer le serveur,
+    permettant ainsi de traiter les requêtes de stop en parallèle.
 
     Args:
         cmd: Commande à exécuter (liste d'arguments)
@@ -32,28 +35,35 @@ def run_tracked_subprocess(
     Returns:
         subprocess.CompletedProcess avec stdout, stderr, returncode
     """
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
+    # Utiliser asyncio.create_subprocess_exec pour ne pas bloquer
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
     )
 
     # Enregistrer le PID pour permettre l'arrêt
     process_manager.register(session_folder, process.pid)
-    logger.info(f"Started process PID {process.pid} for session '{session_folder}'")
+    logger.info(f"Started async process PID {process.pid} for session '{session_folder}'")
 
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        # Attendre avec timeout sans bloquer le serveur
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout
+        )
+        stdout = stdout_bytes.decode('utf-8', errors='replace') if stdout_bytes else ''
+        stderr = stderr_bytes.decode('utf-8', errors='replace') if stderr_bytes else ''
+
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=process.returncode,
             stdout=stdout,
             stderr=stderr
         )
-    except subprocess.TimeoutExpired:
+    except asyncio.TimeoutError:
         process.kill()
-        stdout, stderr = process.communicate()
+        await process.communicate()  # Clean up
         raise subprocess.TimeoutExpired(cmd, timeout)
     finally:
         # Toujours désenregistrer le PID à la fin
@@ -96,7 +106,8 @@ async def stop_all_scripts(session: str = Form(...)):
 
     try:
         # Utiliser le ProcessManager pour arrêter uniquement les processus de cette session
-        result = process_manager.stop_session(session)
+        # Exécuter dans un thread pool pour ne pas bloquer pendant l'attente SIGTERM → SIGKILL
+        result = await asyncio.to_thread(process_manager.stop_session, session)
         logger.info(f"stop_all_scripts result for session '{session}': {result}")
         return JSONResponse(result)
 
@@ -174,13 +185,16 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
                 logger.warning(f"Could not check existing output.csv: {e}. Proceeding with full OCR.")
 
         # Find JSON file only if full OCR is needed
+        # Exclude pipeline-generated files (output_*.json, generated_*.json)
         json_path = None
         if ocr_mode == "full":
-            json_files = [f for f in os.listdir(absolute_processing_path) if f.lower().endswith('.json')]
+            excluded_prefixes = ('output_', 'output.', 'generated_')
+            json_files = [f for f in os.listdir(absolute_processing_path)
+                          if f.lower().endswith('.json') and not f.startswith(excluded_prefixes)]
             if not json_files:
-                logger.error(f"No JSON file found in {absolute_processing_path} and no existing texteocr content")
+                logger.error(f"No Zotero JSON file found in {absolute_processing_path} (excluding output_*.json)")
                 return JSONResponse(status_code=400, content={
-                    "error": "No JSON file found and output.csv does not contain texteocr content."
+                    "error": "No Zotero JSON file found (excluding pipeline-generated output_*.json files)."
                 })
             json_path = os.path.join(absolute_processing_path, json_files[0])
             logger.info(f"Processing dataframe with JSON: {json_path}, output: {out_csv}")
@@ -200,7 +214,7 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
                 logger.info(f"Executing rad_dataframe.py with command: python3 {script_path} ...")
 
                 # Use tracked subprocess for session-aware process management
-                result = run_tracked_subprocess(
+                result = await run_tracked_subprocess(
                     cmd=[
                         "python3", script_path,
                         "--json", json_path,
@@ -325,7 +339,7 @@ async def initial_text_chunking(path: str = Form(...), model: str = Form(None)):
     
     try:
         # Run rad_chunk.py with phase=initial (tracked for session-aware stop)
-        result = run_tracked_subprocess(
+        result = await run_tracked_subprocess(
             cmd=[
                 "python3", script_path,
                 "--input", input_csv,
@@ -392,8 +406,11 @@ async def process_dataframe_sse(path: str = Form(...)):
     Process dataframe with Server-Sent Events for real-time progress updates.
     Streams progress from rad_dataframe.py execution.
     """
-    from app.utils.sse_helpers import run_subprocess_with_sse, create_combined_parser, parse_tqdm_progress, parse_dataframe_logs
-    
+    from app.utils.sse_helpers import (
+        run_subprocess_with_sse, create_combined_parser,
+        parse_tqdm_progress, parse_dataframe_logs, parse_multilevel_progress
+    )
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"SSE dataframe processing for path: '{path}', resolved to: '{absolute_processing_path}'")
     
@@ -402,17 +419,20 @@ async def process_dataframe_sse(path: str = Form(...)):
             yield f"data: {{\"type\": \"error\", \"message\": \"Processing directory not found: {path}\"}}\n\n"
         return StreamingResponse(error_generator(), media_type="text/event-stream")
     
-    # Find JSON file
+    # Find Zotero JSON file (exclude pipeline-generated output files)
+    # Pipeline generates: output_chunks.json, output_chunks_with_embeddings.json, etc.
+    excluded_prefixes = ('output_', 'output.', 'generated_')
     try:
-        json_files = [f for f in os.listdir(absolute_processing_path) if f.lower().endswith('.json')]
+        json_files = [f for f in os.listdir(absolute_processing_path)
+                      if f.lower().endswith('.json') and not f.startswith(excluded_prefixes)]
     except Exception as e:
         async def error_generator():
             yield f"data: {{\"type\": \"error\", \"message\": \"Failed to list directory: {str(e)}\"}}\n\n"
         return StreamingResponse(error_generator(), media_type="text/event-stream")
-    
+
     if not json_files:
         async def error_generator():
-            yield f"data: {{\"type\": \"error\", \"message\": \"No JSONfile found in directory\"}}\n\n"
+            yield f"data: {{\"type\": \"error\", \"message\": \"No Zotero JSON file found in directory (excluding output_*.json)\"}}\n\n"
         return StreamingResponse(error_generator(), media_type="text/event-stream")
     
     json_path = os.path.join(absolute_processing_path, json_files[0])
@@ -420,17 +440,28 @@ async def process_dataframe_sse(path: str = Form(...)):
     
     # Build command
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_dataframe.py")
-    cmd = ["python3", script_path, "--json", json_path, "--dir", absolute_processing_path, "--output", out_csv]
+    cmd = ["python3", "-u", script_path, "--json", json_path, "--dir", absolute_processing_path, "--output", out_csv]
     
     logger.info(f"Executing: {' '.join(cmd)}")
-    
-    # Use combined parser for tqdm and custom logs
-    parser = create_combined_parser(parse_tqdm_progress, parse_dataframe_logs)
 
-    return StreamingResponse(
-        run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800),
-        media_type="text/event-stream"
-    )
+    # Use combined parser: prioritize structured PROGRESS logs, then tqdm, then custom logs
+    parser = create_combined_parser(parse_multilevel_progress, parse_tqdm_progress, parse_dataframe_logs)
+
+    # Wrap generator to add document count on complete
+    async def sse_with_count():
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
+            if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
+                try:
+                    if os.path.exists(out_csv):
+                        df = pd.read_csv(out_csv, dtype=str, keep_default_na=False)
+                        count = len(df)
+                        yield f'data: {{"type": "complete", "message": "Process completed successfully", "count": {count}}}\n\n'
+                        continue
+                except Exception:
+                    pass
+            yield event
+
+    return StreamingResponse(sse_with_count(), media_type="text/event-stream")
 
 
 @router.post("/dense_embedding_generation")
@@ -455,7 +486,7 @@ async def dense_embedding_generation(path: str = Form(...)):
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     
     try:
-        result = run_tracked_subprocess(
+        result = await run_tracked_subprocess(
             cmd=[
                 "python3", script_path,
                 "--input", input_chunks,
@@ -520,7 +551,7 @@ async def sparse_embedding_generation(path: str = Form(...)):
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     
     try:
-        result = run_tracked_subprocess(
+        result = await run_tracked_subprocess(
             cmd=[
                 "python3", script_path,
                 "--input", input_file,
@@ -611,7 +642,7 @@ async def upload_db(
             cmd.extend(["--collection", qdrant_collection_name])
     
     try:
-        result = run_tracked_subprocess(
+        result = await run_tracked_subprocess(
             cmd=cmd,
             session_folder=path,
             timeout=3600  # 1h for large uploads
@@ -885,9 +916,13 @@ async def generate_zotero_notes_sse(
 async def initial_text_chunking_sse(path: str = Form(...), model: str = Form(None)):
     """
     SSE version of initial_text_chunking for real-time progress updates.
+    Uses multilevel progress parser for dual progress bars (documents + chunks).
     """
-    from app.utils.sse_helpers import run_subprocess_with_sse, create_combined_parser, parse_tqdm_progress, parse_chunking_logs
-    
+    from app.utils.sse_helpers import (
+        run_subprocess_with_sse, create_combined_parser,
+        parse_multilevel_progress, parse_tqdm_progress, parse_chunking_logs
+    )
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"SSE chunking for path: '{path}'")
     
@@ -906,78 +941,132 @@ async def initial_text_chunking_sse(path: str = Form(...), model: str = Form(Non
     model = model or "gpt-4o-mini"
     
     cmd = [
-        "python3", script_path,
+        "python3", "-u", script_path,  # -u for unbuffered output
         "--input", input_csv,
         "--output", absolute_processing_path,
         "--phase", "initial",
         "--model", model
     ]
-    
-    parser = create_combined_parser(parse_tqdm_progress, parse_chunking_logs)
 
-    return StreamingResponse(
-        run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800),
-        media_type="text/event-stream"
-    )
+    # Prioritize structured PROGRESS logs for multilevel progress display
+    parser = create_combined_parser(parse_multilevel_progress, parse_tqdm_progress, parse_chunking_logs)
+
+    # Wrap generator to add chunk count on complete
+    output_file = os.path.join(absolute_processing_path, 'output_chunks.json')
+
+    async def sse_with_count():
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
+            # Intercept complete event to add count
+            if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
+                try:
+                    if os.path.exists(output_file):
+                        with open(output_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            count = len(data) if isinstance(data, list) else 0
+                        yield f'data: {{"type": "complete", "message": "Process completed successfully", "count": {count}}}\n\n'
+                        continue
+                except Exception:
+                    pass
+            yield event
+
+    return StreamingResponse(sse_with_count(), media_type="text/event-stream")
 
 
 @router.post("/dense_embedding_generation_sse")
 async def dense_embedding_generation_sse(path: str = Form(...)):
     """
     SSE version of dense_embedding_generation for real-time progress updates.
+    Uses multilevel progress parser for dual progress bars (documents + chunks).
     """
-    from app.utils.sse_helpers import run_subprocess_with_sse, create_combined_parser, parse_tqdm_progress, parse_chunking_logs
-    
+    from app.utils.sse_helpers import (
+        run_subprocess_with_sse, create_combined_parser,
+        parse_multilevel_progress, parse_tqdm_progress, parse_chunking_logs
+    )
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     input_chunks = os.path.join(absolute_processing_path, 'output_chunks.json')
-    
+
     if not os.path.exists(input_chunks):
         async def error_generator():
             yield f"data: {{\"type\": \"error\", \"message\": \"output_chunks.json not found\"}}\n\n"
         return StreamingResponse(error_generator(), media_type="text/event-stream")
-    
+
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     cmd = [
-        "python3", script_path,
+        "python3", "-u", script_path,  # -u for unbuffered output
         "--input", input_chunks,
         "--output", absolute_processing_path,
         "--phase", "dense"
     ]
 
-    parser = create_combined_parser(parse_tqdm_progress, parse_chunking_logs)
+    # Prioritize structured PROGRESS logs for multilevel progress display
+    parser = create_combined_parser(parse_multilevel_progress, parse_tqdm_progress, parse_chunking_logs)
 
-    return StreamingResponse(
-        run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800),
-        media_type="text/event-stream"
-    )
+    # Wrap generator to add chunk count on complete
+    output_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings.json')
+
+    async def sse_with_count():
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
+            if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
+                try:
+                    if os.path.exists(output_file):
+                        with open(output_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            count = len(data) if isinstance(data, list) else 0
+                        yield f'data: {{"type": "complete", "message": "Process completed successfully", "count": {count}}}\n\n'
+                        continue
+                except Exception:
+                    pass
+            yield event
+
+    return StreamingResponse(sse_with_count(), media_type="text/event-stream")
 
 
 @router.post("/sparse_embedding_generation_sse")
 async def sparse_embedding_generation_sse(path: str = Form(...)):
     """
     SSE version of sparse_embedding_generation for real-time progress updates.
+    Uses multilevel progress parser for chunk-level progress display.
     """
-    from app.utils.sse_helpers import run_subprocess_with_sse, create_combined_parser, parse_tqdm_progress, parse_chunking_logs
-    
+    from app.utils.sse_helpers import (
+        run_subprocess_with_sse, create_combined_parser,
+        parse_multilevel_progress, parse_tqdm_progress, parse_chunking_logs
+    )
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     input_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings.json')
-    
+
     if not os.path.exists(input_file):
         async def error_generator():
             yield f"data: {{\"type\": \"error\", \"message\": \"output_chunks_with_embeddings.json not found\"}}\n\n"
         return StreamingResponse(error_generator(), media_type="text/event-stream")
-    
+
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     cmd = [
-        "python3", script_path,
+        "python3", "-u", script_path,  # -u for unbuffered output
         "--input", input_file,
         "--output", absolute_processing_path,
         "--phase", "sparse"
     ]
-    
-    parser = create_combined_parser(parse_tqdm_progress, parse_chunking_logs)
 
-    return StreamingResponse(
-        run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800),
-        media_type="text/event-stream"
-    )
+    # Prioritize structured PROGRESS logs for progress display
+    parser = create_combined_parser(parse_multilevel_progress, parse_tqdm_progress, parse_chunking_logs)
+
+    # Wrap generator to add chunk count on complete
+    output_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings_sparse.json')
+
+    async def sse_with_count():
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
+            if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
+                try:
+                    if os.path.exists(output_file):
+                        with open(output_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            count = len(data) if isinstance(data, list) else 0
+                        yield f'data: {{"type": "complete", "message": "Process completed successfully", "count": {count}}}\n\n'
+                        continue
+                except Exception:
+                    pass
+            yield event
+
+    return StreamingResponse(sse_with_count(), media_type="text/event-stream")

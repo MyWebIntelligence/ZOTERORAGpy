@@ -320,19 +320,29 @@ def process_all_documents(df, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-
     # Max 3 documents processed in parallel for their chunking/recoding stages
     num_doc_workers = min(3, DEFAULT_MAX_WORKERS)
 
+    total_docs = len(df)
+    # Emit init event for SSE progress tracking
+    print(f"PROGRESS|init|{total_docs}|Found {total_docs} documents to chunk", flush=True)
+
     with ThreadPoolExecutor(max_workers=num_doc_workers) as executor:
         # df.iterrows() returns (index, Series)
         futures = {
             executor.submit(process_document_chunks, row_series, json_file, model): idx
             for idx, row_series in df.iterrows()
         }
-        
+
+        completed_count = 0
         for future in tqdm(as_completed(futures), total=len(futures), desc="Traitement des Documents (Chunking)"):
             doc_idx = futures[future]
+            completed_count += 1
             try:
                 result_chunks = future.result()
-                print(f"Document #{doc_idx} traité, {len(result_chunks)} chunks produits.")
+                chunk_count = len(result_chunks) if result_chunks else 0
+                # Emit row-level progress
+                print(f"PROGRESS|row|{completed_count}/{total_docs}|Document #{doc_idx}: {chunk_count} chunks", flush=True)
+                print(f"Document #{doc_idx} traité, {chunk_count} chunks produits.")
             except Exception as e:
+                print(f"PROGRESS|row|{completed_count}/{total_docs}|Document #{doc_idx}: error", flush=True)
                 print(f"Erreur lors du traitement du document #{doc_idx}: {e}")
 
 # ----------------------------------------------------------------------
@@ -399,42 +409,41 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
     with open(input_json_file, 'r', encoding='utf-8') as f:
         all_chunks_from_file = json.load(f)
     
-    print(f"Chargement de {len(all_chunks_from_file)} chunks depuis '{input_json_file}' pour génération d'embeddings.")
-    
-    # Regrouper par doc_id pour le suivi, bien que le traitement soit par lot global de chunks
+    total_chunks = len(all_chunks_from_file)
+    print(f"Chargement de {total_chunks} chunks depuis '{input_json_file}' pour génération d'embeddings.")
+
+    # Emit init event for SSE progress tracking (chunks only - documents were processed in step 3.1)
+    print(f"PROGRESS|init|{total_chunks}|Generating embeddings for {total_chunks} chunks", flush=True)
+
+    # Regrouper par doc_id pour le traitement par lot (optimisation API)
     chunks_by_doc = {}
     for chunk in all_chunks_from_file:
         doc_id = chunk.get("doc_id", "unknown_doc")
         if doc_id not in chunks_by_doc:
             chunks_by_doc[doc_id] = []
         chunks_by_doc[doc_id].append(chunk)
-        
-    all_chunks_with_embeddings = []
-    
-    # Traiter tous les chunks en lots, indépendamment de leur document d'origine pour l'embedding
-    # La structure de tqdm est modifiée pour refléter le traitement par lots de chunks plutôt que par documents.
-    
-    # Flatten list of chunks if it's grouped by doc (it's already flat from file load)
-    # all_chunks_flat = [chunk for doc_chunks in chunks_by_doc.values() for chunk in doc_chunks]
-    # The master code iterates through chunks_by_doc.items(), then batches within each doc.
-    # This is less efficient for API calls if docs are small. Let's follow master code structure.
 
+    all_chunks_with_embeddings = []
+
+    # Process chunks grouped by document (for API efficiency)
     processed_chunk_count = 0
-    for doc_id, doc_chunks_list in tqdm(chunks_by_doc.items(), desc="Génération Embeddings (par document)"):
+    for doc_id, doc_chunks_list in tqdm(chunks_by_doc.items(), desc="Génération Embeddings"):
         print(f"  Traitement du document {doc_id} ({len(doc_chunks_list)} chunks) pour embeddings...")
-        
+
         embedded_doc_chunks = []
         for i in range(0, len(doc_chunks_list), DEFAULT_EMBEDDING_BATCH_SIZE):
             batch = doc_chunks_list[i : i + DEFAULT_EMBEDDING_BATCH_SIZE]
-            processed_batch = process_chunks_for_embedding(batch) # Modifies batch in-place
+            processed_batch = process_chunks_for_embedding(batch)  # Modifies batch in-place
             embedded_doc_chunks.extend(processed_batch)
-            # print(f"    Lot {i // DEFAULT_EMBEDDING_BATCH_SIZE + 1} traité pour doc {doc_id}")
-        
+            # Emit chunk-level progress (primary progress bar)
+            current_in_doc = min(i + DEFAULT_EMBEDDING_BATCH_SIZE, len(doc_chunks_list))
+            print(f"PROGRESS|chunk|{processed_chunk_count + current_in_doc}/{total_chunks}|Chunk {processed_chunk_count + current_in_doc}/{total_chunks}", flush=True)
+
         all_chunks_with_embeddings.extend(embedded_doc_chunks)
         processed_chunk_count += len(embedded_doc_chunks)
 
         # Sauvegarde intermédiaire (optionnelle)
-        if processed_chunk_count > 0 and processed_chunk_count % 1000 < DEFAULT_EMBEDDING_BATCH_SIZE : # Approx every 1000
+        if processed_chunk_count > 0 and processed_chunk_count % 1000 < DEFAULT_EMBEDDING_BATCH_SIZE:  # Approx every 1000
             temp_output_file = f"{os.path.splitext(output_json_file)[0]}_temp_embeddings.json"
             save_processed_chunks_to_json_overwrite(all_chunks_with_embeddings, temp_output_file)
             print(f"Sauvegarde temporaire de {len(all_chunks_with_embeddings)} chunks avec embeddings dans '{temp_output_file}'.")
@@ -502,8 +511,11 @@ def generate_sparse_embeddings(input_json_file=DEFAULT_INPUT_JSON_WITH_EMBEDDING
     with open(input_json_file, 'r', encoding='utf-8') as f:
         all_chunks = json.load(f)
     
-    print(f"Chargement de {len(all_chunks)} chunks depuis '{input_json_file}' pour génération d'embeddings sparses.")
-    
+    total_chunks = len(all_chunks)
+    print(f"Chargement de {total_chunks} chunks depuis '{input_json_file}' pour génération d'embeddings sparses.")
+    # Emit init event for SSE progress tracking
+    print(f"PROGRESS|init|{total_chunks}|Loading {total_chunks} chunks for sparse embedding", flush=True)
+
     for i, chunk in enumerate(tqdm(all_chunks, desc="Génération Embeddings Sparses")):
         chunk_text = chunk.get("text", "")
         if not chunk_text:
@@ -514,13 +526,13 @@ def generate_sparse_embeddings(input_json_file=DEFAULT_INPUT_JSON_WITH_EMBEDDING
                 sparse_embedding = extract_sparse_features(chunk_text)
             except Exception as e:
                 print(f"Erreur lors de la génération de l'embedding sparse pour le chunk ID {chunk.get('id', i)}: {e}")
-                sparse_embedding = {"indices": [], "values": []} # Fallback
-        
-        all_chunks[i]["sparse_embedding"] = sparse_embedding # Ajoute/met à jour la clé "sparse_embedding"
+                sparse_embedding = {"indices": [], "values": []}  # Fallback
 
-        # Affichage de la progression (optionnel, tqdm s'en charge)
-        # if (i + 1) % 500 == 0:
-        #     print(f"  Progression sparse: {(i + 1) / len(all_chunks) * 100:.1f}% ({i + 1}/{len(all_chunks)} chunks traités)")
+        all_chunks[i]["sparse_embedding"] = sparse_embedding  # Ajoute/met à jour la clé "sparse_embedding"
+
+        # Emit chunk-level progress every 50 chunks to avoid overwhelming SSE
+        if (i + 1) % 50 == 0 or (i + 1) == total_chunks:
+            print(f"PROGRESS|chunk|{i + 1}/{total_chunks}|SpaCy processing chunk {i + 1}", flush=True)
 
     # Sauvegarde finale des chunks (maintenant avec embeddings denses et sparses)
     # Utilise la même fonction de sauvegarde que pour les embeddings denses (overwrite)
