@@ -290,13 +290,15 @@ async def delete_user(
 
     # Vérifier si c'est le dernier admin
     if user.is_admin:
-        admin_count = db.query(User).filter(
-            User.roles.contains(["ADMIN"]),
+        # Note: On utilise is_admin property car JSON contains peut etre peu fiable sur SQLite
+        other_users = db.query(User).filter(
             User.id != user.id,
             User.is_active == True
-        ).count()
+        ).all()
 
-        if admin_count == 0:
+        other_admins = [u for u in other_users if u.is_admin]
+
+        if len(other_admins) == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Impossible de supprimer le dernier administrateur"
@@ -400,14 +402,16 @@ async def toggle_user_admin(
 
     # Toggle le rôle admin
     if user.is_admin:
-        # Vérifier qu'il reste au moins un admin
-        admin_count = db.query(User).filter(
-            User.roles.contains(["ADMIN"]),
+        # Vérifier qu'il reste au moins un autre admin actif
+        # Note: On utilise is_admin property car JSON contains peut etre peu fiable sur SQLite
+        other_users = db.query(User).filter(
             User.id != user.id,
             User.is_active == True
-        ).count()
+        ).all()
 
-        if admin_count == 0:
+        other_admins = [u for u in other_users if u.is_admin]
+
+        if len(other_admins) == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Impossible de retirer le dernier administrateur"
