@@ -1004,19 +1004,24 @@ async def dense_embedding_generation_sse(path: str = Form(...)):
 
     # Wrap generator to add chunk count on complete
     output_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings.json')
+    logger.info(f"Dense embedding expecting output at: {output_file}")
 
     async def sse_with_count():
         async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
             if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
                 try:
+                    logger.info(f"Dense complete event received, checking for output file: {output_file}")
                     if os.path.exists(output_file):
                         with open(output_file, 'r', encoding='utf-8') as f:
                             data = json.load(f)
                             count = len(data) if isinstance(data, list) else 0
+                        logger.info(f"Dense embedding file found with {count} chunks")
                         yield f'data: {{"type": "complete", "message": "Process completed successfully", "count": {count}}}\n\n'
                         continue
-                except Exception:
-                    pass
+                    else:
+                        logger.warning(f"Dense output file not found: {output_file}")
+                except Exception as e:
+                    logger.error(f"Error reading dense output file: {e}")
             yield event
 
     return StreamingResponse(sse_with_count(), media_type="text/event-stream")
@@ -1054,19 +1059,24 @@ async def sparse_embedding_generation_sse(path: str = Form(...)):
 
     # Wrap generator to add chunk count on complete
     output_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings_sparse.json')
+    logger.info(f"Sparse embedding expecting output at: {output_file}")
 
     async def sse_with_count():
         async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
             if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
                 try:
+                    logger.info(f"Sparse complete event received, checking for output file: {output_file}")
                     if os.path.exists(output_file):
                         with open(output_file, 'r', encoding='utf-8') as f:
                             data = json.load(f)
                             count = len(data) if isinstance(data, list) else 0
+                        logger.info(f"Sparse embedding file found with {count} chunks")
                         yield f'data: {{"type": "complete", "message": "Process completed successfully", "count": {count}}}\n\n'
                         continue
-                except Exception:
-                    pass
+                    else:
+                        logger.warning(f"Sparse output file not found: {output_file}")
+                except Exception as e:
+                    logger.error(f"Error reading sparse output file: {e}")
             yield event
 
     return StreamingResponse(sse_with_count(), media_type="text/event-stream")

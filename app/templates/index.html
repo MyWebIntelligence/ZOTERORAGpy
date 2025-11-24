@@ -373,7 +373,7 @@
     gap: var(--space-3);
   }
 
-  .branch-header input[type="checkbox"] {
+  .branch-header input[type="radio"] {
     width: 20px;
     height: 20px;
     accent-color: var(--color-brand-primary);
@@ -1007,14 +1007,14 @@
   <div class="decision-tree step-locked" id="decision-tree">
     <div class="decision-tree-header">
       <h2>3. Choose Your Destination</h2>
-      <p class="tree-subtitle">You can select one or both options</p>
+      <p class="tree-subtitle">Select one option</p>
     </div>
 
     <div class="branches-container">
       <!-- RAG Branch -->
       <div class="branch branch-rag selected" id="rag-branch">
         <div class="branch-header">
-          <input type="checkbox" id="rag-checkbox" checked>
+          <input type="radio" name="destination-choice" id="rag-checkbox" checked>
           <label for="rag-checkbox">
             <span class="branch-icon">🔍</span>
             <span class="branch-title">Feed a RAG</span>
@@ -1031,7 +1031,7 @@
 
             <form id="initialChunkUploadForm" enctype="multipart/form-data" class="stage-upload-form">
               <input type="file" id="initialChunkUploadInput" name="file" accept=".csv">
-              <button type="submit" class="btn btn-secondary btn-sm">Upload output.csv</button>
+              <button type="submit" class="btn btn-secondary btn-sm">Upload CSV</button>
             </form>
 
             <div class="model-input-group">
@@ -1077,7 +1077,7 @@
             <h3>3.2 Dense Embedding Generation</h3>
             <form id="denseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
               <input type="file" id="denseUploadInput" name="file" accept=".json">
-              <button type="submit" class="btn btn-secondary btn-sm">Upload output_chunks.json</button>
+              <button type="submit" class="btn btn-secondary btn-sm">Upload Chunks</button>
             </form>
             <button id="runDenseEmbeddingBtn" class="btn btn-primary">
               <i class="bi bi-grid-3x3-gap"></i> Generate Dense Embeddings
@@ -1105,7 +1105,7 @@
             <h3>3.3 Sparse Embedding Generation</h3>
             <form id="sparseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
               <input type="file" id="sparseUploadInput" name="file" accept=".json">
-              <button type="submit" class="btn btn-secondary btn-sm">Upload output_chunks_with_embeddings.json</button>
+              <button type="submit" class="btn btn-secondary btn-sm">Upload Dense</button>
             </form>
             <button id="runSparseEmbeddingBtn" class="btn btn-primary">
               <i class="bi bi-grid"></i> Generate Sparse Embeddings
@@ -1184,7 +1184,7 @@
       <!-- Zotero Branch -->
       <div class="branch branch-zotero" id="zotero-branch">
         <div class="branch-header">
-          <input type="checkbox" id="zotero-checkbox">
+          <input type="radio" name="destination-choice" id="zotero-checkbox">
           <label for="zotero-checkbox">
             <span class="branch-icon">📝</span>
             <span class="branch-title">Zotero Notes</span>
@@ -1371,12 +1371,19 @@
     }
   }
 
+  // Radio button behavior - mutually exclusive branches
   document.getElementById('rag-checkbox').addEventListener('change', (e) => {
-    toggleBranch('rag', e.target.checked);
+    if (e.target.checked) {
+      toggleBranch('rag', true);
+      toggleBranch('zotero', false);
+    }
   });
 
   document.getElementById('zotero-checkbox').addEventListener('change', (e) => {
-    toggleBranch('zotero', e.target.checked);
+    if (e.target.checked) {
+      toggleBranch('zotero', true);
+      toggleBranch('rag', false);
+    }
   });
 
   // ========================================
@@ -1896,6 +1903,9 @@
     progressCount.textContent = '0/0';
     progressStatus.textContent = 'Generating dense embeddings...';
 
+    // Track chunk total for final count display (fallback if data.count missing)
+    let lastChunkTotal = 0;
+
     const handleProgress = createMultilevelProgressHandler({
       primaryBar: progressBar,
       primaryCount: progressCount,
@@ -1927,15 +1937,20 @@
               const data = JSON.parse(line.substring(6));
               if (data.type === 'init' || data.type === 'progress') {
                 handleProgress(data);
+                // Track total for final display
+                if (data.total) {
+                  lastChunkTotal = data.total;
+                }
               } else if (data.type === 'complete') {
                 progressBar.style.width = '100%';
-                // Update count to show final value
-                if (data.count) {
-                  progressCount.textContent = `${data.count}/${data.count}`;
+                // Update count: prefer data.count, fallback to tracked total
+                const finalCount = data.count || lastChunkTotal;
+                if (finalCount > 0) {
+                  progressCount.textContent = `${finalCount}/${finalCount}`;
                 }
                 progressStatus.textContent = 'Complete!';
                 const fileName = 'output_chunks_with_embeddings.json';
-                resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${data.count || 'N/A'}</strong></p>`;
+                resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${finalCount || 'N/A'}</strong></p>`;
                 completeStep('denseEmbed', fileName);
                 markSectionCompleted('dense-embedding-section');
                 unlockSection('sparse-embedding-section');
@@ -1984,6 +1999,9 @@
     progressCount.textContent = '0/0';
     progressStatus.textContent = 'Generating sparse embeddings...';
 
+    // Track chunk total for final count display (fallback if data.count missing)
+    let lastChunkTotal = 0;
+
     const handleProgress = createMultilevelProgressHandler({
       primaryBar: progressBar,
       primaryCount: progressCount,
@@ -2015,15 +2033,20 @@
               const data = JSON.parse(line.substring(6));
               if (data.type === 'init' || data.type === 'progress') {
                 handleProgress(data);
+                // Track total for final display
+                if (data.total) {
+                  lastChunkTotal = data.total;
+                }
               } else if (data.type === 'complete') {
                 progressBar.style.width = '100%';
-                // Update count to show final value
-                if (data.count) {
-                  progressCount.textContent = `${data.count}/${data.count}`;
+                // Update count: prefer data.count, fallback to tracked total
+                const finalCount = data.count || lastChunkTotal;
+                if (finalCount > 0) {
+                  progressCount.textContent = `${finalCount}/${finalCount}`;
                 }
                 progressStatus.textContent = 'Complete!';
                 const fileName = 'output_chunks_with_embeddings_sparse.json';
-                resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${data.count || 'N/A'}</strong></p>`;
+                resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${finalCount || 'N/A'}</strong></p>`;
                 completeStep('sparseEmbed', fileName);
                 markSectionCompleted('sparse-embedding-section');
                 unlockSection('db-section');
