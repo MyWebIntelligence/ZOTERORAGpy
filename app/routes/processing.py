@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-@app.post("/stop_all_scripts")
+
 @router.post("/stop_all_scripts")
 async def stop_all_scripts():
     command = 'pkill -SIGTERM -f "python3 scripts/rad_"'
