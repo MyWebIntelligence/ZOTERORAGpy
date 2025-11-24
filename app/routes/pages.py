@@ -78,6 +78,45 @@ async def forgot_password_page(request: Request):
     return templates.TemplateResponse("auth/forgot_password.html", context)
 
 
+@router.get("/auth/reset-password/{token}", response_class=HTMLResponse)
+async def reset_password_page(
+    request: Request,
+    token: str,
+    db: Session = Depends(get_db)
+):
+    """Reset password page - displays form to enter new password"""
+    from app.models.user import User
+    from datetime import datetime
+
+    # Verify token exists and is valid
+    user = db.query(User).filter(User.reset_token == token).first()
+
+    if not user:
+        context = get_template_context(
+            request,
+            error="Lien de réinitialisation invalide ou expiré.",
+            token_valid=False
+        )
+        return templates.TemplateResponse("auth/reset_password.html", context)
+
+    # Check expiration
+    if user.reset_token_expires and user.reset_token_expires < datetime.utcnow():
+        context = get_template_context(
+            request,
+            error="Ce lien de réinitialisation a expiré. Veuillez en demander un nouveau.",
+            token_valid=False
+        )
+        return templates.TemplateResponse("auth/reset_password.html", context)
+
+    context = get_template_context(
+        request,
+        token=token,
+        token_valid=True,
+        user_email=user.email
+    )
+    return templates.TemplateResponse("auth/reset_password.html", context)
+
+
 # --- Protected pages ---
 
 @router.get("/profile", response_class=HTMLResponse)
