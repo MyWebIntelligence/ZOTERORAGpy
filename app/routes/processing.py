@@ -213,3 +213,106 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
     except Exception as e:
         logger.error(f"General error in processing/previewing CSV {out_csv}: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "CSV read or preview failed.", "details": str(e)})
+
+
+@router.post("/initial_text_chunking")
+async def initial_text_chunking(path: str = Form(...), model: str = Form(None)):
+    """
+    Generate initial text chunks from the CSV file using rad_chunk.py.
+    
+    Args:
+        path: Relative path to the session directory (contains output.csv)
+        model: Optional LLM model for text recoding (e.g., "gpt-4o-mini" or "openai/gemini-2.5-flash")
+    """
+    absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
+    logger.info(f"Initial chunking requested for path: '{path}', resolved to: '{absolute_processing_path}'")
+    
+    if not os.path.isdir(absolute_processing_path):
+        logger.error(f"Processing directory does not exist: {absolute_processing_path}")
+        return JSONResponse(status_code=400, content={"error": f"Processing directory not found: {path}"})
+    
+    # Check if output.csv exists
+    input_csv = os.path.join(absolute_processing_path, 'output.csv')
+    if not os.path.exists(input_csv):
+        logger.error(f"Input CSV not found: {input_csv}")
+        return JSONResponse(status_code=400, content={
+            "error": "output.csv not found. Please complete the extraction step first."
+        })
+    
+    # Output file will be output_chunks.json
+    output_chunks_file = os.path.join(absolute_processing_path, 'output_chunks.json')
+    
+    # Build command to run rad_chunk.py
+    script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
+    if not os.path.exists(script_path):
+        logger.error(f"Chunking script not found: {script_path}")
+        return JSONResponse(status_code=500, content={
+            "error": "Chunking script not found on server."
+        })
+    
+    # Set default model if not provided
+    if not model:
+        model = "gpt-4o-mini"
+    
+    logger.info(f"Running chunking script: {script_path}")
+    logger.info(f"  Input CSV: {input_csv}")
+    logger.info(f"  Output dir: {absolute_processing_path}")
+    logger.info(f"  Model: {model}")
+    
+    try:
+        # Run rad_chunk.py with phase=initial
+        result = subprocess.run([
+            "python3", script_path,
+            "--input", input_csv,
+            "--output", absolute_processing_path,
+            "--phase", "initial",
+            "--model", model
+        ], check=False, capture_output=True, text=True, timeout=1800)  # 30 min timeout
+        
+        if result.returncode != 0:
+            logger.error(f"Chunking script failed with code {result.returncode}")
+            logger.error(f"stderr: {result.stderr}")
+            return JSONResponse(status_code=500, content={
+                "error": f"Chunking script failed with code {result.returncode}",
+                "details": result.stderr,
+                "stdout": result.stdout[:1000]
+            })
+        
+        # Check if output file was created
+        if not os.path.exists(output_chunks_file):
+            logger.error(f"Output chunks file not created: {output_chunks_file}")
+            return JSONResponse(status_code=500, content={
+                "error": "Chunking completed but output file not found.",
+                "details": result.stdout[:1000]
+            })
+        
+        # Count chunks
+        try:
+            with open(output_chunks_file, 'r', encoding='utf-8') as f:
+                chunks_data = json.load(f)
+                chunk_count = len(chunks_data) if isinstance(chunks_data, list) else 0
+        except Exception as e:
+            logger.warning(f"Could not count chunks: {e}")
+            chunk_count = 0
+        
+        logger.info(f"Chunking completed successfully. {chunk_count} chunks generated.")
+        
+        return JSONResponse({
+            "status": "success",
+            "file": output_chunks_file,
+            "count": chunk_count,
+            "message": f"Generated {chunk_count} chunks using model {model}"
+        })
+        
+    except subprocess.TimeoutExpired:
+        logger.error("Chunking script timed out after 30 minutes")
+        return JSONResponse(status_code=500, content={
+            "error": "Chunking process timed out (30 min limit).",
+            "details": "The process took too long. Try processing fewer documents."
+        })
+    except Exception as e:
+        logger.error(f"Unexpected error during chunking: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={
+            "error": "An unexpected error occurred during chunking.",
+            "details": str(e)
+        })
