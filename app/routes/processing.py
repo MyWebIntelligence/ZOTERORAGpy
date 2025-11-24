@@ -574,15 +574,15 @@ async def upload_db(
 
 @router.post("/generate_zotero_notes_sse")
 async def generate_zotero_notes_sse(
-    path: str = Form(...),
-    extended_analysis: str = Form("true"),
+    session: str = Form(...),
+    extended_analysis: str = Form("false"),
     model: str = Form(None)
 ):
     """
     Generate Zotero notes with SSE progress updates.
     """
-    absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
-    logger.info(f"Zotero notes generation for path: '{path}'")
+    absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, session))
+    logger.info(f"Zotero notes generation for session: '{session}'")
     
     async def event_generator():
         try:
