@@ -1,7 +1,7 @@
 # Architecture actuelle du pipeline RAGpy
 
-**Date de création** : 2025-10-21  
-**Dernière mise à jour** : 2025-11-24 (Refactored app/main.py, Pinned Dependencies)  
+**Date de création** : 2025-10-21
+**Dernière mise à jour** : 2025-11-24 (Docker, dépendances épinglées, .gitignore nettoyé)
 **Objectif** : Documenter l'architecture existante complète avec analyse détaillée
 
 ---
@@ -12,27 +12,35 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                 PIPELINE COMPLET RAGpy (2025-11-22)             │
+│                 PIPELINE COMPLET RAGpy (2025-11-24)             │
 └─────────────────────────────────────────────────────────────────┘
+
+DÉPLOIEMENT:
+├── Dockerfile           # Image Python 3.11-slim + spaCy FR
+├── docker-compose.yml   # Orchestration + volumes persistants
+└── .dockerignore        # Exclusions build optimisé
 
 ARCHITECTURE MODULAIRE:
 ├── app/                  # Interface web FastAPI (point d'entrée)
-│   ├── main.py          # Orchestrateur web (1,543 lignes)
+│   ├── main.py          # Orchestrateur web
+│   ├── routes/          # Routes API modulaires
 │   ├── utils/           # Intégration Zotero
 │   ├── static/          # Assets CSS, favicon
 │   └── templates/       # Templates HTML (Jinja2)
 ├── scripts/             # Pipeline de traitement
 │   ├── rad_dataframe.py # PDF/Zotero → CSV (OCR)
 │   ├── rad_chunk.py     # Chunking + embeddings
-│   └── rad_vectordb.py  # Insertion bases vectorielles
+│   ├── rad_vectordb.py  # Insertion bases vectorielles
+│   └── requirements.txt # Dépendances épinglées (2025-11-24)
 ├── core/               # Modèles de données unifiés
 │   └── document.py     # Classe Document abstraite
 ├── ingestion/          # Modules d'ingestion
 │   └── csv_ingestion.py # Ingestion CSV directe
 ├── config/             # Configuration YAML
 ├── tests/              # Suite de tests
-├── uploads/            # Sessions utilisateur
-└── logs/              # Logs application
+├── data/               # SQLite (ragpy.db) - Volume Docker
+├── uploads/            # Sessions utilisateur - Volume Docker
+└── logs/               # Logs application - Volume Docker
 
 FLUX DE DONNÉES:
 Input Sources → Data Extraction → Document Processing → Vector Storage
@@ -44,7 +52,7 @@ Input Sources → Data Extraction → Document Processing → Vector Storage
 
 ---
 
-## Analyse de l'architecture (2025-11-22)
+## Analyse de l'architecture (2025-11-24)
 
 ### 🏗️ **Qualité du code et structure**
 
@@ -54,16 +62,17 @@ Input Sources → Data Extraction → Document Processing → Vector Storage
 - **Logging structuré** avec rotation et niveaux appropriés
 - **Gestion d'erreurs sophistiquée** avec mécanismes de retry
 - **Support multi-providers** pour optimisation des coûts
+- **Docker ready** ✅ : Déploiement simplifié avec `docker compose up -d`
+- **Dépendances épinglées** ✅ : Versions fixes dans `requirements.txt` (2025-11-24)
 
-#### **Points d'amélioration critiques**
-- **app/main.py trop volumineux** (1,543 lignes) → refactorisation nécessaire
+#### **Points d'amélioration restants**
 - **Validation d'entrée insuffisante** sur plusieurs endpoints
-- **Dépendances non épinglées** → risques de sécurité
 - **Conventions de nommage mixtes** (français/anglais)
 
-#### **Dette technique majeure**
-- **Dépendances non épinglées** : Risque de stabilité et de sécurité (voir `requirements.txt`).
-- **Monolithe `app/main.py`** : Complexité de maintenance élevée.
+#### **Dette technique résolue** ✅
+- ~~**Dépendances non épinglées**~~ : Résolu (2025-11-24)
+- ~~**Pas de containerisation**~~ : Docker disponible (2025-11-24)
+- ~~**.gitignore incomplet**~~ : Nettoyé, .venv retiré du tracking (2025-11-24)
 
 ### 🚀 **API et endpoints**
 
@@ -371,45 +380,57 @@ def test_large_document_processing():
 
 ## Dépendances et écosystème
 
-### 📦 **Dépendances critiques**
+### 📦 **Dépendances critiques (épinglées 2025-11-24)**
 
 ```python
 # Core pipeline
-langchain-text-splitters==0.3.x  # Chunking intelligent
-spacy==3.7.x                     # NLP français
-openai>=1.50.x                   # Embeddings + completion
-pandas>=2.0.x                    # Manipulation données
+pandas>=2.2.2                    # Manipulation données
+pymupdf==1.24.2                  # PDF extraction
+openai==1.50.2                   # Embeddings + completion
+langchain-text-splitters==0.3.0  # Chunking intelligent
+spacy==3.7.5                     # NLP français
+tiktoken==0.7.0                  # Tokenisation OpenAI
+mistralai==1.1.0                 # OCR premium
 
 # Vector databases
-pinecone>=3.x                    # SDK v3+ Pinecone class
-weaviate-client>=4.x             # Multi-tenancy support
-qdrant-client>=1.x               # Vector search
+pinecone-client==5.0.1           # Hybrid search
+weaviate-client==4.8.1           # Multi-tenancy
+qdrant-client==1.11.1            # Vector similarity
 
 # Web interface
-fastapi>=0.100.x                 # API moderne
-uvicorn>=0.24.x                  # ASGI server performant
-python-multipart>=0.0.6          # Upload fichiers
+fastapi==0.115.0                 # API moderne
+uvicorn==0.30.6                  # ASGI server
+jinja2==3.1.4                    # Templates
+python-multipart==0.0.9          # Upload fichiers
 
-# OCR et processing
-mistralai>=1.x                   # OCR premium
-pymupdf>=1.23.x                  # Fallback PDF
-requests>=2.31.x                 # HTTP client
+# Authentication
+sqlalchemy==2.0.35               # ORM
+python-jose[cryptography]==3.3.0 # JWT
+bcrypt==4.0.1                    # Hashing
+
+# Dev & test
+pytest==8.3.3                    # Tests
+httpx<=0.27.2                    # HTTP client async
+chardet==5.2.0                   # Détection encoding
 ```
 
 ### 🔒 **Considérations de sécurité**
 
-**Issues actuelles**:
-- Dépendances sans version épinglée → vulnérabilités potentielles
-- CORS permissif en développement
-- Pas d'authentification sur endpoints sensibles
-- Validation d'entrée limitée
+**Résolu** ✅ :
 
-**Recommandations**:
-1. **Épingler les versions** exactes dans requirements.txt
-2. **Scan vulnérabilités** avec `pip-audit` ou `safety`
-3. **Authentification JWT** pour endpoints critiques
-4. **Validation stricte** avec Pydantic models
-5. **Rate limiting** sur endpoints API
+- ~~Dépendances sans version épinglée~~ → Versions fixes (2025-11-24)
+- **Authentification JWT** ✅ implémentée avec vérification email (Resend)
+
+**Restant** :
+
+- CORS permissif en développement → Restreindre en production
+- Validation d'entrée limitée → Implémenter Pydantic models
+
+**Recommandations** :
+
+1. **Scan vulnérabilités** avec `pip-audit` ou `safety`
+2. **Rate limiting** sur endpoints API
+3. **Secrets management** : Revoir `.env` et `app/core/credentials.py`
 
 ---
 
@@ -433,14 +454,16 @@ requests>=2.31.x                 # HTTP client
 
 ### 🚀 **Fonctionnalités futures**
 
-**Améliorations techniques**:
-- **Containerisation Docker** pour déploiement simplifié
+**Améliorations techniques** :
+
+- ~~**Containerisation Docker**~~ ✅ Implémenté (2025-11-24)
 - **Processing distribué** pour gros corpus (Celery/RQ)
 - **Cache intelligent** pour embeddings (Redis)
 - **Monitoring observabilité** (métriques, traces)
 
-**Fonctionnalités utilisateur**:
-- **Authentification multi-utilisateurs**
+**Fonctionnalités utilisateur** :
+
+- ~~**Authentification multi-utilisateurs**~~ ✅ Implémenté (JWT + Resend)
 - **Gestion de projets** avec historique
 - **API REST complète** pour intégrations externes
 - **Tableau de bord** analytics et métriques
@@ -456,19 +479,24 @@ requests>=2.31.x                 # HTTP client
 3. **Optimisation coûts avancée** (OpenRouter, skip recodage intelligent)
 4. **Interface utilisateur moderne** avec suivi temps réel (SSE)
 5. **Intégration recherche académique** sophistiquée (Zotero bidirectionnel)
+6. **Docker ready** ✅ : Déploiement simplifié (2025-11-24)
+7. **Dépendances épinglées** ✅ : Stabilité et sécurité (2025-11-24)
+8. **Authentification complète** ✅ : JWT + vérification email (Resend)
 
-### ⚠️ **Limitations critiques à résoudre**
+### ⚠️ **Limitations restantes**
 
-1.  **Insufficient Integration Tests**: While `tests/test_integration_api.py` has been added, comprehensive integration tests for all vector database interactions are still needed.
-2.  **Security**:
-    *   Authentication is basic (OAuth2 with Password flow).
-    *   Secrets management needs review (currently in `.env` and `app/core/credentials.py`).
+1. **Tests intégration insuffisants** : Tests vector databases à compléter
+2. **Secrets management** : Revoir `.env` et `app/core/credentials.py`
+3. **CORS permissif** : Restreindre en production
 
-### 🎯 **Action immédiate recommandée**
+### 🎯 **Actions prioritaires**
 
-**Priorité absolue**: Refactoriser `app/main.py` pour améliorer la maintenabilité et épingler les dépendances pour la sécurité.
+| Priorité | Action | Effort | Status |
+|----------|--------|--------|--------|
+| ~~1~~ | ~~Épingler dépendances~~ | ~~1h~~ | ✅ Fait |
+| ~~2~~ | ~~Docker/docker-compose~~ | ~~2h~~ | ✅ Fait |
+| ~~3~~ | ~~Nettoyer .gitignore~~ | ~~30min~~ | ✅ Fait |
+| 4 | Tests intégration complets | 2-3j | En attente |
+| 5 | Audit sécurité secrets | 1j | En attente |
 
-**Effort estimé**: 3-4 jours de développement
-**Impact**: Stabilité et sécurité accrues pour la production
-
-Le système RAGpy démontre déjà des **fondations architecturales excellentes** et une **vision produit claire**. Avec la résolution des limitations identifiées, il peut devenir une solution RAG de référence pour la recherche académique et au-delà.
+Le système RAGpy est maintenant **production-ready** avec Docker, dépendances épinglées et authentification complète. Les prochaines améliorations concernent principalement les tests et l'observabilité.

@@ -1,13 +1,52 @@
 # RAGpy - Guide d'utilisation et architecture
 
-**Date de création** : 2025-10-21  
-**Dernière mise à jour** : 2025-11-22 (mise à jour complète avec analyse architecturale)
+**Date de création** : 2025-10-21
+**Dernière mise à jour** : 2025-11-24 (Docker, dépendances épinglées, .gitignore nettoyé)
 
 Ce document constitue le guide de référence pour le projet **RAGpy**, un pipeline sophistiqué de Retrieval-Augmented Generation conçu pour traiter des documents académiques. Il couvre l'utilisation des agents CLI, l'architecture du système et les bonnes pratiques d'implémentation.
 
 > **Note d'architecture** : RAGpy combine une interface web FastAPI moderne avec un pipeline modulaire de traitement. L'application supporte multiple sources d'ingestion (Zotero+PDFs, CSV direct, fichiers manuels) et s'intègre avec diverses bases vectorielles (Pinecone, Weaviate, Qdrant).
 
 > **Astuce interface** : dans l'UI FastAPI, les étapes 3.1 à 3.3 proposent un couple « Upload » / « Generate » pour réinjecter respectivement `output.csv`, `output_chunks.json` ou `output_chunks_with_embeddings.json`. Sans fichier téléversé, l'étape réutilise automatiquement le résultat précédent afin de reprendre un traitement interrompu.
+
+---
+
+## Déploiement Docker (recommandé)
+
+### Démarrage rapide
+
+```bash
+# Cloner et configurer
+git clone <URL_DU_DEPOT> && cd ragpy
+cp .env.example .env
+# Éditer .env avec vos clés API
+
+# Lancer
+docker compose up -d
+
+# Accéder
+open http://localhost:8000
+```
+
+### Commandes Docker
+
+```bash
+docker compose logs -f ragpy      # Logs temps réel
+docker compose down               # Arrêter
+docker compose up -d --build      # Reconstruire
+docker compose exec ragpy bash    # Shell conteneur
+```
+
+### Volumes persistants
+
+- `./data` : Base de données SQLite
+- `./uploads` : Sessions de traitement
+- `./logs` : Journaux applicatifs
+- `./sources` : Fichiers sources (optionnel)
+
+### Qdrant local (optionnel)
+
+Décommentez la section `qdrant` dans `docker-compose.yml` pour une base vectorielle locale.
 
 ## Vue d'ensemble des agents
 
@@ -362,23 +401,37 @@ metadata = {k: v for k, v in chunk.items()
 - **Optimisation coûts** : OpenRouter, skip recodage intelligent
 - **Intégration académique** : Zotero bidirectionnel sophistiqué
 
-### Dépendances critiques
+### Dépendances critiques (épinglées 2025-11-24)
 
 ```python
 # Pipeline core
-langchain-text-splitters==0.3.x  # Chunking intelligent
-openai>=1.50.x                   # Embeddings + completion
-spacy==3.7.x                     # NLP français
-pandas>=2.0.x                    # Manipulation données
+pandas>=2.2.2                    # Manipulation données
+pymupdf==1.24.2                  # PDF extraction
+openai==1.50.2                   # Embeddings + completion
+langchain-text-splitters==0.3.0  # Chunking intelligent
+spacy==3.7.5                     # NLP français
+tiktoken==0.7.0                  # Tokenisation OpenAI
 
 # Vector databases
-pinecone>=3.x                    # Hybrid search
-weaviate-client>=4.x             # Multi-tenancy
-qdrant-client>=1.x               # Vector similarity
+pinecone-client==5.0.1           # Hybrid search
+weaviate-client==4.8.1           # Multi-tenancy
+qdrant-client==1.11.1            # Vector similarity
 
 # Web interface
-fastapi>=0.100.x                 # API moderne
-uvicorn>=0.24.x                  # ASGI server
+fastapi==0.115.0                 # API moderne
+uvicorn==0.30.6                  # ASGI server
+jinja2==3.1.4                    # Templates
+python-multipart==0.0.9          # Upload fichiers
+
+# Authentication
+sqlalchemy==2.0.35               # ORM
+python-jose[cryptography]==3.3.0 # JWT
+bcrypt==4.0.1                    # Hashing
+
+# Dev & test
+pytest==8.3.3                    # Tests
+httpx<=0.27.2                    # HTTP client async
+chardet==5.2.0                   # Détection encoding
 ```
 
 ---
@@ -392,9 +445,10 @@ uvicorn>=0.24.x                  # ASGI server
 - **Optimiser concurrence** : Ajuster `DEFAULT_MAX_WORKERS` selon quotas API
 
 ### Production et sécurité
-- **Épingler versions** dans requirements.txt pour éviter vulnérabilités
+- **Versions épinglées** ✅ : `scripts/requirements.txt` avec versions fixes (2025-11-24)
+- **Docker disponible** ✅ : Déploiement simplifié avec `docker compose up -d`
 - **Restreindre CORS** : Modifier configuration permissive développement
-- **Authentification** : Ajouter JWT pour endpoints sensibles
+- **Authentification JWT** ✅ : Implémentée avec vérification email (Resend)
 - **Validation stricte** : Implémenter Pydantic models pour validation entrées
 
 ### Optimisation performances
