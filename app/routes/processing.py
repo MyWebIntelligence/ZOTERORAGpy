@@ -698,10 +698,10 @@ async def generate_zotero_notes_sse(
     4. Streams real-time progress via SSE
     """
     from dotenv import load_dotenv
-    from app.utils.llm_note_generator import build_note_html, sentinel_in_html
+    from app.utils.llm_note_generator import build_note_html, build_abstract_text, sentinel_in_html
     from app.utils.zotero_client import (
         verify_api_key, create_child_note, check_note_exists,
-        ZoteroAPIError
+        update_item_abstract, ZoteroAPIError
     )
 
     # Reload .env to pick up any credential changes
@@ -800,56 +800,104 @@ async def generate_zotero_notes_sse(
                         "language": row.get('language', 'fr'),
                     }
 
-                    # Generate note with LLM
-                    # Run in executor to avoid blocking async loop
-                    # Use default args to capture current values (avoid closure issues)
+                    # Branch based on analysis mode
                     loop = asyncio.get_event_loop()
-                    sentinel, note_html = await loop.run_in_executor(
-                        None,
-                        lambda m=metadata, t=texteocr, mo=model, ext=use_extended: build_note_html(
-                            metadata=m,
-                            text_content=t,
-                            model=mo,
-                            use_llm=True,
-                            extended_analysis=ext
-                        )
-                    )
-
-                    # Store generated note
-                    generated_notes.append({
-                        "item_key": item_key,
-                        "title": title,
-                        "sentinel": sentinel,
-                        "note_html": note_html
-                    })
-
-                    # If Zotero API mode and we have itemKey, try to create note
                     status = "created"
-                    if zotero_mode == "api" and item_key:
-                        try:
-                            # Check if note already exists
-                            # Use default args to capture current values
-                            note_exists = await loop.run_in_executor(
-                                None,
-                                lambda lt=library_type, lid=library_id, ik=item_key, s=sentinel, ak=zotero_api_key: check_note_exists(
-                                    lt, lid, ik, s, ak
-                                )
-                            )
 
-                            if note_exists:
-                                exists += 1
-                                status = "exists"
-                            else:
-                                # Create the note
-                                # Use default args to capture current values
+                    if use_extended:
+                        # EXTENDED MODE: Generate HTML note and create child note
+                        sentinel, note_html = await loop.run_in_executor(
+                            None,
+                            lambda m=metadata, t=texteocr, mo=model: build_note_html(
+                                metadata=m,
+                                text_content=t,
+                                model=mo,
+                                use_llm=True,
+                                extended_analysis=True
+                            )
+                        )
+
+                        # Store generated note
+                        generated_notes.append({
+                            "item_key": item_key,
+                            "title": title,
+                            "sentinel": sentinel,
+                            "note_html": note_html,
+                            "mode": "extended"
+                        })
+
+                        # If Zotero API mode, create child note
+                        if zotero_mode == "api" and item_key:
+                            try:
+                                # Check if note already exists
+                                note_exists = await loop.run_in_executor(
+                                    None,
+                                    lambda lt=library_type, lid=library_id, ik=item_key, s=sentinel, ak=zotero_api_key: check_note_exists(
+                                        lt, lid, ik, s, ak
+                                    )
+                                )
+
+                                if note_exists:
+                                    exists += 1
+                                    status = "exists"
+                                else:
+                                    # Create the child note
+                                    result = await loop.run_in_executor(
+                                        None,
+                                        lambda lt=library_type, lid=library_id, ik=item_key, nh=note_html, ak=zotero_api_key: create_child_note(
+                                            library_type=lt,
+                                            library_id=lid,
+                                            item_key=ik,
+                                            note_html=nh,
+                                            tags=["ragpy-generated"],
+                                            api_key=ak
+                                        )
+                                    )
+
+                                    if result.get("success"):
+                                        created += 1
+                                        status = "created"
+                                    else:
+                                        errors += 1
+                                        status = "error"
+                                        logger.warning(f"Failed to create child note for {item_key}: {result.get('message')}")
+                            except ZoteroAPIError as e:
+                                errors += 1
+                                status = "error"
+                                logger.error(f"Zotero API error for {item_key}: {e}")
+                        else:
+                            # Local mode - just count as created
+                            created += 1
+
+                    else:
+                        # SHORT MODE: Generate plain text summary and update abstract
+                        summary_text = await loop.run_in_executor(
+                            None,
+                            lambda m=metadata, t=texteocr, mo=model: build_abstract_text(
+                                metadata=m,
+                                text_content=t,
+                                model=mo
+                            )
+                        )
+
+                        # Store generated summary
+                        generated_notes.append({
+                            "item_key": item_key,
+                            "title": title,
+                            "summary": summary_text,
+                            "mode": "short"
+                        })
+
+                        # If Zotero API mode, update abstract field
+                        if zotero_mode == "api" and item_key:
+                            try:
                                 result = await loop.run_in_executor(
                                     None,
-                                    lambda lt=library_type, lid=library_id, ik=item_key, nh=note_html, ak=zotero_api_key: create_child_note(
+                                    lambda lt=library_type, lid=library_id, ik=item_key, summ=summary_text, ak=zotero_api_key: update_item_abstract(
                                         library_type=lt,
                                         library_id=lid,
                                         item_key=ik,
-                                        note_html=nh,
-                                        tags=["ragpy-generated"],
+                                        new_abstract=summ,
                                         api_key=ak
                                     )
                                 )
@@ -857,17 +905,18 @@ async def generate_zotero_notes_sse(
                                 if result.get("success"):
                                     created += 1
                                     status = "created"
+                                    logger.info(f"Updated abstract for {item_key} (length: {result.get('new_abstract_length', 'unknown')})")
                                 else:
                                     errors += 1
                                     status = "error"
-                                    logger.warning(f"Failed to create Zotero note for {item_key}: {result.get('message')}")
-                        except ZoteroAPIError as e:
-                            errors += 1
-                            status = "error"
-                            logger.error(f"Zotero API error for {item_key}: {e}")
-                    else:
-                        # Local mode - just count as created
-                        created += 1
+                                    logger.warning(f"Failed to update abstract for {item_key}: {result.get('message')}")
+                            except ZoteroAPIError as e:
+                                errors += 1
+                                status = "error"
+                                logger.error(f"Zotero API error updating abstract for {item_key}: {e}")
+                        else:
+                            # Local mode - just count as created
+                            created += 1
 
                     yield f"data: {{\"type\": \"progress\", \"current\": {doc_num}, \"total\": {total_items}, \"item\": \"{safe_title}\", \"status\": \"{status}\", \"message\": \"Processed {doc_num}/{total_items}: {safe_title}\"}}\n\n"
 
