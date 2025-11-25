@@ -44,6 +44,23 @@ import argparse
 import requests
 from dotenv import load_dotenv
 
+# Load environment variables early
+load_dotenv()
+
+# ----------------------------------------------------------------------
+# Environment variable helper with validation
+# ----------------------------------------------------------------------
+def get_env_int(key: str, default: int, min_val: int = 1) -> int:
+    """Get integer from environment with validation and fallback."""
+    try:
+        value = int(os.getenv(key, default))
+        return max(min_val, value)
+    except (ValueError, TypeError):
+        return default
+
+# Concurrency configuration (pour Phase 2: parallélisation OCR)
+PDF_EXTRACTION_WORKERS = get_env_int('PDF_EXTRACTION_WORKERS', 1)
+
 # --- Path and Logging Setup ---
 SCRIPT_FILE_PATH = os.path.abspath(__file__)
 SCRIPT_DIR = os.path.dirname(SCRIPT_FILE_PATH)  # Should be /.../__RAG/ragpy/scripts

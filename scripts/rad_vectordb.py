@@ -21,10 +21,20 @@ try:
 except ImportError as exc:  # pragma: no cover - only triggered when dependency missing
     Pinecone = None
     _pinecone_import_error = exc
-# Configuration des tailles de lots et du parallélisme
-PINECONE_BATCH_SIZE = 100  # Nombre de vecteurs à upserter en une seule requête Pinecone
-# MAX_WORKERS = os.cpu_count() - 1 # Défini mais non utilisé dans ce script pour le parallélisme d'upsert direct.
-                                 # Pourrait être utilisé si les étapes de préparation ou d'autres opérations étaient parallélisées.
+# ----------------------------------------------------------------------
+# Environment variable helper with validation
+# ----------------------------------------------------------------------
+def get_env_int(key: str, default: int, min_val: int = 1) -> int:
+    """Get integer from environment with validation and fallback."""
+    try:
+        value = int(os.getenv(key, default))
+        return max(min_val, value)
+    except (ValueError, TypeError):
+        print(f"Warning: Invalid {key}, using default {default}")
+        return default
+
+# Configuration des tailles de lots (configurable via .env)
+PINECONE_BATCH_SIZE = get_env_int('PINECONE_BATCH_SIZE', 100)
 
 def upsert_batch_to_pinecone(index, vectors_batch, namespace=None):
     """Upserts a batch of vectors to a Pinecone index.
@@ -381,8 +391,8 @@ except ImportError as exc:  # pragma: no cover - optional dependency
     _qdrant_import_error = exc
 
 # Configuration des tailles de lots
-WEAVIATE_BATCH_SIZE = 100
-QDRANT_BATCH_SIZE = 100 # Taille de lot pour Qdrant
+WEAVIATE_BATCH_SIZE = get_env_int('WEAVIATE_BATCH_SIZE', 100)
+QDRANT_BATCH_SIZE = get_env_int('QDRANT_BATCH_SIZE', 100)  # Taille de lot pour Qdrant
 
 def generate_uuid(identifier):
     """Generates a stable UUID version 5 from a given string identifier.
