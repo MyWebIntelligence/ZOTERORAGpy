@@ -423,6 +423,7 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="{{ url_for('static', path='js/pagination.js') }}"></script>
 <script>
 const projectId = {{ project.id }};
 
@@ -595,17 +596,25 @@ function escapeHtml(text) {
 }
 
 // Sessions Management
-async function loadSessions() {
+let currentSessionPage = 1;
+const sessionsPerPage = 10;
+
+async function loadSessions(page = 1) {
+    currentSessionPage = page;
+
     try {
-        const response = await fetch(`/api/pipeline/projects/${projectId}/sessions`, {
-            headers: {
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+        const response = await fetch(
+            `/api/pipeline/projects/${projectId}/sessions?page=${page}&per_page=${sessionsPerPage}`,
+            {
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
             }
-        });
+        );
 
         if (response.ok) {
             const data = await response.json();
-            renderSessions(data.sessions);
+            renderSessions(data);
         } else {
             document.getElementById('sessionsList').innerHTML = `
                 <div class="empty-state-small">
@@ -616,6 +625,10 @@ async function loadSessions() {
     } catch (error) {
         console.error('Error loading sessions:', error);
     }
+}
+
+function changePage(page) {
+    loadSessions(page);
 }
 
 function getStatusBadge(status) {
@@ -635,8 +648,9 @@ function getStatusBadge(status) {
     return `<span class="badge ${info.class}">${info.label}</span>`;
 }
 
-function renderSessions(sessions) {
+function renderSessions(data) {
     const container = document.getElementById('sessionsList');
+    const { sessions, total, page, per_page, pages } = data;
 
     if (!sessions || sessions.length === 0) {
         container.innerHTML = `
@@ -696,6 +710,13 @@ function renderSessions(sessions) {
                 </tbody>
             </table>
         </div>
+        ${renderPagination({
+            currentPage: page,
+            totalPages: pages,
+            total: total,
+            perPage: per_page,
+            onPageChange: 'changePage'
+        })}
     `;
 }
 
