@@ -90,6 +90,7 @@
                     </tbody>
                 </table>
             </div>
+            <div id="adminPagination"></div>
         </div>
     </div>
 
@@ -412,6 +413,7 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="{{ url_for('static', path='js/pagination.js') }}"></script>
 <script>
 async function loadStats() {
     try {
@@ -437,12 +439,17 @@ async function loadStats() {
     }
 }
 
-async function loadSessions() {
+let currentAdminPage = 1;
+const adminSessionsPerPage = 10;
+
+async function loadSessions(page = 1) {
+    currentAdminPage = page;
     const tbody = document.getElementById('sessionsTable');
     const countBadge = document.getElementById('sessionsCount');
+    const paginationContainer = document.getElementById('adminPagination');
 
     try {
-        const response = await fetch('/api/admin/sessions?per_page=50', {
+        const response = await fetch(`/api/admin/sessions?page=${page}&per_page=${adminSessionsPerPage}`, {
             headers: {
                 'Authorization': 'Bearer ' + localStorage.getItem('access_token')
             }
@@ -465,6 +472,7 @@ async function loadSessions() {
                         </td>
                     </tr>
                 `;
+                if (paginationContainer) paginationContainer.innerHTML = '';
                 return;
             }
 
@@ -509,6 +517,17 @@ async function loadSessions() {
                     </td>
                 </tr>
             `).join('');
+
+            // Render pagination
+            if (paginationContainer) {
+                paginationContainer.innerHTML = renderPagination({
+                    currentPage: data.page,
+                    totalPages: data.pages,
+                    total: data.total,
+                    perPage: data.per_page,
+                    onPageChange: 'changeAdminPage'
+                });
+            }
         } else if (response.status === 401 || response.status === 403) {
             window.location.href = '/login';
         }
@@ -526,7 +545,12 @@ async function loadSessions() {
                 </td>
             </tr>
         `;
+        if (paginationContainer) paginationContainer.innerHTML = '';
     }
+}
+
+function changeAdminPage(page) {
+    loadSessions(page);
 }
 
 function getStatusLabel(status) {

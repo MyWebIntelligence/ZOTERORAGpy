@@ -8,7 +8,7 @@ import zipfile
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -50,6 +50,9 @@ class SessionResponse(BaseModel):
 class SessionListResponse(BaseModel):
     sessions: List[SessionResponse]
     total: int
+    page: int
+    per_page: int
+    pages: int
 
 
 # --- Helper functions ---
@@ -103,18 +106,36 @@ def verify_session_access(db: Session, session_folder: str, user: User) -> Pipel
 @router.get("/projects/{project_id}/sessions", response_model=SessionListResponse)
 async def list_project_sessions(
     project_id: int,
+    page: int = Query(1, ge=1, description="Page number (starts at 1)"),
+    per_page: int = Query(10, ge=1, le=100, description="Items per page (max 100)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Liste toutes les sessions de pipeline d'un projet.
+    Liste les sessions de pipeline d'un projet avec pagination.
+
+    Par défaut: 10 sessions par page, max 100 par page.
     """
     # Verify access
     project = verify_project_access(db, project_id, current_user)
 
-    sessions = db.query(PipelineSession).filter(
+    # Build base query
+    query = db.query(PipelineSession).filter(
         PipelineSession.project_id == project_id
-    ).order_by(PipelineSession.created_at.desc()).all()
+    )
+
+    # Get total count
+    total = query.count()
+
+    # Calculate pagination
+    offset = (page - 1) * per_page
+    pages = (total + per_page - 1) // per_page if total > 0 else 1
+
+    # Apply pagination
+    sessions = query.order_by(PipelineSession.created_at.desc())\
+                   .offset(offset)\
+                   .limit(per_page)\
+                   .all()
 
     return SessionListResponse(
         sessions=[SessionResponse(
@@ -131,7 +152,10 @@ async def list_project_sessions(
             created_at=s.created_at,
             updated_at=s.updated_at
         ) for s in sessions],
-        total=len(sessions)
+        total=total,
+        page=page,
+        per_page=per_page,
+        pages=pages
     )
 
 
