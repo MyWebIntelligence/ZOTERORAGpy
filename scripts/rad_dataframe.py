@@ -1,3 +1,24 @@
+"""
+rad_dataframe.py - Extraction de données Zotero et OCR de documents PDF.
+
+Ce module fournit des fonctionnalités pour :
+- Charger des exports JSON Zotero et extraire les métadonnées
+- Effectuer l'OCR sur les PDFs associés (Mistral, OpenAI, ou legacy)
+- Générer un DataFrame pandas avec texte extrait et métadonnées
+- Support du traitement parallèle avec ThreadPoolExecutor (Phase 2)
+
+Usage en ligne de commande:
+    python rad_dataframe.py --json export.json --dir ./pdfs --output result.csv
+
+Example:
+    >>> from scripts.rad_dataframe import load_zotero_to_dataframe_incremental
+    >>> df = load_zotero_to_dataframe_incremental(
+    ...     "zotero_export.json",
+    ...     "/path/to/pdfs",
+    ...     "output.csv"
+    ... )
+"""
+
 import os
 import json
 import re
@@ -5,24 +26,107 @@ import unicodedata
 import base64
 import time
 import csv
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import wraps
 import pandas as pd
-from typing import Optional, List, NamedTuple, Dict, Any
+from typing import Optional, List, NamedTuple, Dict, Any, Tuple, Set
 
 # Constants for retry logic
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2  # Exponential backoff: 2^attempt seconds
 
-def strip_accents(s):
+# Thread-safe lock for CSV writing and progress saving
+_CSV_LOCK = threading.Lock()
+_PROGRESS_LOCK = threading.Lock()
+
+# Semaphore for API rate limiting (Phase 2 optimization)
+# Limits concurrent OCR API calls to prevent rate limit errors
+MISTRAL_CONCURRENT_CALLS = int(os.getenv('MISTRAL_CONCURRENT_CALLS', 3))
+MISTRAL_SEMAPHORE = threading.Semaphore(MISTRAL_CONCURRENT_CALLS)
+
+def strip_accents(s: str) -> str:
+    """
+    Remove accents from a string using Unicode normalization.
+
+    Converts accented characters to their base form by decomposing
+    them (NFD) and removing combining diacritical marks.
+
+    Args:
+        s: Input string potentially containing accented characters
+
+    Returns:
+        String with all accents removed
+
+    Example:
+        >>> strip_accents("café résumé")
+        'cafe resume'
+    """
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
-def ascii_flat(s):
+
+def ascii_flat(s: str) -> str:
+    """
+    Convert a string to lowercase ASCII, removing non-ASCII characters.
+
+    Uses NFKD normalization to decompose characters and then encodes
+    to ASCII, ignoring characters that cannot be represented.
+
+    Args:
+        s: Input string to convert
+
+    Returns:
+        Lowercase ASCII string
+
+    Example:
+        >>> ascii_flat("Café Résumé 日本語")
+        'cafe resume '
+    """
     return unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('ascii').lower()
 
-def alphanum_only(s):
+
+def alphanum_only(s: str) -> str:
+    """
+    Extract only alphanumeric characters from a string.
+
+    First converts to ASCII lowercase, then keeps only letters and digits.
+    Useful for fuzzy filename matching.
+
+    Args:
+        s: Input string to filter
+
+    Returns:
+        String containing only alphanumeric characters
+
+    Example:
+        >>> alphanum_only("Document (v2) - Final.pdf")
+        'documentv2finalpdf'
+    """
     return ''.join(c for c in ascii_flat(s) if c.isalnum())
 
-def levenshtein(a, b):
-    # Simple Levenshtein distance (not optimal, but fine for short names)
+
+def levenshtein(a: str, b: str) -> int:
+    """
+    Calculate the Levenshtein distance between two strings.
+
+    The Levenshtein distance is the minimum number of single-character
+    edits (insertions, deletions, or substitutions) required to
+    transform one string into another.
+
+    Uses a simple O(n*m) dynamic programming approach, suitable for
+    short strings like filenames.
+
+    Args:
+        a: First string
+        b: Second string
+
+    Returns:
+        Integer distance between the two strings
+
+    Example:
+        >>> levenshtein("kitten", "sitting")
+        3
+    """
     if len(a) < len(b):
         return levenshtein(b, a)
     if len(b) == 0:
@@ -88,12 +192,38 @@ logger.info(f"Script log file: {pdf_processing_log_file}")
 load_dotenv()
 
 def _truthy_env(value: Optional[str], default: bool) -> bool:
+    """
+    Parse a string as a boolean value.
+
+    Interprets "1", "true", "yes", "on" (case-insensitive) as True.
+    Returns the default value if input is None.
+
+    Args:
+        value: String value to parse, or None
+        default: Default value if input is None
+
+    Returns:
+        Boolean interpretation of the string value
+    """
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_int(name: str, default: int) -> int:
+    """
+    Get an integer value from an environment variable.
+
+    Returns the default value if the variable is not set or cannot
+    be parsed as an integer.
+
+    Args:
+        name: Name of the environment variable
+        default: Default value if not set or invalid
+
+    Returns:
+        Integer value from environment or default
+    """
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -105,6 +235,19 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_float(name: str, default: float) -> float:
+    """
+    Get a float value from an environment variable.
+
+    Returns the default value if the variable is not set or cannot
+    be parsed as a float.
+
+    Args:
+        name: Name of the environment variable
+        default: Default value if not set or invalid
+
+    Returns:
+        Float value from environment or default
+    """
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -172,46 +315,55 @@ def load_progress(output_csv: str) -> set:
 
 def save_progress(output_csv: str, processed_keys: set):
     """
-    Save the set of processed itemKeys to progress file.
+    Save the set of processed itemKeys to progress file in a thread-safe manner.
+
+    Uses _PROGRESS_LOCK to ensure safe concurrent writes from multiple threads.
 
     Args:
         output_csv: Path to the output CSV file
         processed_keys: Set of successfully processed itemKeys
     """
-    progress_file = get_progress_file_path(output_csv)
-    try:
-        with open(progress_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                "processed_keys": list(processed_keys),
-                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
-            }, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Failed to save progress file: {e}")
+    with _PROGRESS_LOCK:
+        progress_file = get_progress_file_path(output_csv)
+        try:
+            with open(progress_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "processed_keys": list(processed_keys),
+                    "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save progress file: {e}")
 
 
 def append_record_to_csv(output_csv: str, record: Dict[str, Any], fieldnames: List[str]):
     """
-    Append a single record to the CSV file.
-    Creates the file with headers if it doesn't exist.
+    Append a single record to the CSV file in a thread-safe manner.
+
+    Creates the file with headers if it doesn't exist. Uses _CSV_LOCK
+    to ensure safe concurrent writes from multiple threads.
 
     Args:
         output_csv: Path to the output CSV file
         record: Dictionary containing the record data
         fieldnames: List of column names
+
+    Raises:
+        Exception: If writing fails after acquiring the lock
     """
-    file_exists = os.path.exists(output_csv)
+    with _CSV_LOCK:
+        file_exists = os.path.exists(output_csv)
 
-    try:
-        with open(output_csv, 'a', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, escapechar='\\', quoting=csv.QUOTE_MINIMAL)
+        try:
+            with open(output_csv, 'a', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, escapechar='\\', quoting=csv.QUOTE_MINIMAL)
 
-            if not file_exists:
-                writer.writeheader()
+                if not file_exists:
+                    writer.writeheader()
 
-            writer.writerow(record)
-    except Exception as e:
-        logger.error(f"Failed to append record to CSV: {e}")
-        raise
+                writer.writerow(record)
+        except Exception as e:
+            logger.error(f"Failed to append record to CSV: {e}")
+            raise
 
 
 def save_errors(output_csv: str, errors: List[Dict[str, Any]]):
@@ -308,6 +460,19 @@ class OCRResult(NamedTuple):
 
 
 def _extract_text_with_legacy_pdf(pdf_path: str, max_pages: Optional[int] = None) -> str:
+    """
+    Extract text from a PDF using PyMuPDF (fitz) legacy extraction.
+
+    Falls back to OCR if text extraction yields sparse results
+    (less than 50 words per page).
+
+    Args:
+        pdf_path: Path to the PDF file
+        max_pages: Optional maximum number of pages to process
+
+    Returns:
+        Extracted text content, with pages separated by double newlines
+    """
     full_text: List[str] = []
     try:
         with fitz.open(pdf_path) as doc:
@@ -332,126 +497,147 @@ def _extract_text_with_legacy_pdf(pdf_path: str, max_pages: Optional[int] = None
 
 
 def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -> str:
+    """
+    Extract text from PDF using Mistral OCR API with rate limiting.
+
+    Uses a semaphore to limit concurrent API calls and prevent rate limit errors.
+    The semaphore value is controlled by MISTRAL_CONCURRENT_CALLS env variable.
+
+    Args:
+        pdf_path: Path to the PDF file to process
+        max_pages: Optional maximum number of pages to process
+
+    Returns:
+        Extracted text in Markdown format
+
+    Raises:
+        OCRExtractionError: If API key is missing or extraction fails
+    """
     if not MISTRAL_API_KEY:
         raise OCRExtractionError("MISTRAL_API_KEY manquante.")
 
     base_url = MISTRAL_API_BASE_URL.rstrip("/")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}"}
 
-    with requests.Session() as session:
-        with open(pdf_path, "rb") as pdf_file:
-            files = {
-                "file": (os.path.basename(pdf_path), pdf_file, "application/pdf")
+    # Acquire semaphore to limit concurrent API calls (rate limiting)
+    logger.debug(f"Acquiring Mistral semaphore for {pdf_path} (limit: {MISTRAL_CONCURRENT_CALLS})")
+    with MISTRAL_SEMAPHORE:
+        logger.debug(f"Semaphore acquired for {pdf_path}")
+        with requests.Session() as session:
+            with open(pdf_path, "rb") as pdf_file:
+                files = {
+                    "file": (os.path.basename(pdf_path), pdf_file, "application/pdf")
+                }
+                data = {"purpose": "ocr"}
+                upload_resp = session.post(
+                    f"{base_url}/v1/files",
+                    headers=headers,
+                    files=files,
+                    data=data,
+                    timeout=MISTRAL_OCR_TIMEOUT,
+                )
+
+            upload_resp.raise_for_status()
+            upload_payload = upload_resp.json()
+            file_id = (
+                upload_payload.get("id")
+                or upload_payload.get("file_id")
+                or upload_payload.get("data", {}).get("id")
+            )
+            if not file_id:
+                raise OCRExtractionError(
+                    "La réponse Mistral ne contient pas d'identifiant de fichier pour l'OCR."
+                )
+
+            payload = {
+                "model": MISTRAL_OCR_MODEL,
+                "document": {
+                    "type": "file",
+                    "file_id": file_id,
+                },
+                "include_image_base64": False,
             }
-            data = {"purpose": "ocr"}
-            upload_resp = session.post(
-                f"{base_url}/v1/files",
-                headers=headers,
-                files=files,
-                data=data,
+            if max_pages:
+                payload["page_ranges"] = [
+                    {
+                        "start": 1,
+                        "end": max_pages,
+                    }
+                ]
+
+            response = session.post(
+                f"{base_url}/v1/ocr",
+                headers={**headers, "Content-Type": "application/json"},
+                json=payload,
                 timeout=MISTRAL_OCR_TIMEOUT,
             )
-
-        upload_resp.raise_for_status()
-        upload_payload = upload_resp.json()
-        file_id = (
-            upload_payload.get("id")
-            or upload_payload.get("file_id")
-            or upload_payload.get("data", {}).get("id")
-        )
-        if not file_id:
-            raise OCRExtractionError(
-                "La réponse Mistral ne contient pas d'identifiant de fichier pour l'OCR."
-            )
-
-        payload = {
-            "model": MISTRAL_OCR_MODEL,
-            "document": {
-                "type": "file",
-                "file_id": file_id,
-            },
-            "include_image_base64": False,
-        }
-        if max_pages:
-            payload["page_ranges"] = [
-                {
-                    "start": 1,
-                    "end": max_pages,
-                }
-            ]
-
-        response = session.post(
-            f"{base_url}/v1/ocr",
-            headers={**headers, "Content-Type": "application/json"},
-            json=payload,
-            timeout=MISTRAL_OCR_TIMEOUT,
-        )
-        try:
-            response.raise_for_status()
-        except requests.HTTPError:
-            logger.warning(
-                "Appel Mistral OCR échoué (%s) pour %s: %s",
-                response.status_code,
-                pdf_path,
-                response.text,
-            )
-            raise
-
-        response_payload = response.json()
-
-        text_fragments: List[str] = []
-        if isinstance(response_payload, dict):
-            possible_fields = [
-                response_payload.get("markdown"),
-                response_payload.get("text"),
-            ]
-            for candidate in possible_fields:
-                if isinstance(candidate, str) and candidate.strip():
-                    text_fragments.append(candidate.strip())
-
-            pages = response_payload.get("pages")
-            if isinstance(pages, list):
-                for page in pages:
-                    if isinstance(page, dict):
-                        for key in ("markdown", "text"):
-                            page_text = page.get(key)
-                            if isinstance(page_text, str) and page_text.strip():
-                                text_fragments.append(page_text.strip())
-
-            outputs = response_payload.get("output")
-            if isinstance(outputs, list):
-                for block in outputs:
-                    if isinstance(block, dict):
-                        for key in ("markdown", "text", "content"):
-                            value = block.get(key)
-                            if isinstance(value, str) and value.strip():
-                                text_fragments.append(value.strip())
-
-        markdown_text = "\n\n".join(dict.fromkeys(text_fragments))
-        markdown_text = markdown_text.strip()
-        if not markdown_text:
-            logger.warning(
-                "Réponse OCR Mistral vide pour %s (keys=%s)",
-                pdf_path,
-                list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload),
-            )
-            raise OCRExtractionError("La réponse Mistral est vide.")
-
-        if MISTRAL_DELETE_UPLOADED_FILE:
             try:
-                session.delete(
-                    f"{base_url}/v1/files/{file_id}",
-                    headers=headers,
-                    timeout=15,
+                response.raise_for_status()
+            except requests.HTTPError:
+                logger.warning(
+                    "Appel Mistral OCR échoué (%s) pour %s: %s",
+                    response.status_code,
+                    pdf_path,
+                    response.text,
                 )
-            except requests.RequestException as cleanup_error:
-                logger.debug(
-                    "Échec du nettoyage du fichier OCR Mistral %s: %s",
-                    file_id,
-                    cleanup_error,
-                )
+                raise
 
-        return markdown_text
+            response_payload = response.json()
+
+            text_fragments: List[str] = []
+            if isinstance(response_payload, dict):
+                possible_fields = [
+                    response_payload.get("markdown"),
+                    response_payload.get("text"),
+                ]
+                for candidate in possible_fields:
+                    if isinstance(candidate, str) and candidate.strip():
+                        text_fragments.append(candidate.strip())
+
+                pages = response_payload.get("pages")
+                if isinstance(pages, list):
+                    for page in pages:
+                        if isinstance(page, dict):
+                            for key in ("markdown", "text"):
+                                page_text = page.get(key)
+                                if isinstance(page_text, str) and page_text.strip():
+                                    text_fragments.append(page_text.strip())
+
+                outputs = response_payload.get("output")
+                if isinstance(outputs, list):
+                    for block in outputs:
+                        if isinstance(block, dict):
+                            for key in ("markdown", "text", "content"):
+                                value = block.get(key)
+                                if isinstance(value, str) and value.strip():
+                                    text_fragments.append(value.strip())
+
+            markdown_text = "\n\n".join(dict.fromkeys(text_fragments))
+            markdown_text = markdown_text.strip()
+            if not markdown_text:
+                logger.warning(
+                    "Réponse OCR Mistral vide pour %s (keys=%s)",
+                    pdf_path,
+                    list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload),
+                )
+                raise OCRExtractionError("La réponse Mistral est vide.")
+
+            if MISTRAL_DELETE_UPLOADED_FILE:
+                try:
+                    session.delete(
+                        f"{base_url}/v1/files/{file_id}",
+                        headers=headers,
+                        timeout=15,
+                    )
+                except requests.RequestException as cleanup_error:
+                    logger.debug(
+                        "Échec du nettoyage du fichier OCR Mistral %s: %s",
+                        file_id,
+                        cleanup_error,
+                    )
+
+            logger.debug(f"Semaphore released for {pdf_path}")
+            return markdown_text
 
 
 def _extract_text_with_openai(
@@ -519,6 +705,17 @@ def _extract_text_with_openai(
 
 
 def _finalize_ocr_result(text: str, provider: str, return_details: bool):
+    """
+    Format the OCR result based on the return_details flag.
+
+    Args:
+        text: Extracted text content
+        provider: Name of the OCR provider used ('mistral', 'openai', 'legacy')
+        return_details: If True, return OCRResult; otherwise return just text
+
+    Returns:
+        OCRResult namedtuple if return_details is True, else string
+    """
     if return_details:
         return OCRResult(text=text, provider=provider)
     return text
@@ -530,7 +727,25 @@ def extract_text_with_ocr(
     *,
     return_details: bool = False,
 ):
-    """Attempt Markdown-first OCR with Mistral, fall back to OpenAI then legacy extraction."""
+    """
+    Extract text from a PDF using the best available OCR provider.
+
+    Attempts providers in order of preference:
+    1. Mistral OCR API (if MISTRAL_API_KEY is set)
+    2. OpenAI Vision API (if OPENAI_API_KEY is set)
+    3. PyMuPDF legacy extraction (always available)
+
+    Args:
+        pdf_path: Path to the PDF file to process
+        max_pages: Optional maximum number of pages to process
+        return_details: If True, return OCRResult with provider info
+
+    Returns:
+        Extracted text (str) or OCRResult if return_details is True
+
+    Raises:
+        OCRExtractionError: If all extraction methods fail
+    """
 
     last_error: Optional[Exception] = None
 
@@ -584,16 +799,169 @@ def extract_text_with_ocr(
     )
     raise OCRExtractionError(error_message)
 
+
+# ============================================================================
+# PARALLEL PROCESSING SUPPORT (Phase 2 optimization)
+# ============================================================================
+
+class ItemProcessingResult(NamedTuple):
+    """
+    Result of processing a single Zotero item.
+
+    Attributes:
+        item_key: Unique identifier for the Zotero item
+        records: List of successfully extracted records (PDF data)
+        errors: List of errors encountered during processing
+        success: Whether processing completed without critical errors
+    """
+    item_key: str
+    records: List[Dict[str, Any]]
+    errors: List[Dict[str, Any]]
+    success: bool
+
+
+def _process_single_zotero_item(
+    item: Dict[str, Any],
+    pdf_base_dir: str,
+    item_index: int = 0
+) -> ItemProcessingResult:
+    """
+    Process a single Zotero item with its PDF attachments.
+
+    This function is designed to be thread-safe and can be called from
+    multiple threads in a ThreadPoolExecutor. It extracts metadata from
+    the Zotero item and performs OCR on associated PDF files.
+
+    Args:
+        item: Zotero item dictionary containing metadata and attachments
+        pdf_base_dir: Base directory for resolving relative PDF paths
+        item_index: Index of the item in the processing queue (for logging)
+
+    Returns:
+        ItemProcessingResult containing extracted records and any errors
+
+    Note:
+        This function does not write to files directly. The caller is
+        responsible for persisting results using thread-safe methods.
+    """
+    item_key = item.get("key") or item.get("itemKey", "")
+    records = []
+    errors = []
+
+    try:
+        # Extract base metadata
+        metadata = {
+            "itemKey": item_key,
+            "type": item.get("itemType", ""),
+            "title": item.get("title", ""),
+            "abstract": item.get("abstractNote", ""),
+            "date": item.get("date", ""),
+            "url": item.get("url", ""),
+            "doi": item.get("DOI", ""),
+            "authors": ", ".join([
+                f"{c.get('lastName', '').strip()} {c.get('firstName', '').strip()}"
+                for c in item.get("creators", [])
+                if c.get('lastName') or c.get('firstName')
+            ])
+        }
+
+        # Process PDF attachments
+        for attachment in item.get("attachments", []):
+            path_from_json = attachment.get("path", "").strip()
+            if not path_from_json or not path_from_json.lower().endswith(".pdf"):
+                continue
+
+            # Resolve PDF path
+            if os.path.isabs(path_from_json):
+                actual_pdf_path = path_from_json
+            else:
+                actual_pdf_path = os.path.join(pdf_base_dir, path_from_json)
+
+            # Fuzzy search if not found
+            if not os.path.exists(actual_pdf_path):
+                actual_pdf_path = _find_pdf_fuzzy(actual_pdf_path, path_from_json, pdf_base_dir)
+                if actual_pdf_path is None:
+                    logger.warning(f"[{item_index}] PDF not found: {path_from_json}")
+                    errors.append({
+                        "itemKey": item_key,
+                        "title": metadata.get("title", ""),
+                        "error_type": "PDF_NOT_FOUND",
+                        "error_message": f"PDF not found: {path_from_json}",
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                    continue
+
+            logger.info(f"[{item_index}] Processing PDF: {os.path.basename(actual_pdf_path)}")
+
+            try:
+                # Perform OCR with retry logic
+                ocr_payload = extract_text_with_ocr_retry(
+                    actual_pdf_path,
+                    return_details=True,
+                )
+
+                # Build record
+                record = {
+                    **metadata,
+                    "filename": os.path.basename(path_from_json),
+                    "path": actual_pdf_path,
+                    "attachment_title": attachment.get("title", ""),
+                    "texteocr": ocr_payload.text,
+                    "texteocr_provider": ocr_payload.provider,
+                }
+                records.append(record)
+                logger.info(f"[{item_index}] ✓ OCR success for {item_key} ({ocr_payload.provider})")
+
+            except OCRExtractionError as ocr_error:
+                logger.error(f"[{item_index}] OCR failed for {actual_pdf_path}: {ocr_error}")
+                errors.append({
+                    "itemKey": item_key,
+                    "title": metadata.get("title", ""),
+                    "error_type": "OCR_FAILED",
+                    "error_message": str(ocr_error),
+                    "pdf_path": actual_pdf_path,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                })
+
+        return ItemProcessingResult(
+            item_key=item_key,
+            records=records,
+            errors=errors,
+            success=True
+        )
+
+    except Exception as e:
+        logger.error(f"[{item_index}] Error processing item {item_key}: {e}")
+        errors.append({
+            "itemKey": item_key,
+            "title": item.get("title", ""),
+            "error_type": "PROCESSING_ERROR",
+            "error_message": str(e),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        })
+        return ItemProcessingResult(
+            item_key=item_key,
+            records=[],
+            errors=errors,
+            success=False
+        )
+
+
 def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, output_csv: str) -> pd.DataFrame:
     """
     Charge les métadonnées Zotero depuis un JSON vers un DataFrame
     avec extraction OCR du texte complet pour chaque PDF.
 
-    VERSION INCRÉMENTALE:
+    VERSION INCRÉMENTALE avec support parallélisation (Phase 2):
     - Sauvegarde chaque item immédiatement après traitement
     - Supporte la reprise après interruption (checkpoint)
     - Retry avec backoff exponentiel pour les erreurs réseau
     - Fichier d'erreurs séparé pour diagnostic
+    - Traitement parallèle configurable via PDF_EXTRACTION_WORKERS
+
+    Modes de traitement:
+    - PDF_EXTRACTION_WORKERS=1: Mode séquentiel (comportement original)
+    - PDF_EXTRACTION_WORKERS>1: Mode parallèle avec ThreadPoolExecutor
 
     Args:
         json_path: Chemin vers le fichier JSON Zotero
@@ -611,8 +979,12 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
 
     # Load progress (items already processed)
     processed_keys = load_progress(output_csv)
-    errors = []
-    records_count = 0
+    # Use thread-safe set for parallel mode
+    processed_keys_lock = threading.Lock()
+    all_errors = []
+    errors_lock = threading.Lock()
+    records_count = [0]  # Use list for mutable reference in nested function
+    records_count_lock = threading.Lock()
 
     try:
         logger.info(f"Chargement du fichier JSON Zotero depuis : {json_path}")
@@ -636,135 +1008,125 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
         if already_done > 0:
             logger.info(f"Resuming: {already_done}/{total_items} items already processed")
 
+        # Filter items that need processing
+        items_to_process = []
+        for idx, item in enumerate(items):
+            item_key = item.get("key") or item.get("itemKey", "")
+            if not item_key or item_key not in processed_keys:
+                items_to_process.append((idx, item))
+
+        items_remaining = len(items_to_process)
+        logger.info(f"Items to process: {items_remaining} (skipping {total_items - items_remaining} already done)")
+
         # Emit init event for SSE progress tracking
         print(f"PROGRESS|init|{total_items}|Found {total_items} Zotero items to process", flush=True)
 
-        item_count = 0
-        for item in tqdm(items, desc="Processing Zotero items"):
-            item_count += 1
-            item_key = item.get("key") or item.get("itemKey", "")
+        # Choose processing mode based on worker count
+        if PDF_EXTRACTION_WORKERS > 1 and items_remaining > 1:
+            # ============================================================
+            # PARALLEL MODE (Phase 2 optimization)
+            # ============================================================
+            logger.info(f"Using PARALLEL mode with {PDF_EXTRACTION_WORKERS} workers")
+            logger.info(f"Mistral API concurrent calls limited to {MISTRAL_CONCURRENT_CALLS}")
 
-            # Skip if already processed (checkpoint)
-            if item_key and item_key in processed_keys:
-                logger.debug(f"Skipping already processed item: {item_key}")
-                continue
+            completed_count = [0]
 
-            try:
-                # Extraction des métadonnées de base
-                metadata = {
-                    "itemKey": item_key,
-                    "type": item.get("itemType", ""),
-                    "title": item.get("title", ""),
-                    "abstract": item.get("abstractNote", ""),
-                    "date": item.get("date", ""),
-                    "url": item.get("url", ""),
-                    "doi": item.get("DOI", ""),
-                    "authors": ", ".join([
-                        f"{c.get('lastName', '').strip()} {c.get('firstName', '').strip()}"
-                        for c in item.get("creators", [])
-                        if c.get('lastName') or c.get('firstName')
-                    ])
+            def process_and_save(item_data: Tuple[int, Dict[str, Any]]) -> None:
+                """Process item and save results (thread-safe)."""
+                idx, item = item_data
+                item_key = item.get("key") or item.get("itemKey", "")
+
+                # Double-check not already processed (race condition protection)
+                with processed_keys_lock:
+                    if item_key and item_key in processed_keys:
+                        return
+
+                # Process item
+                result = _process_single_zotero_item(item, pdf_base_dir, idx)
+
+                # Save records (thread-safe)
+                for record in result.records:
+                    append_record_to_csv(output_csv, record, CSV_FIELDNAMES)
+                    with records_count_lock:
+                        records_count[0] += 1
+
+                # Collect errors (thread-safe)
+                if result.errors:
+                    with errors_lock:
+                        all_errors.extend(result.errors)
+
+                # Mark as processed (thread-safe)
+                if result.item_key:
+                    with processed_keys_lock:
+                        processed_keys.add(result.item_key)
+                        save_progress(output_csv, processed_keys)
+
+                # Update progress
+                with records_count_lock:
+                    completed_count[0] += 1
+                    current = already_done + completed_count[0]
+                    title_short = item.get("title", f"Item {item_key}")[:50]
+                    print(f"PROGRESS|row|{current}/{total_items}|{title_short}", flush=True)
+
+            # Execute with ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=PDF_EXTRACTION_WORKERS) as executor:
+                # Submit all items
+                futures = {
+                    executor.submit(process_and_save, item_data): item_data[0]
+                    for item_data in items_to_process
                 }
 
-                # Traitement des attachments PDF
-                item_has_pdf = False
-                for attachment in item.get("attachments", []):
-                    path_from_json = attachment.get("path", "").strip()
-                    if path_from_json and path_from_json.lower().endswith(".pdf"):
+                # Wait for completion with progress bar
+                for future in tqdm(
+                    as_completed(futures),
+                    total=len(items_to_process),
+                    desc=f"Processing PDFs ({PDF_EXTRACTION_WORKERS} workers)"
+                ):
+                    try:
+                        future.result()  # Raise any exceptions
+                    except Exception as e:
+                        idx = futures[future]
+                        logger.error(f"[{idx}] Unexpected error in thread: {e}")
 
-                        # Résoudre le chemin du PDF
-                        if os.path.isabs(path_from_json):
-                            actual_pdf_path = path_from_json
-                        else:
-                            actual_pdf_path = os.path.join(pdf_base_dir, path_from_json)
+            logger.info(f"Parallel processing complete: {records_count[0]} records saved")
 
-                        if not os.path.exists(actual_pdf_path):
-                            # Recherche fuzzy avancée
-                            actual_pdf_path = _find_pdf_fuzzy(actual_pdf_path, path_from_json, pdf_base_dir)
-                            if actual_pdf_path is None:
-                                logger.warning(f"PDF non trouvé: {path_from_json}")
-                                errors.append({
-                                    "itemKey": item_key,
-                                    "title": metadata.get("title", ""),
-                                    "error_type": "PDF_NOT_FOUND",
-                                    "error_message": f"PDF not found: {path_from_json}",
-                                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-                                })
-                                continue
+        else:
+            # ============================================================
+            # SEQUENTIAL MODE (original behavior, PDF_EXTRACTION_WORKERS=1)
+            # ============================================================
+            logger.info(f"Using SEQUENTIAL mode (workers={PDF_EXTRACTION_WORKERS})")
 
-                        logger.info(f"Traitement du PDF : {actual_pdf_path}")
-                        try:
-                            # Use retry version for OCR
-                            ocr_payload = extract_text_with_ocr_retry(
-                                actual_pdf_path,
-                                return_details=True,
-                            )
-                        except OCRExtractionError as ocr_error:
-                            logger.error(
-                                "Échec OCR pour %s (%s): %s",
-                                actual_pdf_path,
-                                path_from_json,
-                                ocr_error,
-                            )
-                            errors.append({
-                                "itemKey": item_key,
-                                "title": metadata.get("title", ""),
-                                "error_type": "OCR_FAILED",
-                                "error_message": str(ocr_error),
-                                "pdf_path": actual_pdf_path,
-                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-                            })
-                            continue
+            item_count = already_done
+            for idx, item in tqdm(items_to_process, desc="Processing Zotero items"):
+                item_count += 1
+                item_key = item.get("key") or item.get("itemKey", "")
 
-                        # Build record
-                        record = {
-                            **metadata,
-                            "filename": os.path.basename(path_from_json),
-                            "path": actual_pdf_path,
-                            "attachment_title": attachment.get("title", ""),
-                            "texteocr": ocr_payload.text,
-                            "texteocr_provider": ocr_payload.provider,
-                        }
+                # Process using the shared function
+                result = _process_single_zotero_item(item, pdf_base_dir, idx)
 
-                        # INCREMENTAL SAVE: Write immediately to CSV
-                        append_record_to_csv(output_csv, record, CSV_FIELDNAMES)
-                        records_count += 1
-                        item_has_pdf = True
+                # Save records
+                for record in result.records:
+                    append_record_to_csv(output_csv, record, CSV_FIELDNAMES)
+                    records_count[0] += 1
+                    logger.info(f"✓ Item {item_key} saved ({records_count[0]} total)")
 
-                        logger.info(f"✓ Item {item_key} saved ({records_count} total)")
+                # Collect errors
+                all_errors.extend(result.errors)
 
-                # Mark item as processed (even if no PDF found, to avoid re-processing)
-                if item_key:
-                    processed_keys.add(item_key)
-                    # Save progress after each item
+                # Mark as processed
+                if result.item_key:
+                    processed_keys.add(result.item_key)
                     save_progress(output_csv, processed_keys)
 
-                # Emit row-level progress for SSE
+                # Emit progress for SSE
                 title_short = item.get("title", f"Item {item_key}")[:50]
                 print(f"PROGRESS|row|{item_count}/{total_items}|{title_short}", flush=True)
-
-            except Exception as item_error:
-                logger.error(f"Error processing item {item_key}: {item_error}")
-                errors.append({
-                    "itemKey": item_key,
-                    "title": item.get("title", ""),
-                    "error_type": "PROCESSING_ERROR",
-                    "error_message": str(item_error),
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-                })
-                # Emit error progress
-                print(f"PROGRESS|row|{item_count}/{total_items}|Error: {item_key}", flush=True)
-                # Mark as processed to avoid infinite retry loop
-                if item_key:
-                    processed_keys.add(item_key)
-                    save_progress(output_csv, processed_keys)
-                continue
 
     except Exception as e:
         logger.error(f"Failed to load Zotero JSON: {e}")
 
     # Save errors to file
-    save_errors(output_csv, errors)
+    save_errors(output_csv, all_errors)
 
     # Return DataFrame from CSV (for compatibility)
     if os.path.exists(output_csv):

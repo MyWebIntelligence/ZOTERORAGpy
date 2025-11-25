@@ -738,12 +738,31 @@ time python scripts/rad_dataframe.py \
 > **Prérequis** : Phase 1 complétée et baseline établie
 > **Validation** : Comparaison metrics Phase 1 vs Phase 2
 
-## P2-T1 : ThreadPoolExecutor Extraction PDF
+## P2-T1 : ThreadPoolExecutor Extraction PDF ✅ COMPLÉTÉ (2025-11-25)
 
 ### Objectif
 Paralléliser l'extraction OCR des PDFs pour réduire le goulot d'étranglement principal.
 
 **Gain attendu** : 2-3x vitesse extraction (5-10 → 15-20 docs/min)
+
+### Implémentation réalisée
+
+**Fichiers modifiés** :
+
+- `scripts/rad_dataframe.py` : ThreadPoolExecutor + rate limiting + thread-safe operations
+- `.env` : Ajout `MISTRAL_CONCURRENT_CALLS=3`
+
+**Fonctionnalités ajoutées** :
+
+1. Classe `ItemProcessingResult` pour retour thread-safe
+2. Fonction `_process_single_zotero_item` pour traitement parallèle
+3. Semaphore `MISTRAL_SEMAPHORE` pour rate limiting API
+4. Locks thread-safe : `_CSV_LOCK`, `_PROGRESS_LOCK`
+5. Mode parallèle/séquentiel automatique selon `PDF_EXTRACTION_WORKERS`
+
+---
+
+### Spécification originale (référence)
 
 ### Fichiers à modifier
 

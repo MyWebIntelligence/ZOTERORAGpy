@@ -94,15 +94,65 @@ curl -N http://localhost:8000/api/processing/session/{id}/stream
 | RAM limit | non défini | 8GB | Prévisibilité |
 | Healthcheck | basique | détaillé | Observabilité |
 
-## Objectifs Phase 2
+## Phase 2 - T1 : ThreadPoolExecutor OCR (Implémenté 2025-11-25)
 
-Si Phase 2 implémentée, les améliorations attendues :
+### Configuration ajoutée
 
-| Métrique | Phase 1 | Target Phase 2 | Gain |
-|----------|---------|----------------|------|
-| Extraction OCR | séquentiel | parallèle | 2-3x |
-| Concurrent users | 10-20 | 40-60 | 2-3x |
-| Embedding throughput | baseline | +50% | 1.5x |
+| Paramètre | Valeur | Description |
+|-----------|--------|-------------|
+| PDF_EXTRACTION_WORKERS | 4 | Workers parallèles pour OCR |
+| MISTRAL_CONCURRENT_CALLS | 3 | Limite API Mistral simultanés |
+
+### Fonctionnalités implémentées
+
+1. **ThreadPoolExecutor** pour traitement parallèle des PDFs
+   - Mode parallèle activé si `PDF_EXTRACTION_WORKERS > 1`
+   - Mode séquentiel conservé pour compatibilité (workers=1)
+
+2. **Rate limiting Mistral API**
+   - Semaphore limitant les appels API concurrents
+   - Protection contre rate limits
+
+3. **Thread-safe operations**
+   - Locks pour écriture CSV (`_CSV_LOCK`)
+   - Locks pour sauvegarde progress (`_PROGRESS_LOCK`)
+   - Locks additionnels pour compteurs et erreurs
+
+4. **Fonction `_process_single_zotero_item`**
+   - Traitement thread-safe d'un item
+   - Retourne `ItemProcessingResult` avec records et erreurs
+
+### Gains attendus
+
+| Métrique | Phase 1 | Phase 2-T1 | Gain |
+|----------|---------|------------|------|
+| Extraction OCR | séquentiel | parallèle (4 workers) | 2-3x |
+| Throughput docs/min | ~5-10 | ~15-20 | 2-3x |
+| Rate limit hits | N/A | contrôlé | Stabilité |
+
+### Validation requise
+
+```bash
+# Test avec petit corpus (10 PDFs)
+time python scripts/rad_dataframe.py \
+  --json tests/fixtures/10_docs.json \
+  --dir tests/fixtures \
+  --output /tmp/test_parallel.csv
+
+# Comparer avec baseline séquentiel
+# Vérifier logs pour workers actifs
+grep "PARALLEL mode" logs/pdf_processing.log
+```
+
+## Objectifs Phase 2 restants
+
+| Tâche | Status | Description |
+|-------|--------|-------------|
+| P2-T1 | ✅ Fait | ThreadPoolExecutor extraction PDF |
+| P2-T2 | En attente | Optimisation batching OpenAI |
+| P2-T3 | En attente | Cleanup automatique sessions |
+| P2-T4 | En attente | Monitoring Prometheus |
+| P2-T5 | En attente | Index database sessions |
 
 ## Notes Opérationnelles
 
