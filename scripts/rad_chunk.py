@@ -106,11 +106,25 @@ except OSError:
         print("Veuillez installer le modèle manuellement : python -m spacy download fr_core_news_md")
         nlp = None # Fallback or error
 
-# Default constants from master code
+# ----------------------------------------------------------------------
+# Environment variable helper with validation
+# ----------------------------------------------------------------------
+def get_env_int(key: str, default: int, min_val: int = 1) -> int:
+    """Get integer from environment with validation and fallback."""
+    try:
+        value = int(os.getenv(key, default))
+        return max(min_val, value)
+    except (ValueError, TypeError):
+        logging.warning(f"Invalid {key}, using default {default}")
+        return default
+
+# Default constants from master code (configurable via .env)
 DEFAULT_JSON_FILE_CHUNKS = "df_chunks.json"
-DEFAULT_MAX_WORKERS = os.cpu_count() - 1 if os.cpu_count() and os.cpu_count() > 1 else 1
-DEFAULT_BATCH_SIZE_GPT = 5
-DEFAULT_EMBEDDING_BATCH_SIZE = 32
+_cpu_count = os.cpu_count() or 2
+DEFAULT_MAX_WORKERS = get_env_int('DEFAULT_MAX_WORKERS', max(1, _cpu_count - 1))
+DEFAULT_BATCH_SIZE_GPT = get_env_int('DEFAULT_BATCH_SIZE_GPT', 5)
+DEFAULT_EMBEDDING_BATCH_SIZE = get_env_int('DEFAULT_EMBEDDING_BATCH_SIZE', 32)
+DEFAULT_DOC_WORKERS = get_env_int('DEFAULT_DOC_WORKERS', 3)
 DEFAULT_INPUT_JSON_WITH_EMBEDDINGS = "df_chunks_with_embeddings.json"
 DEFAULT_OUTPUT_JSON_SPARSE = "df_chunks_with_embeddings_sparse.json"
 
@@ -318,7 +332,7 @@ def process_all_documents(df, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-
         model: Modèle LLM pour le recodage (ex: "gpt-4o-mini" ou "openai/gemini-2.5-flash")
     """
     # Max 3 documents processed in parallel for their chunking/recoding stages
-    num_doc_workers = min(3, DEFAULT_MAX_WORKERS)
+    num_doc_workers = min(DEFAULT_DOC_WORKERS, DEFAULT_MAX_WORKERS)
 
     total_docs = len(df)
     # Emit init event for SSE progress tracking
