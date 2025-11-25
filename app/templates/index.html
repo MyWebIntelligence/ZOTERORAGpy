@@ -2250,6 +2250,7 @@
 
   // Zotero Notes
   document.getElementById('generateZoteroNotesBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('generateZoteroNotesBtn');
     const resultDiv = document.getElementById('zoteroLog');
     const progressDiv = document.getElementById('zoteroProgress');
     const progressBar = document.getElementById('zoteroProgressBar');
@@ -2259,6 +2260,21 @@
     const multiProgressContainer = document.getElementById('zoteroMultiProgress');
 
     if (!ensureSessionPath(resultDiv)) return;
+
+    // Prevent double-click - disable button during processing
+    if (btn.disabled) {
+      showToast('Processing already in progress...', 'warning');
+      return;
+    }
+    const originalBtnHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Processing...';
+
+    // Helper to re-enable button
+    const resetButton = () => {
+      btn.disabled = false;
+      btn.innerHTML = originalBtnHtml;
+    };
 
     // Reset UI
     resultDiv.innerHTML = '';
@@ -2390,10 +2406,12 @@
                 completeStep('zoteroNotes', null);
                 markSectionCompleted('zotero-notes-section');
                 showToast('Zotero notes generated!', 'success');
+                resetButton();
 
               } else if (data.type === 'error') {
                 progressStatus.textContent = 'Error';
                 resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+                resetButton();
               }
             } catch (e) {
               console.error('Failed to parse SSE:', e);
@@ -2404,6 +2422,7 @@
     } catch (err) {
       progressStatus.textContent = 'Failed';
       resultDiv.innerHTML = `<p class="error-text">Request failed: ${err.message}</p>`;
+      resetButton();
     }
   });
 
