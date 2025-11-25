@@ -42,37 +42,41 @@ Données collectées via `/health/detailed` :
 - **Documents parallèles** : 6 (DEFAULT_DOC_WORKERS)
 - **Embeddings batch** : 32 chunks/batch
 
+## Résultats Baseline (2025-11-25)
+
+### Test Locust : 20 utilisateurs, 3 minutes
+
+| Métrique | Résultat | Target |
+|----------|----------|--------|
+| Requests total | **1754** | > 1000 ✅ |
+| Failures | **0%** | 0% ✅ |
+| Requests/sec | **9.76** | > 3 ✅ |
+| Latence moyenne | **38ms** | < 300ms ✅ |
+| Latence P50 | **5ms** | - |
+| Latence P95 | **120ms** | < 1000ms ✅ |
+| Latence P99 | **160ms** | - |
+
+### Détail par endpoint
+
+| Endpoint | Reqs | Avg | P95 | P99 |
+|----------|------|-----|-----|-----|
+| `/health` | 920 | 7ms | 17ms | 98ms |
+| `/health/detailed` | 497 | 116ms | 140ms | 240ms |
+| `/` | 260 | 7ms | 19ms | 82ms |
+| `/get_credentials` | 77 | 9ms | 16ms | 71ms |
+
 ## Tests de Régression
 
-### Test 1 : Health Check Performance
+### Commande de test baseline
 ```bash
-# 1000 requêtes, 50 concurrentes
-hey -n 1000 -c 50 http://localhost:8000/health/detailed
-
-# Baseline attendu:
-# - Requests/sec: > 100
-# - Latence P95: < 500ms
-# - Erreurs: 0%
+docker exec ragpy locust -f /app/locust_clean.py \
+    --host=http://localhost:8000 \
+    --users 20 \
+    --spawn-rate 5 \
+    --run-time 3m \
+    --headless \
+    --only-summary
 ```
-
-### Test 2 : Load Test Locust (10 users, 5 min)
-```bash
-locust -f tests/load/locust_baseline.py \
-       --host=http://localhost:8000 \
-       --users 10 \
-       --spawn-rate 2 \
-       --run-time 5m \
-       --headless \
-       --csv=baseline_phase1
-```
-
-| Métrique | Target |
-|----------|--------|
-| Requests total | > 1000 |
-| Failures | 0% |
-| Median response time | < 300ms |
-| 95th percentile | < 1000ms |
-| Requests/sec | > 3 |
 
 ### Test 3 : SSE Streaming
 ```bash
