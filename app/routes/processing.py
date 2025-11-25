@@ -698,7 +698,9 @@ async def generate_zotero_notes_sse(
     4. Streams real-time progress via SSE
     """
     from dotenv import load_dotenv
-    from app.utils.llm_note_generator import build_note_html, build_abstract_text, sentinel_in_html
+    from app.utils.llm_note_generator import (
+        build_note_html_async, build_abstract_text_async, sentinel_in_html
+    )
     from app.utils.zotero_client import (
         verify_api_key, create_child_note, check_note_exists,
         update_item_abstract, ZoteroAPIError
@@ -806,15 +808,13 @@ async def generate_zotero_notes_sse(
 
                     if use_extended:
                         # EXTENDED MODE: Generate HTML note and create child note
-                        sentinel, note_html = await loop.run_in_executor(
-                            None,
-                            lambda m=metadata, t=texteocr, mo=model: build_note_html(
-                                metadata=m,
-                                text_content=t,
-                                model=mo,
-                                use_llm=True,
-                                extended_analysis=True
-                            )
+                        # Uses global semaphore for concurrency control
+                        sentinel, note_html = await build_note_html_async(
+                            metadata=metadata,
+                            text_content=texteocr,
+                            model=model,
+                            use_llm=True,
+                            extended_analysis=True
                         )
 
                         # Store generated note
@@ -871,13 +871,11 @@ async def generate_zotero_notes_sse(
 
                     else:
                         # SHORT MODE: Generate plain text summary and update abstract
-                        summary_text = await loop.run_in_executor(
-                            None,
-                            lambda m=metadata, t=texteocr, mo=model: build_abstract_text(
-                                metadata=m,
-                                text_content=t,
-                                model=mo
-                            )
+                        # Uses global semaphore for concurrency control
+                        summary_text = await build_abstract_text_async(
+                            metadata=metadata,
+                            text_content=texteocr,
+                            model=model
                         )
 
                         # Store generated summary
