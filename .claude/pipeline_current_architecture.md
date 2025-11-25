@@ -1,7 +1,7 @@
 # Architecture actuelle du pipeline RAGpy
 
 **Date de création** : 2025-10-21
-**Dernière mise à jour** : 2025-11-24 (Docker, dépendances épinglées, .gitignore nettoyé)
+**Dernière mise à jour** : 2025-11-25 (Sémaphore global LLM, retry logic, optimisation concurrence)
 **Objectif** : Documenter l'architecture existante complète avec analyse détaillée
 
 ---
@@ -197,6 +197,9 @@ OPENROUTER_DEFAULT_MODEL=openai/gemini-2.5-flash
 # OCR premium
 MISTRAL_API_KEY=...
 MISTRAL_OCR_MODEL=mistral-ocr-latest
+
+# Contrôle concurrence LLM (2025-11-25)
+MAX_CONCURRENT_LLM_CALLS=5  # Limite globale tous utilisateurs
 ```
 
 **Bases vectorielles** (au moins une requise):
@@ -482,6 +485,8 @@ chardet==5.2.0                   # Détection encoding
 6. **Docker ready** ✅ : Déploiement simplifié (2025-11-24)
 7. **Dépendances épinglées** ✅ : Stabilité et sécurité (2025-11-24)
 8. **Authentification complète** ✅ : JWT + vérification email (Resend)
+9. **Contrôle concurrence LLM** ✅ : Sémaphore global multi-utilisateurs (2025-11-25)
+10. **Retry logic LLM** ✅ : Résilience API avec retry automatique (2025-11-25)
 
 ### ⚠️ **Limitations restantes**
 

@@ -1,7 +1,7 @@
 # RAGpy - Guide d'utilisation et architecture
 
 **Date de création** : 2025-10-21
-**Dernière mise à jour** : 2025-11-24 (Docker, dépendances épinglées, .gitignore nettoyé)
+**Dernière mise à jour** : 2025-11-25 (Sémaphore global LLM, retry logic, optimisation concurrence)
 
 Ce document constitue le guide de référence pour le projet **RAGpy**, un pipeline sophistiqué de Retrieval-Augmented Generation conçu pour traiter des documents académiques. Il couvre l'utilisation des agents CLI, l'architecture du système et les bonnes pratiques d'implémentation.
 
@@ -149,6 +149,7 @@ Enrichir le CSV issu de `rad_dataframe.py` via trois phases successives:
 **Variables d'optimisation** :
 - `OPENROUTER_API_KEY` - Alternative économique (~75% économie sur recodage)
 - `OPENROUTER_DEFAULT_MODEL` - Modèle par défaut (ex: `openai/gemini-2.5-flash`)
+- `MAX_CONCURRENT_LLM_CALLS` - Limite globale d'appels LLM simultanés (défaut: 5)
 
 **Librairies requises** :
 - `langchain_text_splitters` - Chunking intelligent avec RecursiveTextSplitter
@@ -456,3 +457,36 @@ chardet==5.2.0                   # Détection encoding
 - **Batch sizing** : Vérifier tailles lots et quotas API avant traitements massifs
 - **Monitoring** : Surveiller usage mémoire et temps traitement par phase
 - **Cache embeddings** : Considérer Redis pour éviter recalculs
+
+---
+
+## Contrôle de concurrence LLM (2025-11-25)
+
+### Sémaphore global
+
+Le système utilise un **sémaphore asyncio global** pour limiter les appels LLM concurrents à travers **tous les utilisateurs** de la plateforme.
+
+**Configuration** (`.env`) :
+```bash
+MAX_CONCURRENT_LLM_CALLS=5      # Limite globale (défaut: 5)
+```
+
+**Comportement** :
+- Maximum N appels LLM simultanés sur toute la plateforme
+- Les requêtes excédentaires attendent qu'un slot se libère
+- Protection contre surcharge API et rate limits
+- Logs de debug pour tracer acquisition/release des slots
+
+**Fonctions async avec contrôle** :
+```python
+# app/utils/llm_note_generator.py
+await build_note_html_async(...)       # Mode étendu
+await build_abstract_text_async(...)   # Mode court
+```
+
+### Retry logic LLM
+
+Les appels LLM incluent une logique de retry automatique :
+- **1 retry** en cas d'erreur
+- **2 secondes** de délai entre tentatives
+- Logging détaillé de chaque tentative
