@@ -409,7 +409,7 @@ metadata = {k: v for k, v in chunk.items()
 pandas>=2.2.2                    # Manipulation données
 pymupdf==1.24.2                  # PDF extraction
 openai==1.50.2                   # Embeddings + completion
-langchain-text-splitters==0.3.0  # Chunking intelligent
+langchain-text-splitters>=0.3.9  # Chunking intelligent (CVE-2025-6985 fix)
 spacy==3.7.5                     # NLP français
 tiktoken==0.7.0                  # Tokenisation OpenAI
 
@@ -421,12 +421,12 @@ qdrant-client==1.11.1            # Vector similarity
 # Web interface
 fastapi==0.115.0                 # API moderne
 uvicorn==0.30.6                  # ASGI server
-jinja2==3.1.4                    # Templates
-python-multipart==0.0.9          # Upload fichiers
+jinja2>=3.1.6                    # Templates (CVE-2024-56326 fix)
+python-multipart>=0.0.18         # Upload fichiers (CVE-2024-24762 fix)
 
 # Authentication
 sqlalchemy==2.0.35               # ORM
-python-jose[cryptography]==3.3.0 # JWT
+python-jose[cryptography]>=3.4.0 # JWT (CVE-2024-33663 fix)
 bcrypt==4.0.1                    # Hashing
 
 # Dev & test
