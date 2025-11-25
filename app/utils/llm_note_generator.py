@@ -267,45 +267,64 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2,
     # Set max_tokens based on analysis mode
     max_tokens = 16000 if extended_analysis else 2000
 
-    # Make the API call
-    try:
-        response = active_client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Tu es un assistant spécialisé en rédaction de fiches de lecture académiques."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+    # Retry configuration: 1 retry with 2 second delay
+    max_attempts = 2
+    retry_delay = 2  # seconds
+    last_error = None
 
-        # Validate response structure
-        if not response or not response.choices:
-            logger.error(f"LLM API returned empty response or no choices. Response: {response}")
-            raise ValueError(f"LLM API returned invalid response (no choices). Model: {model}")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            logger.info(f"LLM API call attempt {attempt}/{max_attempts} for model: {model}")
 
-        if not response.choices[0].message or response.choices[0].message.content is None:
-            logger.error(f"LLM API returned empty message content. Response: {response}")
-            raise ValueError(f"LLM API returned empty content. Model: {model}")
+            response = active_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Tu es un assistant spécialisé en rédaction de fiches de lecture académiques."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
 
-        content = response.choices[0].message.content.strip()
+            # Validate response structure
+            if not response or not response.choices:
+                logger.error(f"LLM API returned empty response or no choices. Response: {response}")
+                raise ValueError(f"LLM API returned invalid response (no choices). Model: {model}")
 
-        if not content:
-            logger.warning(f"LLM returned empty string for model {model}")
-            raise ValueError(f"LLM returned empty response. Model: {model}")
+            if not response.choices[0].message or response.choices[0].message.content is None:
+                logger.error(f"LLM API returned empty message content. Response: {response}")
+                raise ValueError(f"LLM API returned empty content. Model: {model}")
 
-        logger.debug(f"Generated note content (length: {len(content)} chars)")
-        return content
+            content = response.choices[0].message.content.strip()
 
-    except Exception as e:
-        logger.error(f"Error calling LLM API: {e}")
-        raise
+            if not content:
+                logger.warning(f"LLM returned empty string for model {model}")
+                raise ValueError(f"LLM returned empty response. Model: {model}")
+
+            logger.debug(f"Generated note content (length: {len(content)} chars)")
+            return content
+
+        except Exception as e:
+            last_error = e
+            logger.error(f"LLM API error (attempt {attempt}/{max_attempts}): {e}")
+
+            if attempt < max_attempts:
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                import time
+                time.sleep(retry_delay)
+            else:
+                logger.error(f"All {max_attempts} attempts failed for model {model}")
+
+    # If we get here, all retries failed
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"LLM API failed after {max_attempts} attempts")
 
 
 def _fallback_template(metadata: Dict, language: str) -> str:
