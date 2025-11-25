@@ -114,6 +114,12 @@ app.include_router(ingestion_router)
 app.include_router(processing_router)
 app.include_router(settings_router)
 
+# Health check endpoint pour Docker healthcheck
+@app.get("/health")
+async def health_check():
+    """Health check endpoint pour monitoring et Docker healthcheck"""
+    return {"status": "healthy"}
+
 @app.get("/", response_class=HTMLResponse)
 async def homepage(request: Request):
     """Main application page - shows projects if logged in, or login prompt"""

@@ -45,5 +45,16 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Commande de démarrage
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Variables Uvicorn avec valeurs par défaut
+ENV UVICORN_WORKERS=4
+ENV UVICORN_TIMEOUT_KEEP_ALIVE=120
+ENV UVICORN_LIMIT_CONCURRENCY=100
+
+# Commande de démarrage (shell form pour expansion variables)
+CMD uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers ${UVICORN_WORKERS} \
+    --timeout-keep-alive ${UVICORN_TIMEOUT_KEEP_ALIVE} \
+    --limit-concurrency ${UVICORN_LIMIT_CONCURRENCY} \
+    --backlog 2048
