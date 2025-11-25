@@ -619,6 +619,104 @@
     margin-bottom: var(--space-1);
   }
 
+  /* Multi-Item Progress (N mini-bars) */
+  .multi-progress-container {
+    margin-top: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .mini-progress-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-md);
+    border-left: 3px solid var(--color-brand-primary);
+    transition: all 0.3s ease;
+    animation: slideIn 0.3s ease;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(-10px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .mini-progress-item.completed {
+    border-left-color: var(--color-success);
+    opacity: 0.7;
+  }
+
+  .mini-progress-item.error {
+    border-left-color: var(--color-error);
+  }
+
+  .mini-progress-item.skipped {
+    border-left-color: var(--color-warning);
+    opacity: 0.6;
+  }
+
+  .mini-progress-item.exists {
+    border-left-color: var(--color-brand-primary);
+    opacity: 0.7;
+  }
+
+  .mini-progress-icon {
+    font-size: 1.2em;
+    min-width: 24px;
+    text-align: center;
+  }
+
+  .mini-progress-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .mini-progress-title {
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mini-progress-bar-wrapper {
+    height: 4px;
+    background: var(--color-border);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    margin-top: 4px;
+  }
+
+  .mini-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #8B5CF6, #A78BFA);
+    border-radius: var(--radius-full);
+    transition: width 0.3s ease;
+    width: 0%;
+  }
+
+  .mini-progress-bar.processing {
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  .mini-progress-status {
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+    min-width: 60px;
+    text-align: right;
+  }
+
   /* Result Box */
   .result {
     margin-top: var(--space-4);
@@ -1222,12 +1320,18 @@
             </button>
 
             <div id="zoteroProgress" class="progress-container" style="display:none;">
+              <!-- Global progress header -->
               <div class="progress-header">
                 <span id="zoteroProgressCount" class="progress-count">0/0</span>
                 <span id="zoteroProgressStatus" class="progress-status">Processing...</span>
               </div>
+              <!-- Global progress bar -->
               <div class="progress-bar-wrapper">
                 <div id="zoteroProgressBar" class="progress-bar-fill zotero"></div>
+              </div>
+              <!-- Multi-item progress container -->
+              <div id="zoteroMultiProgress" class="multi-progress-container">
+                <!-- Mini-bars will be dynamically inserted here -->
               </div>
               <p id="zoteroProgressText" class="text-sm text-tertiary mt-2"></p>
             </div>
@@ -2152,15 +2256,18 @@
     const progressCount = document.getElementById('zoteroProgressCount');
     const progressStatus = document.getElementById('zoteroProgressStatus');
     const progressText = document.getElementById('zoteroProgressText');
+    const multiProgressContainer = document.getElementById('zoteroMultiProgress');
 
     if (!ensureSessionPath(resultDiv)) return;
 
+    // Reset UI
     resultDiv.innerHTML = '';
     progressDiv.style.display = 'block';
     progressBar.style.width = '0%';
     progressCount.textContent = '0/0';
     progressStatus.textContent = 'Starting...';
     progressText.textContent = '';
+    multiProgressContainer.innerHTML = '';
 
     const model = document.getElementById('zoteroModelInput').value.trim();
     const extendedAnalysis = document.getElementById('extendedAnalysisCheckbox').checked;
@@ -2171,12 +2278,65 @@
     formData.append('extended_analysis', extendedAnalysis ? 'true' : 'false');
 
     const processedItems = [];
+    const itemElements = new Map(); // Track mini-bar elements by item name
+
+    // Helper: Create or update mini-progress bar
+    function updateMiniBar(itemName, status, current, total) {
+      const statusIcons = { created: '✅', exists: 'ℹ️', skipped: '⏭️', error: '❌', processing: '⏳' };
+      const statusIcon = statusIcons[status] || '⏳';
+      const isComplete = ['created', 'exists', 'skipped', 'error'].includes(status);
+      const itemId = `mini-${itemName.replace(/[^a-zA-Z0-9]/g, '_')}`;
+
+      let element = itemElements.get(itemName);
+
+      if (!element) {
+        // Create new mini-bar
+        element = document.createElement('div');
+        element.id = itemId;
+        element.className = 'mini-progress-item';
+        element.innerHTML = `
+          <span class="mini-progress-icon">${statusIcon}</span>
+          <div class="mini-progress-info">
+            <div class="mini-progress-title" title="${itemName}">${itemName}</div>
+            <div class="mini-progress-bar-wrapper">
+              <div class="mini-progress-bar processing"></div>
+            </div>
+          </div>
+          <span class="mini-progress-status">${status}</span>
+        `;
+        // Insert at top (newest first)
+        multiProgressContainer.insertBefore(element, multiProgressContainer.firstChild);
+        itemElements.set(itemName, element);
+      }
+
+      // Update existing element
+      const iconEl = element.querySelector('.mini-progress-icon');
+      const barEl = element.querySelector('.mini-progress-bar');
+      const statusEl = element.querySelector('.mini-progress-status');
+
+      iconEl.textContent = statusIcon;
+      statusEl.textContent = status;
+
+      if (isComplete) {
+        element.classList.remove('processing');
+        element.classList.add(status);
+        barEl.classList.remove('processing');
+        barEl.style.width = '100%';
+      } else {
+        barEl.style.width = '50%'; // Indeterminate progress for processing items
+      }
+
+      // Auto-scroll to show latest
+      multiProgressContainer.scrollTop = 0;
+    }
 
     try {
       const response = await fetch('/generate_zotero_notes_sse', { method: 'POST', body: formData });
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let totalItems = 0;
+      let completedCount = 0;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -2189,36 +2349,48 @@
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.substring(6));
+
               if (data.type === 'init') {
-                progressCount.textContent = `0/${data.total}`;
+                totalItems = data.total;
+                progressCount.textContent = `0/${totalItems}`;
                 progressStatus.textContent = data.message || 'Processing...';
+
               } else if (data.type === 'progress') {
-                const percent = Math.round((data.current / data.total) * 100);
+                const itemName = data.item || `Item ${data.current}`;
+                const status = data.status || 'processing';
+
+                // Update global progress bar
+                completedCount = data.current;
+                const percent = Math.round((completedCount / totalItems) * 100);
                 progressBar.style.width = `${percent}%`;
-                progressCount.textContent = `${data.current}/${data.total}`;
-                const statusIcon = { created: '✅', exists: 'ℹ️', skipped: '⏭️', error: '❌' }[data.status] || '⏳';
-                progressStatus.textContent = `${statusIcon} ${data.item || 'Processing...'}`;
-                progressText.textContent = data.status ? `Status: ${data.status}` : '';
+                progressCount.textContent = `${completedCount}/${totalItems}`;
+                progressStatus.textContent = `Processing ${completedCount}/${totalItems}...`;
+
+                // Update mini-bar for this item
+                updateMiniBar(itemName, status, data.current, totalItems);
+
+                // Store for final summary
                 if (data.item) processedItems.push(data);
+
               } else if (data.type === 'complete') {
                 progressBar.style.width = '100%';
                 progressStatus.textContent = 'Complete!';
+                progressText.textContent = '';
+
                 const s = data.summary;
-                let html = `<div class="alert alert-success mb-4"><strong>Summary:</strong> ✅ Created: ${s.created} | ℹ️ Exists: ${s.exists} | ⏭️ Skipped: ${s.skipped} | ❌ Errors: ${s.errors}</div>`;
-                html += '<div class="text-sm"><strong>Details:</strong>';
-                processedItems.forEach(item => {
-                  const icon = { created: '✅', exists: 'ℹ️', skipped: '⏭️', error: '❌' }[item.status] || '❓';
-                  const color = { created: 'var(--color-success)', exists: 'var(--color-brand-primary)', skipped: 'var(--color-warning)', error: 'var(--color-error)' }[item.status] || 'var(--color-text-tertiary)';
-                  html += `<div style="margin: 8px 0; padding: 8px; background: var(--color-bg-tertiary); border-left: 3px solid ${color}; border-radius: 4px;">
-                    ${icon} <strong>${item.item}</strong><br><small class="text-secondary">Status: ${item.status}</small>
-                    ${item.message ? `<br><small class="text-tertiary">${item.message}</small>` : ''}
-                  </div>`;
-                });
-                html += '</div>';
+                let html = `<div class="alert alert-success mb-4">
+                  <strong>Summary:</strong>
+                  ✅ Created: ${s.created} |
+                  ℹ️ Exists: ${s.exists} |
+                  ⏭️ Skipped: ${s.skipped} |
+                  ❌ Errors: ${s.errors}
+                </div>`;
                 resultDiv.innerHTML = html;
+
                 completeStep('zoteroNotes', null);
                 markSectionCompleted('zotero-notes-section');
                 showToast('Zotero notes generated!', 'success');
+
               } else if (data.type === 'error') {
                 progressStatus.textContent = 'Error';
                 resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
