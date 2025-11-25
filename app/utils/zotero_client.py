@@ -376,7 +376,7 @@ def update_item_abstract(
     new_abstract: str,
     api_key: str,
     separator: str = "\n\n---\n\n",
-    mode: str = "replace"
+    mode: str = "append"
 ) -> Dict:
     """
     Update an item's abstractNote field.
@@ -388,7 +388,7 @@ def update_item_abstract(
         new_abstract: New abstract text
         api_key: Zotero API key
         separator: Separator between existing and new abstract (only used in append mode)
-        mode: "replace" (default) replaces the abstract, "append" appends to existing
+        mode: "append" (default) appends to existing, "replace" replaces entirely
 
     Returns:
         Dictionary with response data including:
