@@ -375,21 +375,20 @@ def update_item_abstract(
     item_key: str,
     new_abstract: str,
     api_key: str,
-    separator: str = "\n\n---\n\n"
+    separator: str = "\n\n---\n\n",
+    mode: str = "replace"
 ) -> Dict:
     """
-    Update an item's abstractNote field by appending new content.
-
-    This function retrieves the existing abstract and appends the new content,
-    preserving any existing abstract text.
+    Update an item's abstractNote field.
 
     Args:
         library_type: "users" or "groups"
         library_id: The library ID
         item_key: The item key to update
-        new_abstract: New abstract text to append
+        new_abstract: New abstract text
         api_key: Zotero API key
-        separator: Separator between existing and new abstract (default: markdown divider)
+        separator: Separator between existing and new abstract (only used in append mode)
+        mode: "replace" (default) replaces the abstract, "append" appends to existing
 
     Returns:
         Dictionary with response data including:
@@ -417,11 +416,13 @@ def update_item_abstract(
 
     logger.info(f"Current abstract length: {len(current_abstract)} chars, version: {item_version}")
 
-    # Build new abstract by appending
-    if current_abstract and current_abstract.strip():
+    # Build new abstract based on mode
+    if mode == "append" and current_abstract and current_abstract.strip():
         updated_abstract = current_abstract + separator + new_abstract
+        logger.info(f"Appending to existing abstract (mode={mode})")
     else:
         updated_abstract = new_abstract
+        logger.info(f"Replacing abstract (mode={mode})")
 
     # Build the PATCH payload (only update abstractNote)
     patch_payload = {
