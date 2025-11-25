@@ -1,8 +1,15 @@
 """
-SSE (Server-Sent Events) helper utilities for streaming subprocess progress.
+SSE Helpers
+===========
 
-This module provides async generators for streaming subprocess output as SSE events,
-with specialized parsers for different script output formats.
+This module provides utilities for implementing Server-Sent Events (SSE) to stream
+real-time updates from background processes to the client. It is particularly useful
+for long-running tasks like file processing and ingestion.
+
+Key Features:
+- Subprocess Streaming: Captures stdout/stderr from subprocesses and yields SSE events.
+- Progress Parsing: Includes parsers for various output formats (tqdm, custom logs).
+- Event Formatting: Formats data into standard SSE messages (data: ...).
 """
 
 import asyncio

@@ -1,13 +1,15 @@
 """
-Zotero API v3 client for RAGpy.
+Zotero API Client
+=================
 
-This module provides functions to interact with Zotero API v3 for:
-- Verifying API keys
-- Retrieving library versions
-- Checking if notes exist
-- Creating child notes with automatic retry and concurrency control
+This module implements a client for the Zotero Web API v3. It handles authentication,
+requests, and error handling for interacting with Zotero libraries (users and groups).
 
-API Documentation: https://www.zotero.org/support/dev/web_api/v3/start
+Key Features:
+- Authentication: Verifies API keys and permissions.
+- Note Management: Checks for existing notes and creates new child notes.
+- Concurrency Control: Handles Zotero's versioning system (If-Unmodified-Since-Version).
+- Robustness: Implements retries with exponential backoff for rate limits and errors.
 """
 
 import time
@@ -233,11 +235,16 @@ def create_child_note(
         library_version: Optional library version for concurrency control
 
     Returns:
-        Dictionary with response data including:
-        - success: bool
-        - note_key: str (if successful)
-        - message: str
-        - new_version: str (if successful)
+        A dictionary summarizing the outcome of the operation:
+        - `success` (bool): `True` if the note was created successfully,
+          otherwise `False`.
+        - `note_key` (str): The unique key of the newly created note,
+          present only on success.
+        - `message` (str): A human-readable status message.
+        - `new_version` (str): The new library version after the update,
+          which can be used for subsequent requests.
+        - `raw_response` (dict, optional): The raw response from the API
+          in case of an unexpected success format.
 
     Raises:
         ZoteroAPIError: If all retry attempts fail
@@ -391,11 +398,15 @@ def update_item_abstract(
         mode: "append" (default) appends to existing, "replace" replaces entirely
 
     Returns:
-        Dictionary with response data including:
-        - success: bool
-        - message: str
-        - new_version: str (if successful)
-        - previous_abstract: str (the abstract before update)
+        A dictionary summarizing the outcome of the operation:
+        - `success` (bool): `True` if the abstract was updated successfully,
+          otherwise `False`.
+        - `message` (str): A human-readable status message.
+        - `new_version` (str): The new library version after the update.
+        - `previous_abstract` (str): The content of the abstract field
+          before the update was applied.
+        - `new_abstract_length` (int): The character length of the new
+          abstract.
 
     Raises:
         ZoteroAPIError: If the request fails

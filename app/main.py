@@ -3,6 +3,23 @@ import os
 import sys
 import csv
 
+"""
+Main Application Module
+=======================
+
+This module initializes the FastAPI application, configures logging, sets up
+database connections, and registers all API routers. It serves as the entry
+point for the RAGpy application.
+
+Key Features:
+- FastAPI application initialization with lifespan management.
+- Logging configuration (console and file handlers).
+- Database initialization on startup.
+- Registration of all application routers (Auth, Users, Admin, Projects, Pipeline, etc.).
+- Health check endpoints for monitoring.
+- Static file mounting and template configuration.
+"""
+
 # Increase CSV field size limit
 try:
     csv.field_size_limit(sys.maxsize)
@@ -71,7 +88,18 @@ logger.info(f"Application log file: {app_log_file}")
 # --- Database Initialization ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan handler for startup/shutdown events"""
+    """
+    Manages application startup and shutdown events.
+
+    This async context manager is used by FastAPI to handle tasks that need to
+    be executed when the application starts and before it shuts down.
+
+    - On startup: It initializes the database by calling `init_database()`.
+    - On shutdown: It logs a shutdown message.
+
+    Args:
+        app (FastAPI): The FastAPI application instance.
+    """
     # Startup: Initialize database
     logger.info("Initializing database...")
     init_database()
@@ -117,12 +145,129 @@ app.include_router(settings_router)
 # Health check endpoint pour Docker healthcheck
 @app.get("/health")
 async def health_check():
-    """Health check endpoint pour monitoring et Docker healthcheck"""
+    """
+    Provides a health check endpoint for monitoring and Docker health checks.
+
+    This endpoint can be used by external services to verify that the application
+    is running and responsive. It returns a simple JSON response indicating a
+    healthy status.
+
+    Returns:
+        dict: A dictionary with a "status" key set to "healthy".
+    """
     return {"status": "healthy"}
+
+
+@app.get("/health/detailed")
+async def health_detailed():
+    """
+    Health check détaillé avec métriques système.
+
+    Retourne des informations sur:
+    - CPU et mémoire
+    - Espace disque
+    - Connectivité base de données
+    - Sessions actives
+    - Configuration workers
+
+    Returns:
+        JSONResponse: Métriques système avec status code 200 (healthy) ou 503 (degraded)
+    """
+    import psutil
+    import sqlite3
+    from datetime import datetime, timezone
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import or_
+
+    # CPU et RAM
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+    mem = psutil.virtual_memory()
+
+    # Database connectivity
+    db_status = "unknown"
+    try:
+        db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ragpy.db")
+        conn = sqlite3.connect(db_path, timeout=5)
+        conn.execute("SELECT 1")
+        conn.close()
+        db_status = "healthy"
+    except Exception as e:
+        db_status = f"unhealthy: {str(e)}"
+
+    # Disk space
+    try:
+        disk = psutil.disk_usage('/')
+        disk_free_gb = disk.free / 1e9
+        disk_percent = disk.percent
+    except Exception:
+        disk_free_gb = 0
+        disk_percent = 100
+
+    # Active sessions count (sessions in processing states)
+    active_sessions = 0
+    try:
+        from app.models.pipeline_session import PipelineSession, SessionStatus
+        db = next(get_db())
+        # Count sessions in active processing states
+        active_statuses = [
+            SessionStatus.EXTRACTING,
+            SessionStatus.CHUNKING,
+            SessionStatus.EMBEDDING,
+            SessionStatus.UPLOADING
+        ]
+        active_sessions = db.query(PipelineSession).filter(
+            or_(*[PipelineSession.status == s for s in active_statuses])
+        ).count()
+        db.close()
+    except Exception:
+        pass
+
+    # Build health data
+    is_healthy = db_status == "healthy" and cpu_percent < 90 and mem.percent < 90
+
+    health_data = {
+        "status": "healthy" if is_healthy else "degraded",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "system": {
+            "cpu_percent": round(cpu_percent, 1),
+            "memory_percent": round(mem.percent, 1),
+            "memory_available_gb": round(mem.available / 1e9, 2),
+            "disk_free_gb": round(disk_free_gb, 2),
+            "disk_percent": round(disk_percent, 1)
+        },
+        "database": {
+            "status": db_status,
+            "active_sessions": active_sessions
+        },
+        "workers": {
+            "uvicorn_workers": int(os.getenv('UVICORN_WORKERS', 1)),
+            "max_workers_configured": int(os.getenv('DEFAULT_MAX_WORKERS', os.cpu_count() or 4)),
+            "max_concurrent_llm": int(os.getenv('MAX_CONCURRENT_LLM_CALLS', 5))
+        }
+    }
+
+    status_code = 200 if is_healthy else 503
+    return JSONResponse(content=health_data, status_code=status_code)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def homepage(request: Request):
-    """Main application page - shows projects if logged in, or login prompt"""
+    """
+    Serves the main homepage of the application.
+
+    This endpoint determines whether a user is logged in by checking for an
+    access token in the request cookies.
+
+    - If the user is authenticated, it renders the main projects page (`user/projects.html`).
+    - If the user is not authenticated, it displays the login page (`auth/login.html`).
+
+    Args:
+        request (Request): The incoming FastAPI request object.
+
+    Returns:
+        TemplateResponse: An HTML response rendering either the projects page
+                          or the login page, based on authentication status.
+    """
     # Get optional user from cookie
     db = next(get_db())
     try:

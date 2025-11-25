@@ -1,5 +1,16 @@
 """
-Authentication middleware and dependencies
+Authentication Middleware
+=========================
+
+This module defines FastAPI dependencies and utilities for handling user authentication
+and authorization. It implements JWT-based security using `HTTPBearer`.
+
+Key Dependencies:
+- `get_current_user`: Enforces authentication and returns the current user.
+- `get_optional_user`: Returns the current user if authenticated, else None.
+- `get_current_active_user`: Ensures the user is authenticated, active, and verified.
+- `require_admin`: Restricts access to administrators.
+- `require_roles`: Restricts access based on user roles.
 """
 from typing import List, Optional
 from fastapi import Depends, HTTPException, Request, status
@@ -19,11 +30,18 @@ def get_token_from_request(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ) -> Optional[str]:
     """
-    Extrait le token JWT de la requête.
+    Extracts a JWT token from the request.
 
-    Cherche dans l'ordre:
-    1. Header Authorization: Bearer <token>
-    2. Cookie access_token
+    It checks for the token in the following order:
+    1. The `Authorization` header (as a "Bearer" token).
+    2. The `access_token` cookie.
+
+    Args:
+        request: The incoming FastAPI `Request` object.
+        credentials: The `Authorization` header credentials, if present.
+
+    Returns:
+        The extracted token string if found, otherwise None.
     """
     # D'abord vérifier le header Authorization
     if credentials and credentials.credentials:
@@ -43,14 +61,22 @@ async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ) -> User:
     """
-    Dependency pour obtenir l'utilisateur actuellement connecté.
+    FastAPI dependency to get the currently authenticated user.
 
-    Lève une exception 401 si non authentifié.
+    This function enforces authentication. It retrieves the token from the
+    request, decodes it, and fetches the corresponding user from the database.
 
-    Usage:
-        @app.get("/protected")
-        async def protected_route(user: User = Depends(get_current_user)):
-            ...
+    Args:
+        request: The incoming FastAPI `Request` object.
+        db: The database session dependency.
+        credentials: The `Authorization` header credentials.
+
+    Returns:
+        The authenticated `User` object.
+
+    Raises:
+        HTTPException: If the user is not authenticated (401), the token is
+                       invalid, or the user is not found.
     """
     token = get_token_from_request(request, credentials)
 
@@ -98,17 +124,18 @@ async def get_optional_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ) -> Optional[User]:
     """
-    Dependency pour obtenir l'utilisateur si connecté, None sinon.
+    FastAPI dependency to get the current user if authenticated, or None otherwise.
 
-    N'élève pas d'exception si non authentifié.
+    This function does not raise an exception if the user is not authenticated,
+    making it suitable for endpoints that have optional authentication.
 
-    Usage:
-        @app.get("/public")
-        async def public_route(user: Optional[User] = Depends(get_optional_user)):
-            if user:
-                # Utilisateur connecté
-            else:
-                # Visiteur anonyme
+    Args:
+        request: The incoming FastAPI `Request` object.
+        db: The database session dependency.
+        credentials: The `Authorization` header credentials.
+
+    Returns:
+        The `User` object if authenticated, otherwise None.
     """
     token = get_token_from_request(request, credentials)
 
@@ -131,16 +158,20 @@ async def get_current_active_user(
     user: User = Depends(get_current_user)
 ) -> User:
     """
-    Dependency pour obtenir un utilisateur actif et vérifié.
+    FastAPI dependency to get an active and verified user.
 
-    Lève une exception:
-    - 403 si le compte est désactivé ou non vérifié
-    - 423 si le compte est verrouillé
+    This function builds on `get_current_user` by adding checks to ensure
+    the user's account is active, not locked, and has been verified.
 
-    Usage:
-        @app.get("/active-only")
-        async def active_route(user: User = Depends(get_current_active_user)):
-            ...
+    Args:
+        user: The user object from `get_current_user`.
+
+    Returns:
+        The `User` object if the user is active and verified.
+
+    Raises:
+        HTTPException: If the account is inactive (403), locked (423), or
+                       not verified (403).
     """
     if not user.is_active:
         raise HTTPException(

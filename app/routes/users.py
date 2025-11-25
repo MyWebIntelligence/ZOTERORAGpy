@@ -1,5 +1,14 @@
 """
-User profile routes
+User Profile Routes
+===================
+
+This module handles user profile management. It allows users to view and update
+their own profile information and manage their personal API credentials.
+
+Key Features:
+- Profile Management: View and update personal details (name, organization, etc.).
+- Account Deletion: Allow users to delete their own accounts (with safeguards).
+- Credential Management: Manage personal API keys (masked for security).
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session

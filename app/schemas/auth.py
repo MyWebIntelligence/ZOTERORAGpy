@@ -1,5 +1,15 @@
 """
-Pydantic schemas for authentication
+Authentication Schemas
+======================
+
+This module defines Pydantic schemas for authentication-related operations,
+including user registration, login, token management, and password resets.
+
+Key Schemas:
+- `UserRegister`: User registration with validation.
+- `UserLogin`: User login credentials.
+- `TokenResponse`: JWT token response structure.
+- `PasswordReset`: Password reset with token validation.
 """
 from typing import Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator

@@ -1,5 +1,15 @@
 """
-Audit log model for tracking user actions
+Audit Log Model
+===============
+
+This module defines the `AuditLog` model and associated utilities for tracking
+user actions within the application. It provides a comprehensive history of
+who did what, when, and on which resource.
+
+Key Components:
+- `AuditAction`: Constants defining all trackable action types.
+- `AuditLog`: The SQLAlchemy model for storing audit records.
+- `create_audit_log`: Utility function to easily create new audit entries.
 """
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, JSON
 from sqlalchemy.orm import relationship

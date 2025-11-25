@@ -1,3 +1,17 @@
+"""
+Integration Tests for Main Application
+======================================
+
+This module contains integration tests for the FastAPI application defined in `app.main`.
+It uses `fastapi.testclient.TestClient` to simulate HTTP requests and verify
+endpoint behavior, particularly for the vector database upload functionality.
+
+Key Tests:
+- Pinecone upload success and error handling.
+- Weaviate upload success.
+- Qdrant upload success.
+- Input validation (missing files, missing parameters).
+"""
 import unittest
 from unittest.mock import patch, MagicMock
 import os
@@ -48,6 +62,12 @@ TEST_CHUNKS_JSON_FULLPATH = os.path.join(TEST_UPLOAD_PATH, TEST_CHUNKS_JSON_FILE
 
 
 class TestMainApp(unittest.TestCase):
+    """
+    Test Suite for Main Application Endpoints.
+    
+    This class groups all integration tests for the main application.
+    It sets up a temporary environment (dummy .env, chunks file) to isolate tests.
+    """
 
     @classmethod
     def setUpClass(cls):

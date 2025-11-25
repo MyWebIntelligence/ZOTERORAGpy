@@ -1,8 +1,15 @@
 """
-Zotero metadata parser for RAGpy.
+Zotero Parser
+=============
 
-This module extracts library information (library_type, library_id, itemKey)
-from Zotero export JSON files.
+This module parses Zotero JSON export files to extract library metadata and item
+information. It supports both modern and legacy Zotero export formats.
+
+Key Features:
+- Library Detection: Extracts library type (users/groups) and library ID.
+- Item Extraction: Retrieves item keys and basic metadata from JSON exports.
+- Format Compatibility: Handles multiple Zotero export formats (direct array, object with items).
+- Fallback Mechanism: Uses environment variables if metadata is missing from JSON.
 """
 
 import os

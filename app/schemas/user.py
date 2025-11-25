@@ -1,5 +1,15 @@
 """
-Pydantic schemas for user management
+User Management Schemas
+=======================
+
+This module defines Pydantic schemas for user management operations, including
+user profiles, updates, credentials, and admin statistics.
+
+Key Schemas:
+- `UserResponse`: User profile data for API responses.
+- `UserUpdate`: Schema for updating user profiles.
+- `UserCredentialsResponse`: Masked user credentials for display.
+- `UserCredentialsUpdate`: Schema for updating user API credentials.
 """
 from datetime import datetime
 from typing import List, Optional

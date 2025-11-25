@@ -1,6 +1,16 @@
 """
-Email Service using Resend
-Handles verification emails and password reset emails
+Email Service
+=============
+
+This module provides the `EmailService` class for handling all email communications
+within the application. It uses the Resend API to send transactional emails such as
+account verification, password resets, and welcome messages.
+
+Key Features:
+- Template Rendering: Uses Jinja2 to render HTML email templates.
+- Resend Integration: Sends emails via the Resend API.
+- Lazy Initialization: Initializes resources only when needed.
+- Availability Check: Safely handles missing credentials or dependencies.
 """
 import logging
 from pathlib import Path

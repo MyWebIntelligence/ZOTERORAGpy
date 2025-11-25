@@ -1,6 +1,17 @@
 """
-Credential encryption/decryption utilities for per-user API key storage.
-Uses Fernet symmetric encryption with key derived from JWT_SECRET_KEY.
+Credential Management Module
+============================
+
+This module handles the secure encryption, decryption, and management of user API keys.
+It uses Fernet symmetric encryption (from the `cryptography` library) to store sensitive
+credentials in the database. The encryption key is derived from the application's
+`JWT_SECRET_KEY` to ensure security.
+
+Key Features:
+- Derivation of Fernet key from `JWT_SECRET_KEY`.
+- Encryption and decryption of credential dictionaries.
+- Masking of credentials for safe UI display.
+- Retrieval of credentials with environment variable fallback.
 """
 import json
 import base64
@@ -9,6 +20,8 @@ from typing import Dict, Optional, Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import settings
+from app.models.user import User
+from sqlalchemy.orm import Session
 
 
 # Derive a Fernet-compatible key from JWT_SECRET_KEY
@@ -121,7 +134,7 @@ def mask_credential(value: str, show_chars: int = 4) -> str:
     return "•" * (len(value) - show_chars) + value[-show_chars:]
 
 
-def get_user_credentials(user) -> Dict[str, str]:
+def get_user_credentials(user: User) -> Dict[str, str]:
     """
     Get decrypted credentials for a user.
 
@@ -137,7 +150,7 @@ def get_user_credentials(user) -> Dict[str, str]:
     return decrypt_credentials(user.api_credentials)
 
 
-def get_credential_or_env(user, credential_key: str, env_key: str = None) -> Optional[str]:
+def get_credential_or_env(user: User, credential_key: str, env_key: str = None) -> Optional[str]:
     """
     Get a credential value from user settings, falling back to environment.
 
@@ -163,7 +176,7 @@ def get_credential_or_env(user, credential_key: str, env_key: str = None) -> Opt
     return os.getenv(env_key)
 
 
-def get_masked_credentials(user) -> Dict[str, Any]:
+def get_masked_credentials(user: User) -> Dict[str, Any]:
     """
     Get credentials with values masked for safe display.
 
@@ -186,7 +199,7 @@ def get_masked_credentials(user) -> Dict[str, Any]:
     return result
 
 
-def update_user_credentials(user, updates: Dict[str, str], db) -> None:
+def update_user_credentials(user: User, updates: Dict[str, str], db: Session) -> None:
     """
     Update specific credentials for a user, preserving existing ones.
 

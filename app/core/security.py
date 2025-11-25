@@ -1,5 +1,13 @@
 """
-Security utilities for password hashing and JWT token management
+Security Utilities Module
+=========================
+
+This module provides essential security functions for the application, including:
+- Password hashing and verification using `bcrypt`.
+- JWT (JSON Web Token) creation, decoding, and validation for authentication.
+- Secure token generation for email verification and password resets.
+
+It relies on the `python-jose` library for JWT operations and `bcrypt` for password hashing.
 """
 import secrets
 from datetime import datetime, timedelta
@@ -13,14 +21,14 @@ from app.config import settings
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Vérifie si un mot de passe en clair correspond au hash stocké.
+    Verifies if a plain text password matches a stored bcrypt hash.
 
     Args:
-        plain_password: Mot de passe en clair
-        hashed_password: Hash bcrypt stocké
+        plain_password: The plain text password to verify.
+        hashed_password: The stored bcrypt hash.
 
     Returns:
-        True si le mot de passe correspond, False sinon
+        True if the password matches, False otherwise.
     """
     password_bytes = plain_password.encode('utf-8')
     hashed_bytes = hashed_password.encode('utf-8')
@@ -29,13 +37,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def get_password_hash(password: str) -> str:
     """
-    Génère un hash bcrypt pour un mot de passe.
+    Generates a bcrypt hash for a given password.
 
     Args:
-        password: Mot de passe en clair
+        password: The plain text password to hash.
 
     Returns:
-        Hash bcrypt du mot de passe
+        The bcrypt hash of the password as a string.
     """
     password_bytes = password.encode('utf-8')
     salt = bcrypt.gensalt(rounds=settings.BCRYPT_ROUNDS)
@@ -49,15 +57,17 @@ def create_access_token(
     additional_claims: Optional[dict] = None
 ) -> str:
     """
-    Crée un token d'accès JWT.
+    Creates a new JWT access token.
 
     Args:
-        subject: Identifiant du sujet (généralement user_id)
-        expires_delta: Durée de validité (défaut: JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
-        additional_claims: Claims supplémentaires à inclure
+        subject: The subject of the token (typically the user ID).
+        expires_delta: The lifespan of the token. Defaults to the value of
+                       `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` from settings.
+        additional_claims: Optional dictionary of additional claims to include
+                           in the token payload.
 
     Returns:
-        Token JWT encodé
+        The encoded JWT access token as a string.
     """
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -89,14 +99,15 @@ def create_refresh_token(
     expires_delta: Optional[timedelta] = None
 ) -> str:
     """
-    Crée un token de rafraîchissement JWT.
+    Creates a new JWT refresh token.
 
     Args:
-        subject: Identifiant du sujet (généralement user_id)
-        expires_delta: Durée de validité (défaut: JWT_REFRESH_TOKEN_EXPIRE_DAYS)
+        subject: The subject of the token (typically the user ID).
+        expires_delta: The lifespan of the token. Defaults to the value of
+                       `JWT_REFRESH_TOKEN_EXPIRE_DAYS` from settings.
 
     Returns:
-        Token JWT encodé
+        The encoded JWT refresh token as a string.
     """
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -122,13 +133,13 @@ def create_refresh_token(
 
 def decode_token(token: str) -> Optional[dict]:
     """
-    Décode et valide un token JWT.
+    Decodes and validates a JWT token.
 
     Args:
-        token: Token JWT à décoder
+        token: The JWT token to decode.
 
     Returns:
-        Payload du token si valide, None sinon
+        The token's payload as a dictionary if it is valid, otherwise None.
     """
     try:
         payload = jwt.decode(
@@ -143,26 +154,26 @@ def decode_token(token: str) -> Optional[dict]:
 
 def generate_verification_token() -> str:
     """
-    Génère un token sécurisé pour la vérification d'email ou reset de mot de passe.
+    Generates a secure token for email verification or password reset.
 
     Returns:
-        Token aléatoire de 32 caractères hexadécimaux
+        A random 32-character hexadecimal token.
     """
     return secrets.token_hex(32)
 
 
 def generate_reset_token() -> str:
     """
-    Génère un token sécurisé pour le reset de mot de passe.
+    Generates a secure token for password reset.
 
     Returns:
-        Token aléatoire URL-safe
+        A URL-safe random token.
     """
     return secrets.token_urlsafe(32)
 
 
 class TokenData:
-    """Structure pour les données extraites d'un token"""
+    """A data class for holding structured data extracted from a JWT."""
 
     def __init__(
         self,
@@ -177,13 +188,14 @@ class TokenData:
 
 def extract_token_data(token: str) -> Optional[TokenData]:
     """
-    Extrait les données structurées d'un token JWT.
+    Extracts structured data from a JWT token.
 
     Args:
-        token: Token JWT à analyser
+        token: The JWT token to analyze.
 
     Returns:
-        TokenData si valide, None sinon
+        A `TokenData` object containing the user ID, token type, and expiration
+        if the token is valid, otherwise None.
     """
     payload = decode_token(token)
     if payload is None:
