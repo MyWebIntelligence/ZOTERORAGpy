@@ -1,8 +1,16 @@
 """
-Process Manager - Gestionnaire thread-safe des processus par session.
+Process Manager
+===============
 
-Permet d'isoler les processus par session utilisateur pour que le bouton
-"Stop" ne tue que les processus de la session concernée.
+This module provides a thread-safe singleton `ProcessManager` to track and control
+background subprocesses spawned by the application. It ensures that processes are
+isolated by user session, allowing for targeted termination without affecting other users.
+
+Key Features:
+- Session Isolation: Tracks PIDs associated with specific session IDs.
+- Thread Safety: Uses locks to ensure safe concurrent access.
+- Graceful Shutdown: Attempts SIGTERM before resorting to SIGKILL.
+- Cleanup: Automatically removes dead processes from the registry.
 """
 
 import os

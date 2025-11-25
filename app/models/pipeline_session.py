@@ -1,5 +1,14 @@
 """
-Pipeline Session model - tracks pipeline executions per project
+Pipeline Session Model
+======================
+
+This module defines the `PipelineSession` model, which tracks the state and progress
+of document processing pipelines. Each session represents a distinct execution run
+associated with a project.
+
+Key Components:
+- `SessionStatus`: Enumeration of all possible pipeline states (e.g., EXTRACTING, CHUNKING).
+- `PipelineSession`: The SQLAlchemy model tracking status, counts, and errors.
 """
 from datetime import datetime
 from enum import Enum

@@ -1,3 +1,15 @@
+"""
+Settings Routes
+===============
+
+This module manages application-level settings and credentials. It allows users
+(typically admins or authorized users) to view and update API keys and configuration
+variables stored in the `.env` file.
+
+Key Features:
+- Credential Management: Retrieve and save API keys (OpenAI, Pinecone, etc.).
+- Environment Configuration: Interface for modifying the `.env` file safely.
+"""
 import os
 import logging
 from fastapi import APIRouter, Body

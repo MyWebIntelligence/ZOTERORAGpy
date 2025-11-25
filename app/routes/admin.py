@@ -1,5 +1,15 @@
 """
-Administration routes for user and system management
+Administration Routes
+=====================
+
+This module provides API endpoints for administrative tasks, including user management,
+system statistics, and pipeline session oversight. Access is restricted to users
+with the `ADMIN` role.
+
+Key Features:
+- User Management: List, update, delete, and toggle status of users.
+- System Stats: Dashboard statistics (user counts, project counts, etc.).
+- Session Management: View and delete pipeline sessions.
 """
 import os
 import shutil

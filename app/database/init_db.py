@@ -1,5 +1,14 @@
 """
-Database initialization and migration utilities
+Database Initialization Module
+==============================
+
+This module is responsible for initializing the database schema and performing
+necessary migrations on application startup.
+
+It handles:
+- Creating all tables defined in SQLAlchemy models.
+- Running manual migrations for schema changes (e.g., adding columns).
+- Verifying database connectivity.
 """
 import logging
 from sqlalchemy import inspect, text
@@ -11,8 +20,11 @@ logger = logging.getLogger(__name__)
 
 def run_migrations():
     """
-    Execute des migrations manuelles pour les colonnes ajoutees apres la creation initiale.
-    SQLAlchemy create_all ne modifie pas les tables existantes.
+    Executes manual database migrations for columns added after initial creation.
+
+    This function is necessary because SQLAlchemy's `create_all` does not
+    modify existing tables. It inspects the database and applies missing
+    columns, such as adding the `api_credentials` column to the `users` table.
     """
     inspector = inspect(engine)
 
@@ -29,8 +41,12 @@ def run_migrations():
 
 def init_database():
     """
-    Initialise la base de données en créant toutes les tables.
-    À appeler au démarrage de l'application.
+    Initializes the database by creating all necessary tables.
+
+    This function should be called on application startup. It imports all
+    SQLAlchemy models to ensure they are registered with the `Base.metadata`
+    and then creates all tables. It also triggers `run_migrations` to handle
+    any manual schema adjustments.
     """
     # Import des modèles pour qu'ils soient enregistrés dans Base.metadata
     from app.models import user, project, audit, pipeline_session  # noqa: F401
@@ -47,7 +63,12 @@ def init_database():
 
 
 def check_database_connection() -> bool:
-    """Vérifie que la connexion à la base de données fonctionne"""
+    """
+    Verifies that the database connection is functional.
+
+    Returns:
+        True if the connection is successful, False otherwise.
+    """
     try:
         inspector = inspect(engine)
         inspector.get_table_names()
@@ -58,6 +79,11 @@ def check_database_connection() -> bool:
 
 
 def get_table_names() -> list:
-    """Retourne la liste des tables existantes"""
+    """
+    Retrieves a list of all existing table names in the database.
+
+    Returns:
+        A list of table names as strings.
+    """
     inspector = inspect(engine)
     return inspector.get_table_names()

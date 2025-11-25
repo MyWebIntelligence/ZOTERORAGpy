@@ -1,5 +1,17 @@
 """
-Configuration centralisée pour RAGpy
+Configuration Module
+====================
+
+This module defines the configuration settings for the RAGpy application.
+It uses `pydantic-settings` (implicitly via class structure, though here it seems to be a plain class using os.getenv)
+or standard environment variable loading to manage configuration.
+
+It handles:
+- Base paths (data, uploads, logs).
+- Database connection strings.
+- Security settings (JWT, CORS).
+- External service credentials (OpenAI, Mistral, Pinecone, etc.).
+- Email configuration (Resend).
 """
 import os
 from pathlib import Path
@@ -22,7 +34,13 @@ LOGS_DIR.mkdir(exist_ok=True)
 
 
 class Settings:
-    """Configuration de l'application"""
+    """
+    Application Settings
+    --------------------
+    
+    This class acts as a centralized configuration holder.
+    It reads from environment variables and provides default values.
+    """
 
     # Application
     APP_NAME: str = "MyDoc Intelligence"

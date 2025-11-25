@@ -1,5 +1,15 @@
 """
-Project model for organizing user work
+Project Management Model
+========================
+
+This module defines the `Project` and `ProjectMember` models, which form the core
+of the application's organizational structure. Projects group user work and sessions,
+while memberships handle collaboration and access control.
+
+Key Components:
+- `ProjectRole`: Enumeration of user roles within a project (OWNER, COLLABORATOR, VIEWER).
+- `Project`: The main project entity.
+- `ProjectMember`: Association table for many-to-many user-project relationships.
 """
 from typing import Optional
 from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, String, Text

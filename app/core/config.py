@@ -1,3 +1,18 @@
+"""
+Core Configuration Constants
+============================
+
+This module defines constant paths and directories used throughout the application.
+It calculates absolute paths based on the file's location to ensure portability.
+
+Defined Paths:
+- `APP_DIR`: The main application directory (`app/`).
+- `RAGPY_DIR`: The project root directory.
+- `LOG_DIR`: Directory for application logs.
+- `UPLOAD_DIR`: Directory for user uploads and session data.
+- `STATIC_DIR`: Directory for static assets (CSS, JS, images).
+- `TEMPLATES_DIR`: Directory for Jinja2 templates.
+"""
 import os
 
 # --- Path Definitions ---

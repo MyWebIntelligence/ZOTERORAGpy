@@ -1,5 +1,14 @@
 """
-Page routes for rendering HTML templates
+Frontend Page Routes
+====================
+
+This module serves HTML pages using Jinja2 templates. It handles the rendering
+of both public pages (login, register) and protected pages (dashboard, projects).
+
+Key Features:
+- Template Rendering: Uses Jinja2 to render HTML with dynamic context.
+- Authentication Checks: Redirects unauthenticated users to login.
+- Context Injection: Provides common data (user info, flash messages) to templates.
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, Request, Query

@@ -1,8 +1,17 @@
 """
-LLM-based reading note generator for Zotero integration.
+LLM Note Generator
+==================
 
-This module generates structured reading notes using LLM APIs (OpenAI or OpenRouter)
-and includes unique sentinels for idempotence.
+This module handles the generation of structured reading notes using Large Language Models
+(LLMs). It integrates with OpenAI and OpenRouter APIs to analyze document content and
+produce academic-style reading notes.
+
+Key Features:
+- Prompt Engineering: Dynamically builds prompts based on document metadata and language.
+- Multi-Provider Support: Supports both OpenAI and OpenRouter.
+- Concurrency Control: Uses a global semaphore to limit concurrent API calls.
+- Idempotence: Generates unique sentinels to track generated notes.
+- Fallback Mechanism: Provides a template-based fallback if LLM generation fails.
 """
 
 import os
@@ -46,13 +55,23 @@ def get_llm_semaphore() -> asyncio.Semaphore:
     return _llm_semaphore
 
 
-def _get_llm_clients():
+def _get_llm_clients() -> Tuple[Optional[OpenAI], Optional[OpenAI], str]:
     """
-    Get LLM clients by loading API keys fresh from environment.
-    This ensures that keys added after server start are picked up.
+    Initializes and returns LLM clients based on environment variables.
+
+    This function dynamically loads API keys from the environment, allowing for
+    real-time updates to credentials without restarting the server. It configures
+    and returns clients for OpenAI and OpenRouter if their respective API keys
+    are available.
 
     Returns:
-        Tuple of (openai_client, openrouter_client, default_model)
+        A tuple containing:
+        - openai_client (Optional[OpenAI]): An initialized OpenAI client if the
+          `OPENAI_API_KEY` is set, otherwise None.
+        - openrouter_client (Optional[OpenAI]): An initialized client for OpenRouter
+          if the `OPENROUTER_API_KEY` is set, otherwise None.
+        - default_model (str): The default model identifier, sourced from
+          `OPENROUTER_DEFAULT_MODEL` or a fallback value.
     """
     # Reload .env to pick up any changes
     load_dotenv(override=True)

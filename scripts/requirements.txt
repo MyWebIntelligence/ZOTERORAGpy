@@ -29,7 +29,11 @@ pydantic[email]==2.9.2
 # Email service (Resend)
 resend==2.4.0
 
-# Dev dependencies
+# Monitoring
+psutil==5.9.8
+
+# Dev & testing dependencies
 pytest==8.3.3
 httpx<=0.27.2
 chardet==5.2.0
+locust==2.29.1

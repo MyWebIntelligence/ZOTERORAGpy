@@ -1,5 +1,15 @@
 """
-Project management routes
+Project Management Routes
+=========================
+
+This module handles the CRUD operations for projects and their members. It enforces
+access control, allowing users to manage their own projects and collaborate on others.
+
+Key Features:
+- Project CRUD: Create, read, update, and delete projects.
+- Membership Management: Add and remove project members with specific roles.
+- Access Control: Verify user permissions for project access and modification.
+- Dashboard: List projects owned by or shared with the current user.
 """
 from datetime import datetime
 from typing import List, Optional

@@ -1,5 +1,15 @@
 """
-Authentication routes: register, login, logout, password reset
+Authentication Routes
+=====================
+
+This module handles all authentication-related operations, including user registration,
+login, logout, and password management.
+
+Key Features:
+- User Registration: Creates new user accounts (auto-admin for first user).
+- Login: Authenticates users and issues JWT tokens (access and refresh).
+- Password Management: Handles password reset requests, resets, and changes.
+- Email Verification: Verifies user email addresses.
 """
 from datetime import datetime, timedelta
 from typing import Optional

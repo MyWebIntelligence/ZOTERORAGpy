@@ -1,3 +1,16 @@
+"""
+Ingestion Routes
+================
+
+This module handles file ingestion and initial processing. It supports uploading
+ZIP archives containing documents or direct CSV uploads for structured data.
+It manages the creation of `PipelineSession` records and file extraction.
+
+Key Features:
+- ZIP Upload: Extracts and organizes files for processing.
+- CSV Upload: Direct ingestion of structured data into DataFrames.
+- Stage Upload: Allows uploading intermediate artifacts for specific pipeline stages.
+"""
 import os
 import shutil
 import zipfile

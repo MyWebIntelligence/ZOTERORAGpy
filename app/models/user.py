@@ -1,5 +1,16 @@
 """
-User model for authentication and authorization
+User Model
+==========
+
+This module defines the `User` model, which is central to the application's
+authentication and authorization system. It stores user credentials, profile
+information, and security-related status (locked, verified, etc.).
+
+Key Features:
+- Stores hashed passwords and API credentials (encrypted).
+- Manages user roles (ADMIN, USER) via JSON storage.
+- Tracks login attempts and account locking status.
+- Handles email verification and password reset tokens.
 """
 from datetime import datetime
 from typing import List, Optional

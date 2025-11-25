@@ -1,3 +1,18 @@
+"""
+Processing Routes
+=================
+
+This module handles the execution of background processing tasks for the RAG pipeline.
+It triggers scripts for data ingestion, chunking, and embedding generation, often
+using subprocesses to run standalone scripts.
+
+Key Features:
+- Dataframe Processing: Converts raw data (JSON/CSV) into standardized formats.
+- Chunking: Splits text into manageable chunks for embedding.
+- Embedding Generation: Generates dense and sparse embeddings.
+- Vector DB Upload: Uploads processed embeddings to vector databases.
+- Process Management: Supports stopping running scripts and tracking progress via SSE.
+"""
 import os
 import subprocess
 import logging
@@ -121,6 +136,27 @@ async def stop_all_scripts(session: str = Form(...)):
 
 @router.post("/process_dataframe")
 async def process_dataframe(path: str = Form(...)): # path is now relative to UPLOAD_DIR
+    """
+    Processes a Zotero JSON file to extract text content and create a CSV file.
+
+    This endpoint handles the initial data processing step. It finds a Zotero
+    JSON file in the specified session directory, extracts text from the associated
+    documents (performing OCR if necessary), and saves the result as 'output.csv'.
+
+    It includes logic to handle pre-existing CSV files:
+    - If 'output.csv' exists and all rows have 'texteocr' content, OCR is skipped.
+    - If 'output.csv' exists but some rows have empty 'texteocr' content, those
+      rows are removed before proceeding.
+
+    Args:
+        path (str): The relative path to the session directory under the main upload
+                    directory. This path is provided as form data.
+
+    Returns:
+        JSONResponse: A JSON response containing the path to the created CSV file
+                      and a preview of its first few rows. On error, returns a
+                      JSON object with an error message.
+    """
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"Received relative path: '{path}', resolved to absolute: '{absolute_processing_path}'")
 
@@ -296,11 +332,22 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
 @router.post("/initial_text_chunking")
 async def initial_text_chunking(path: str = Form(...), model: str = Form(None)):
     """
-    Generate initial text chunks from the CSV file using rad_chunk.py.
-    
+    Generates initial text chunks from a CSV file.
+
+    This endpoint takes the 'output.csv' file from a session directory, processes
+    it using the 'rad_chunk.py' script, and generates a JSON file ('output_chunks.json')
+    containing the text chunks.
+
     Args:
-        path: Relative path to the session directory (contains output.csv)
-        model: Optional LLM model for text recoding (e.g., "gpt-4o-mini" or "openai/gemini-2.5-flash")
+        path (str): The relative path to the session directory, which must contain
+                    'output.csv'. Provided as form data.
+        model (str, optional): The identifier for the language model to be used for
+                               text recoding during the chunking process.
+                               Defaults to "gpt-4o-mini" if not provided.
+
+    Returns:
+        JSONResponse: A success response with the path to the chunks file and the
+                      number of chunks created, or an error response.
     """
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"Initial chunking requested for path: '{path}', resolved to: '{absolute_processing_path}'")

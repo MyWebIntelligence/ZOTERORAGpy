@@ -1,5 +1,16 @@
 """
-Pipeline session routes - secure pipeline management per project
+Pipeline Session Routes
+=======================
+
+This module manages the RAG pipeline sessions within projects. It handles the creation,
+retrieval, and management of pipeline sessions, including file uploads (ZIP, CSV)
+and status tracking.
+
+Key Features:
+- Session Management: List, create, and delete pipeline sessions.
+- File Uploads: Handle ZIP archives and CSV files for ingestion.
+- Status Tracking: Update and retrieve the status of processing sessions.
+- File Verification: Check for the existence of intermediate files (chunks, embeddings).
 """
 import os
 import shutil
@@ -59,8 +70,23 @@ class SessionListResponse(BaseModel):
 
 def verify_project_access(db: Session, project_id: int, user: User) -> Project:
     """
-    Verifies user has access to the project.
-    Returns project if access granted, raises HTTPException otherwise.
+    Verifies that a user has access to a specific project.
+
+    This function checks if the project exists and if the user is either the
+    project owner, a project member, or an administrator. If access is not
+    granted, it raises an HTTPException.
+
+    Args:
+        db (Session): The database session.
+        project_id (int): The ID of the project to check.
+        user (User): The user object to verify access for.
+
+    Returns:
+        Project: The project object if the user has access.
+
+    Raises:
+        HTTPException: If the project is not found (404) or if the user does
+                       not have access (403).
     """
     project = db.query(Project).filter(Project.id == project_id).first()
 
@@ -82,8 +108,22 @@ def verify_project_access(db: Session, project_id: int, user: User) -> Project:
 
 def verify_session_access(db: Session, session_folder: str, user: User) -> PipelineSession:
     """
-    Verifies user has access to the pipeline session.
-    Returns session if access granted, raises HTTPException otherwise.
+    Verifies that a user has access to a specific pipeline session.
+
+    This function finds a pipeline session by its folder name and then uses
+    `verify_project_access` to ensure the user has rights to the parent project.
+
+    Args:
+        db (Session): The database session.
+        session_folder (str): The unique folder name of the pipeline session.
+        user (User): The user object to verify access for.
+
+    Returns:
+        PipelineSession: The session object if the user has access.
+
+    Raises:
+        HTTPException: If the session is not found (404) or if the user does
+                       not have access to the parent project (403).
     """
     session = db.query(PipelineSession).filter(
         PipelineSession.session_folder == session_folder
@@ -112,9 +152,22 @@ async def list_project_sessions(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Liste les sessions de pipeline d'un projet avec pagination.
+    Lists the pipeline sessions for a specific project with pagination.
 
-    Par défaut: 10 sessions par page, max 100 par page.
+    This endpoint retrieves a paginated list of all pipeline sessions associated
+    with a given project ID. The user must have access to the project.
+
+    Args:
+        project_id (int): The ID of the project whose sessions are to be listed.
+        page (int, optional): The page number for pagination. Defaults to 1.
+        per_page (int, optional): The number of sessions to return per page.
+                                 Defaults to 10, with a maximum of 100.
+        db (Session): The database session dependency.
+        current_user (User): The currently authenticated active user.
+
+    Returns:
+        SessionListResponse: A response object containing the list of sessions
+                             for the requested page, along with pagination details.
     """
     # Verify access
     project = verify_project_access(db, project_id, current_user)
@@ -167,8 +220,29 @@ async def upload_zip_to_project(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Upload a ZIP file to a project.
-    Creates a new pipeline session linked to the project.
+    Uploads a ZIP archive to a project, creating a new pipeline session.
+
+    This endpoint handles the upload of a ZIP file. It performs the following steps:
+    1. Verifies that the user has edit permissions for the project.
+    2. Creates a unique session folder for the upload.
+    3. Saves and extracts the ZIP archive into this folder.
+    4. Creates a `PipelineSession` record in the database, linking it to the project.
+    5. Updates the project's active session to this new session.
+    6. Returns the new session's path and a file tree of the extracted contents.
+
+    Args:
+        project_id (int): The ID of the project to upload the file to.
+        file (UploadFile): The ZIP file being uploaded.
+        db (Session): The database session dependency.
+        current_user (User): The currently authenticated active user.
+
+    Returns:
+        JSONResponse: A response containing the relative path to the session folder,
+                      a tree of the extracted files, the new session ID, and the project ID.
+
+    Raises:
+        HTTPException: If the user lacks permissions (403), the file is not a
+                       valid ZIP (400), or an internal error occurs (500).
     """
     # Verify access (must be able to edit)
     project = verify_project_access(db, project_id, current_user)
@@ -268,8 +342,31 @@ async def upload_csv_to_project(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Upload a CSV file to a project.
-    Creates a new pipeline session linked to the project.
+    Uploads a CSV file to a project, creating a new pipeline session.
+
+    This endpoint handles the upload of a CSV file. It performs the following steps:
+    1. Verifies that the user has edit permissions for the project.
+    2. Validates that the uploaded file has a '.csv' extension.
+    3. Creates a unique session folder.
+    4. Processes the CSV using the `ingestion` module to create a standardized DataFrame.
+    5. Saves the processed data as 'output.csv' in the session folder.
+    6. Creates a `PipelineSession` record with a status of 'EXTRACTED'.
+    7. Updates the project's active session.
+    8. Returns the session path and a success message.
+
+    Args:
+        project_id (int): The ID of the project to upload the file to.
+        file (UploadFile): The CSV file being uploaded.
+        db (Session): The database session dependency.
+        current_user (User): The currently authenticated active user.
+
+    Returns:
+        JSONResponse: A response containing the session path, file tree, session ID,
+                      project ID, and a success message with the row count.
+
+    Raises:
+        HTTPException: If the user lacks permissions (403), the file is not a
+                       CSV (400), or an internal error occurs (500).
     """
     # Verify access (must be able to edit)
     project = verify_project_access(db, project_id, current_user)
@@ -362,8 +459,24 @@ async def verify_session(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Verifies user has access to a session folder.
-    Returns session info if access granted.
+    Verifies that the current user has access to a specific session folder.
+
+    This endpoint is a security check to authorize actions on a session. It uses
+    `verify_session_access` to confirm that the session exists and that the
+    user has rights to the parent project.
+
+    Args:
+        session_folder (str): The path-like identifier of the session folder.
+        db (Session): The database session dependency.
+        current_user (User): The currently authenticated active user.
+
+    Returns:
+        JSONResponse: A response indicating that access is authorized, along
+                      with the session and project IDs.
+
+    Raises:
+        HTTPException: If the session is not found (404) or if the user
+                       lacks access permissions (403).
     """
     session = verify_session_access(db, session_folder, current_user)
 
@@ -386,7 +499,28 @@ async def update_session_status(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Updates the status of a pipeline session.
+    Updates the status and metadata of a pipeline session.
+
+    This endpoint allows for updating the state of a session as it progresses
+    through the pipeline. It also allows for storing counts (rows, chunks)
+    and error messages.
+
+    Args:
+        session_id (int): The ID of the session to update.
+        status (str): The new status for the session (must be a valid
+                      `SessionStatus` enum value).
+        row_count (Optional[int], optional): The number of rows extracted.
+        chunk_count (Optional[int], optional): The number of chunks generated.
+        error_message (Optional[str], optional): Any error message to record.
+        db (Session): The database session dependency.
+        current_user (User): The currently authenticated active user.
+
+    Returns:
+        JSONResponse: A confirmation response with the new status.
+
+    Raises:
+        HTTPException: If the session is not found (404), the user lacks
+                       access (403), or the status value is invalid (400).
     """
     session = db.query(PipelineSession).filter(PipelineSession.id == session_id).first()
 
@@ -430,8 +564,23 @@ async def delete_session(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Deletes a pipeline session and its files.
-    Only project owner or admin can delete.
+    Deletes a pipeline session and its associated files.
+
+    This action is restricted to the project owner or an administrator.
+    It removes the session record from the database and deletes the
+    corresponding session folder from the filesystem.
+
+    Args:
+        session_id (int): The ID of the session to delete.
+        db (Session): The database session dependency.
+        current_user (User): The currently authenticated active user.
+
+    Returns:
+        JSONResponse: A confirmation message indicating successful deletion.
+
+    Raises:
+        HTTPException: If the session is not found (404) or if the user
+                       is not authorized to perform the deletion (403).
     """
     session = db.query(PipelineSession).filter(PipelineSession.id == session_id).first()
 
@@ -472,8 +621,21 @@ async def get_session_files(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Détecte les fichiers existants dans une session pour reprendre le pipeline.
-    Retourne l'état actuel de la session avec les fichiers disponibles.
+    Detects existing files in a session to determine the current pipeline stage.
+
+    This endpoint is used to resume a pipeline. It inspects the session folder
+    for output files from each stage (extraction, chunking, embedding) and
+    returns a summary of which stages are complete.
+
+    Args:
+        session_folder (str): The path-like identifier of the session folder.
+        db (Session): The database session dependency.
+        current_user (User): The currently authenticated active user.
+
+    Returns:
+        JSONResponse: An object containing the current state of the session,
+                      including which files exist, their corresponding counts
+                      (rows/chunks), and the determined `current_stage`.
     """
     # Verify session access
     session = verify_session_access(db, session_folder, current_user)
