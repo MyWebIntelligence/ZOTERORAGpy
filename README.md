@@ -7,6 +7,8 @@ Pipeline de traitement de documents (PDF, exports Zotero, **CSV**) et interface 
 - **OCR Mistral** pour extraction PDF haute qualité
 - Support d'ingestion CSV directe (bypass OCR) pour économiser temps et coûts API
 - **Génération automatique de fiches de lecture Zotero** via LLM avec push automatique vers votre bibliothèque
+- **Contrôle de concurrence LLM** : Sémaphore global limitant les appels simultanés (multi-utilisateurs)
+- **Retry logic LLM** : Résilience API avec retry automatique (1 retry, 2s délai)
 
 ---
 
@@ -147,6 +149,11 @@ APP_URL=http://localhost:8000              # URL pour les liens dans les emails
 # ══════════════════════════════════════════════════════════════
 OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_DEFAULT_MODEL=google/gemini-2.5-flash
+
+# ══════════════════════════════════════════════════════════════
+# OPTIONNEL - Contrôle de concurrence (multi-utilisateurs)
+# ══════════════════════════════════════════════════════════════
+MAX_CONCURRENT_LLM_CALLS=5                 # Limite globale appels LLM simultanés
 
 # ══════════════════════════════════════════════════════════════
 # OPTIONNEL - Bases vectorielles (au moins une)
