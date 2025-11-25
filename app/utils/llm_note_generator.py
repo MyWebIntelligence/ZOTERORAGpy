@@ -285,7 +285,21 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2,
             max_tokens=max_tokens
         )
 
+        # Validate response structure
+        if not response or not response.choices:
+            logger.error(f"LLM API returned empty response or no choices. Response: {response}")
+            raise ValueError(f"LLM API returned invalid response (no choices). Model: {model}")
+
+        if not response.choices[0].message or response.choices[0].message.content is None:
+            logger.error(f"LLM API returned empty message content. Response: {response}")
+            raise ValueError(f"LLM API returned empty content. Model: {model}")
+
         content = response.choices[0].message.content.strip()
+
+        if not content:
+            logger.warning(f"LLM returned empty string for model {model}")
+            raise ValueError(f"LLM returned empty response. Model: {model}")
+
         logger.debug(f"Generated note content (length: {len(content)} chars)")
         return content
 
