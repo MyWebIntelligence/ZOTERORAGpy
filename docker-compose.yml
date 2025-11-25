@@ -8,6 +8,19 @@ services:
       dockerfile: Dockerfile
     container_name: ragpy
     restart: unless-stopped
+    # Limites ressources pour stabilité (P1-T2)
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     ports:
       - "8000:8000"
     volumes:
