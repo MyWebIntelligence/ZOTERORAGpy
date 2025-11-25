@@ -8,6 +8,7 @@ and includes unique sentinels for idempotence.
 import os
 import uuid
 import logging
+import asyncio
 import html as html_module
 from typing import Dict, Tuple, Optional
 from openai import OpenAI
@@ -20,6 +21,29 @@ logger = logging.getLogger(__name__)
 
 # Sentinel prefix for idempotence
 SENTINEL_PREFIX = "ragpy-note-id:"
+
+# =============================================================================
+# Global LLM Semaphore for Concurrency Control
+# =============================================================================
+_llm_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def get_llm_semaphore() -> asyncio.Semaphore:
+    """
+    Get the global LLM semaphore (lazy initialization).
+
+    This semaphore limits concurrent LLM API calls across ALL users
+    to prevent API rate limiting and resource exhaustion.
+
+    Returns:
+        asyncio.Semaphore configured with MAX_CONCURRENT_LLM_CALLS
+    """
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        max_concurrent = int(os.getenv('MAX_CONCURRENT_LLM_CALLS', '5'))
+        _llm_semaphore = asyncio.Semaphore(max_concurrent)
+        logger.info(f"LLM semaphore initialized: max {max_concurrent} concurrent calls")
+    return _llm_semaphore
 
 
 def _get_llm_clients():
@@ -398,7 +422,7 @@ def _fallback_template(metadata: Dict, language: str) -> str:
 def build_note_html(
     metadata: Dict,
     text_content: Optional[str] = None,
-    model: str = None,
+    model: Optional[str] = None,
     use_llm: bool = True,
     extended_analysis: bool = True
 ) -> Tuple[str, str]:
@@ -585,3 +609,75 @@ def extract_sentinel_from_html(html_text: str) -> Optional[str]:
         return match.group(1)
 
     return None
+
+
+# =============================================================================
+# Async Wrapper Functions (with global concurrency control)
+# =============================================================================
+
+async def build_note_html_async(
+    metadata: Dict,
+    text_content: Optional[str] = None,
+    model: Optional[str] = None,
+    use_llm: bool = True,
+    extended_analysis: bool = True
+) -> Tuple[str, str]:
+    """
+    Async version of build_note_html with global concurrency control.
+
+    Uses a semaphore to limit concurrent LLM calls across all users.
+    See build_note_html for full documentation.
+    """
+    semaphore = get_llm_semaphore()
+
+    async with semaphore:
+        remaining = semaphore._value
+        logger.debug(f"Acquired LLM slot ({remaining} slots remaining)")
+
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: build_note_html(
+                    metadata=metadata,
+                    text_content=text_content,
+                    model=model,
+                    use_llm=use_llm,
+                    extended_analysis=extended_analysis
+                )
+            )
+            return result
+        finally:
+            logger.debug("Released LLM slot")
+
+
+async def build_abstract_text_async(
+    metadata: Dict,
+    text_content: Optional[str] = None,
+    model: Optional[str] = None
+) -> str:
+    """
+    Async version of build_abstract_text with global concurrency control.
+
+    Uses a semaphore to limit concurrent LLM calls across all users.
+    See build_abstract_text for full documentation.
+    """
+    semaphore = get_llm_semaphore()
+
+    async with semaphore:
+        remaining = semaphore._value
+        logger.debug(f"Acquired LLM slot ({remaining} slots remaining)")
+
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: build_abstract_text(
+                    metadata=metadata,
+                    text_content=text_content,
+                    model=model
+                )
+            )
+            return result
+        finally:
+            logger.debug("Released LLM slot")
