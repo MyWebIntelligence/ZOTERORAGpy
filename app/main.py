@@ -52,6 +52,7 @@ from app.routes.pipeline import router as pipeline_router
 from app.routes.ingestion import router as ingestion_router
 from app.routes.processing import router as processing_router
 from app.routes.settings import router as settings_router
+from app.routes.celery_tasks import router as celery_router
 
 from app.middleware.auth import get_optional_user, get_current_active_user
 from app.core.credentials import get_credential_or_env, get_user_credentials
@@ -158,6 +159,7 @@ app.include_router(pipeline_router)
 app.include_router(ingestion_router)
 app.include_router(processing_router)
 app.include_router(settings_router)
+app.include_router(celery_router)
 
 # --- Prometheus Metrics Instrumentation ---
 if PROMETHEUS_AVAILABLE and os.getenv('ENABLE_METRICS', 'true').lower() in ('true', '1', 'yes'):
@@ -276,6 +278,10 @@ async def health_detailed():
             "uvicorn_workers": int(os.getenv('UVICORN_WORKERS', 1)),
             "max_workers_configured": int(os.getenv('DEFAULT_MAX_WORKERS', os.cpu_count() or 4)),
             "max_concurrent_llm": int(os.getenv('MAX_CONCURRENT_LLM_CALLS', 5))
+        },
+        "celery": {
+            "enabled": os.getenv('ENABLE_CELERY', 'false').lower() in ('true', '1', 'yes'),
+            "broker_url": os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0').split('@')[-1] if '@' in os.getenv('CELERY_BROKER_URL', '') else os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
         }
     }
 

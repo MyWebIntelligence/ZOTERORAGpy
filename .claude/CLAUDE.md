@@ -1,7 +1,7 @@
 # RAGpy - Guide d'utilisation et architecture
 
 **Date de création** : 2025-10-21
-**Dernière mise à jour** : 2025-11-25 (Sémaphore global LLM, retry logic, optimisation concurrence)
+**Dernière mise à jour** : 2025-11-27 (Phase 3: Architecture Celery pour production)
 
 Ce document constitue le guide de référence pour le projet **RAGpy**, un pipeline sophistiqué de Retrieval-Augmented Generation conçu pour traiter des documents académiques. Il couvre l'utilisation des agents CLI, l'architecture du système et les bonnes pratiques d'implémentation.
 
@@ -490,3 +490,134 @@ Les appels LLM incluent une logique de retry automatique :
 - **1 retry** en cas d'erreur
 - **2 secondes** de délai entre tentatives
 - Logging détaillé de chaque tentative
+
+---
+
+## Architecture Celery (Phase 3 - Production)
+
+### Vue d'ensemble
+
+RAGpy supporte un mode **dual** pour l'exécution des tâches longues :
+
+- **Mode subprocess** (défaut) : Exécution synchrone via `asyncio.create_subprocess_exec`
+- **Mode Celery** (production) : Queue distribuée avec workers dédiés
+
+```text
+[User Request] → [FastAPI] → [Celery Queue] → [Worker 1]
+                                            → [Worker 2]
+                                            → [Worker 3]
+                      ↓
+                 [Redis Broker]
+                      ↓
+                 [Result Backend]
+```
+
+### Activation Celery
+
+**Configuration** (`.env`) :
+```bash
+# Activer le mode Celery
+ENABLE_CELERY=true
+
+# Configuration Redis
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+
+# Monitoring Flower
+FLOWER_USER=admin
+FLOWER_PASSWORD=changeme
+```
+
+### Services Docker
+
+```bash
+# Démarrer stack complète avec Celery
+docker compose up -d
+
+# Services démarrés:
+# - ragpy (FastAPI)
+# - redis (broker)
+# - celery_worker (4 workers)
+# - celery_beat (tâches périodiques)
+# - flower (monitoring :5555)
+```
+
+### Endpoints API Celery
+
+Les endpoints Celery sont disponibles sous `/api/celery/` :
+
+| Endpoint | Méthode | Description |
+|----------|---------|-------------|
+| `/api/celery/process_dataframe` | POST | Soumettre extraction PDF |
+| `/api/celery/initial_chunking` | POST | Soumettre chunking |
+| `/api/celery/dense_embedding` | POST | Soumettre embeddings denses |
+| `/api/celery/sparse_embedding` | POST | Soumettre embeddings sparses |
+| `/api/celery/upload_vectordb` | POST | Soumettre upload vector DB |
+| `/api/celery/task/{id}/status` | GET | Statut d'une tâche |
+| `/api/celery/task/{id}/cancel` | POST | Annuler une tâche |
+| `/api/celery/status` | GET | Statut système Celery |
+| `/api/celery/workers` | GET | Info workers actifs |
+
+### Tasks Celery
+
+Les tâches sont définies dans `app/tasks/` :
+
+```python
+# Extraction PDF
+from app.tasks.extraction import process_dataframe_task
+task = process_dataframe_task.delay(json_path, base_dir, output_path, session_id)
+
+# Chunking
+from app.tasks.chunking import initial_chunking_task
+task = initial_chunking_task.delay(input_csv, output_dir, session_id, model)
+
+# Embeddings
+from app.tasks.embeddings import dense_embedding_task, sparse_embedding_task
+
+# Vector DB upload
+from app.tasks.vectordb import upload_to_vectordb_task
+
+# Cleanup (périodique)
+from app.tasks.cleanup import cleanup_sessions_task
+```
+
+### Monitoring avec Flower
+
+Accéder à l'interface Flower : `http://localhost:5555`
+
+Fonctionnalités :
+
+- Vue temps réel des workers
+- Historique des tâches
+- Statistiques de performance
+- Retry/revoke de tâches
+
+### Tâches périodiques (Beat)
+
+Celery Beat exécute automatiquement :
+
+- **cleanup-expired-sessions** : Toutes les 6h
+- **update-system-metrics** : Chaque minute
+- **cleanup-orphaned-processes** : Toutes les heures
+
+### Migration subprocess → Celery
+
+Le système supporte un **dual mode** avec fallback automatique :
+
+```python
+# processing.py - Le code existant continue de fonctionner
+# celery_tasks.py - Nouveaux endpoints pour mode Celery
+
+# Le frontend peut choisir:
+# - POST /process_dataframe (subprocess, SSE)
+# - POST /api/celery/process_dataframe (Celery, polling)
+```
+
+### Dépendances Celery
+
+```python
+# scripts/requirements.txt
+celery==5.3.4
+redis==5.0.1
+flower==2.0.1
+```
