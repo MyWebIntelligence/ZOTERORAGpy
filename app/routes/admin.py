@@ -710,3 +710,109 @@ async def admin_delete_session(
     db.commit()
 
     return JSONResponse({"message": "Session supprimee avec succes"})
+
+
+# --- Session Cleanup Admin Endpoints ---
+
+@router.get("/cleanup/stats")
+async def get_cleanup_stats(
+    admin: User = Depends(require_admin)
+):
+    """
+    Get statistics about sessions eligible for cleanup.
+
+    Returns disk usage, expired session counts, and cleanup status.
+    """
+    from app.services.session_cleanup import get_cleanup_stats
+
+    return get_cleanup_stats()
+
+
+@router.post("/cleanup/run")
+async def run_cleanup(
+    request: Request,
+    include_orphans: bool = Query(False, description="Also clean orphaned folders"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin)
+):
+    """
+    Manually trigger cleanup of expired sessions.
+
+    Args:
+        include_orphans: If True, also clean up orphaned folders on disk.
+    """
+    from app.services.session_cleanup import cleanup_expired_sessions, cleanup_orphaned_folders
+
+    # Run expired sessions cleanup
+    result = cleanup_expired_sessions()
+
+    # Optionally clean orphaned folders
+    if include_orphans:
+        orphan_result = cleanup_orphaned_folders()
+        result["orphan_cleanup"] = orphan_result
+
+    # Log d'audit
+    create_audit_log(
+        db=db,
+        action=AuditAction.SYSTEM_CONFIG,
+        user_id=admin.id,
+        resource_type="cleanup",
+        resource_id=0,
+        details={
+            "action": "manual_cleanup",
+            "sessions_cleaned": result.get("sessions_cleaned", 0),
+            "include_orphans": include_orphans
+        },
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("User-Agent")
+    )
+
+    return result
+
+
+@router.get("/cleanup/scheduler")
+async def get_scheduler_status(
+    admin: User = Depends(require_admin)
+):
+    """
+    Get the current status of the cleanup scheduler.
+
+    Returns whether automatic cleanup is enabled, running, and next scheduled run.
+    """
+    from app.core.scheduler import cleanup_scheduler
+
+    return cleanup_scheduler.get_status()
+
+
+@router.post("/cleanup/scheduler/trigger")
+async def trigger_immediate_cleanup(
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin)
+):
+    """
+    Trigger an immediate cleanup run via the scheduler.
+
+    This runs cleanup immediately, in addition to scheduled runs.
+    """
+    from app.core.scheduler import cleanup_scheduler
+
+    success = cleanup_scheduler.run_cleanup_now()
+
+    # Log d'audit
+    create_audit_log(
+        db=db,
+        action=AuditAction.SYSTEM_CONFIG,
+        user_id=admin.id,
+        resource_type="scheduler",
+        resource_id=0,
+        details={"action": "trigger_immediate_cleanup", "success": success},
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("User-Agent")
+    )
+
+    return {
+        "message": "Cleanup triggered" if success else "Failed to trigger cleanup",
+        "success": success,
+        "scheduler_status": cleanup_scheduler.get_status()
+    }

@@ -56,6 +56,15 @@ from app.routes.settings import router as settings_router
 from app.middleware.auth import get_optional_user, get_current_active_user
 from app.core.credentials import get_credential_or_env, get_user_credentials
 from app.core.config import APP_DIR, RAGPY_DIR, LOG_DIR, UPLOAD_DIR, STATIC_DIR, TEMPLATES_DIR
+from app.core.scheduler import cleanup_scheduler
+
+# Prometheus metrics instrumentation
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+    Instrumentator = None
 
 # --- Logging Configuration ---
 # Ensure LOG_DIR exists (config.py does it, but safe to keep or rely on config)
@@ -94,8 +103,8 @@ async def lifespan(app: FastAPI):
     This async context manager is used by FastAPI to handle tasks that need to
     be executed when the application starts and before it shuts down.
 
-    - On startup: It initializes the database by calling `init_database()`.
-    - On shutdown: It logs a shutdown message.
+    - On startup: It initializes the database and starts the cleanup scheduler.
+    - On shutdown: It stops the scheduler and logs a shutdown message.
 
     Args:
         app (FastAPI): The FastAPI application instance.
@@ -104,8 +113,16 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing database...")
     init_database()
     logger.info("Database initialized successfully")
+
+    # Start background scheduler for session cleanup
+    logger.info("Starting cleanup scheduler...")
+    cleanup_scheduler.start()
+
     yield
-    # Shutdown: cleanup if needed
+
+    # Shutdown: stop scheduler and cleanup
+    logger.info("Stopping cleanup scheduler...")
+    cleanup_scheduler.stop()
     logger.info("Application shutting down...")
 
 # Initialize FastAPI app with lifespan
@@ -131,7 +148,7 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
 # Include routers
 # HTML pages (must be before API routers with same paths if any, though usually they are distinct)
-app.include_router(pages_router) 
+app.include_router(pages_router)
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(admin_router)
@@ -141,6 +158,22 @@ app.include_router(pipeline_router)
 app.include_router(ingestion_router)
 app.include_router(processing_router)
 app.include_router(settings_router)
+
+# --- Prometheus Metrics Instrumentation ---
+if PROMETHEUS_AVAILABLE and os.getenv('ENABLE_METRICS', 'true').lower() in ('true', '1', 'yes'):
+    instrumentator = Instrumentator(
+        should_group_status_codes=True,
+        should_ignore_untemplated=True,
+        should_respect_env_var=False,  # Désactivé car on vérifie déjà ENABLE_METRICS
+        should_instrument_requests_inprogress=True,
+        excluded_handlers=["/health"],
+        inprogress_name="fastapi_inprogress_requests",
+        inprogress_labels=True,
+    )
+    instrumentator.instrument(app).expose(app, endpoint="/metrics", include_in_schema=True)
+    logger.info("Prometheus metrics enabled at /metrics")
+else:
+    logger.info("Prometheus metrics disabled (ENABLE_METRICS=false or library not installed)")
 
 # Health check endpoint pour Docker healthcheck
 @app.get("/health")

@@ -38,6 +38,43 @@ def run_migrations():
                 conn.commit()
             logger.info("Migration completed: api_credentials column added")
 
+    # Migration: Ajouter indexes sur pipeline_sessions pour optimiser les queries
+    if "pipeline_sessions" in inspector.get_table_names():
+        _migrate_pipeline_sessions_indexes(inspector)
+
+
+def _migrate_pipeline_sessions_indexes(inspector):
+    """
+    Add performance indexes to pipeline_sessions table.
+
+    Creates the following indexes if they don't exist:
+    - ix_pipeline_sessions_status: For filtering by session status
+    - ix_pipeline_sessions_expires_at: For TTL/cleanup queries
+    - ix_pipeline_sessions_status_updated: Composite for cleanup queries
+    - ix_pipeline_sessions_cleaned_expires: Composite for cleanup filtering
+    """
+    existing_indexes = {idx["name"] for idx in inspector.get_indexes("pipeline_sessions")}
+
+    indexes_to_create = [
+        ("ix_pipeline_sessions_status", "status"),
+        ("ix_pipeline_sessions_expires_at", "expires_at"),
+        ("ix_pipeline_sessions_status_updated", "status, updated_at"),
+        ("ix_pipeline_sessions_cleaned_expires", "cleaned_up, expires_at"),
+    ]
+
+    with engine.connect() as conn:
+        for index_name, columns in indexes_to_create:
+            if index_name not in existing_indexes:
+                logger.info(f"Migration: Creating index {index_name} on pipeline_sessions({columns})")
+                try:
+                    conn.execute(text(
+                        f"CREATE INDEX IF NOT EXISTS {index_name} ON pipeline_sessions ({columns})"
+                    ))
+                    conn.commit()
+                    logger.info(f"Migration completed: {index_name} created")
+                except Exception as e:
+                    logger.warning(f"Could not create index {index_name}: {e}")
+
 
 def init_database():
     """
