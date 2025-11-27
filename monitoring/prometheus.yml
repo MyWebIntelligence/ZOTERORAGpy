@@ -1,0 +1,57 @@
+# Prometheus Configuration for RAGpy
+# ==================================
+#
+# This configuration scrapes metrics from the RAGpy FastAPI application.
+# Metrics are exposed at http://ragpy:8000/metrics
+#
+# To access Prometheus UI: http://localhost:9090
+#
+# Useful PromQL queries:
+# - PDF processing rate: rate(ragpy_pdf_processed_total[5m])
+# - Average extraction time: rate(ragpy_pdf_extraction_duration_seconds_sum[5m]) / rate(ragpy_pdf_extraction_duration_seconds_count[5m])
+# - Error rate: rate(ragpy_api_errors_total[5m])
+# - Request latency P95: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
+# - Active requests: fastapi_inprogress_requests
+
+global:
+  # How frequently to scrape targets
+  scrape_interval: 15s
+  # How frequently to evaluate rules
+  evaluation_interval: 15s
+  # Attach these labels to any time series or alerts
+  external_labels:
+    monitor: 'ragpy-monitor'
+
+# Alertmanager configuration (optional)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Rule files (optional)
+# rule_files:
+#   - "alert_rules.yml"
+
+# Scrape configurations
+scrape_configs:
+  # RAGpy FastAPI application
+  - job_name: 'ragpy'
+    static_configs:
+      - targets: ['ragpy:8000']
+        labels:
+          service: 'ragpy'
+          environment: 'production'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 30s
+
+# Remote write configuration (optional - for long-term storage)
+# remote_write:
+#   - url: "http://remote-storage:9201/write"

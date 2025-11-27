@@ -7,12 +7,27 @@ import pandas as pd
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 import spacy
 from collections import Counter
 from dotenv import load_dotenv, find_dotenv, set_key
 import subprocess # Added for spacy download subprocess
 import logging
+
+# Metrics tracking (optional - works with or without prometheus)
+try:
+    from scripts.metrics_helper import (
+        track_embedding_batch, track_chunking, track_error,
+        log_metrics_summary, _collector as metrics_collector
+    )
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
+    track_embedding_batch = None
+    track_chunking = None
+    track_error = None
+    log_metrics_summary = None
+    metrics_collector = None
 
 # Attempt to import RecursiveCharacterTextSplitter from langchain_text_splitters
 try:
@@ -335,6 +350,9 @@ def process_all_documents(df, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-
     num_doc_workers = min(DEFAULT_DOC_WORKERS, DEFAULT_MAX_WORKERS)
 
     total_docs = len(df)
+    total_chunks_generated = 0
+    chunking_start_time = time.time()
+
     # Emit init event for SSE progress tracking
     print(f"PROGRESS|init|{total_docs}|Found {total_docs} documents to chunk", flush=True)
 
@@ -352,35 +370,109 @@ def process_all_documents(df, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-
             try:
                 result_chunks = future.result()
                 chunk_count = len(result_chunks) if result_chunks else 0
+                total_chunks_generated += chunk_count
                 # Emit row-level progress
                 print(f"PROGRESS|row|{completed_count}/{total_docs}|Document #{doc_idx}: {chunk_count} chunks", flush=True)
                 print(f"Document #{doc_idx} traité, {chunk_count} chunks produits.")
             except Exception as e:
                 print(f"PROGRESS|row|{completed_count}/{total_docs}|Document #{doc_idx}: error", flush=True)
                 print(f"Erreur lors du traitement du document #{doc_idx}: {e}")
+                # Track error
+                if METRICS_AVAILABLE and track_error:
+                    track_error('chunking', type(e).__name__)
+
+    # Record chunking metrics
+    chunking_elapsed = time.time() - chunking_start_time
+    if METRICS_AVAILABLE and metrics_collector:
+        try:
+            metrics_collector.increment_counter(
+                'chunks_generated',
+                total_chunks_generated,
+                phase='initial'
+            )
+            metrics_collector.observe_histogram(
+                'chunking_duration',
+                chunking_elapsed
+            )
+        except Exception:
+            pass  # Don't fail on metrics errors
+
+    logging.info(f"Chunking complete: {total_chunks_generated} chunks from {total_docs} docs in {chunking_elapsed:.1f}s")
 
 # ----------------------------------------------------------------------
 # PART 2: Chunk Embedding (Dense)
 # ----------------------------------------------------------------------
 
-def get_embeddings_batch(texts, model="text-embedding-3-large"):
+def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, max_retries=3):
     """
-    Calcule les embeddings pour un lot de textes en une seule requête API.
+    Generate embeddings avec retry exponentiel et adaptive batching.
+
+    Cette fonction calcule les embeddings pour un lot de textes avec une gestion
+    robuste des erreurs incluant:
+    - Retry avec backoff exponentiel en cas de rate limit
+    - Adaptive batching (split du batch si échecs répétés)
+    - Fallback individuel en cas d'erreur persistante
+
+    Args:
+        texts: Liste de textes pour lesquels générer les embeddings.
+        model: Modèle d'embedding OpenAI à utiliser.
+        retry_count: Compteur de tentatives (usage interne pour récursion).
+        max_retries: Nombre maximum de tentatives avant échec.
+
+    Returns:
+        Liste d'embeddings (vecteurs) correspondant aux textes d'entrée.
+        En cas d'échec total, retourne des vecteurs nuls de dimension 3072.
     """
+    batch_size = len(texts)
+
     try:
-        response = client.embeddings.create(input=texts, model=model)
+        response = client.embeddings.create(
+            input=texts,
+            model=model,
+            timeout=60.0  # Timeout explicite
+        )
         return [item.embedding for item in response.data]
+
+    except RateLimitError as e:
+        if retry_count >= max_retries:
+            logging.error(f"Rate limit after {max_retries} retries, batch size {batch_size}")
+            raise
+
+        # Exponential backoff
+        wait_time = 2 ** retry_count
+        logging.warning(f"Rate limit hit, waiting {wait_time}s (retry {retry_count + 1}/{max_retries})")
+        time.sleep(wait_time)
+
+        # Réduire batch size si échec répété
+        if retry_count > 0 and batch_size > 10:
+            # Split batch en deux
+            mid = batch_size // 2
+            logging.info(f"Splitting batch {batch_size} → {mid} + {batch_size - mid}")
+
+            emb1 = get_embeddings_batch(texts[:mid], model, retry_count + 1, max_retries)
+            emb2 = get_embeddings_batch(texts[mid:], model, retry_count + 1, max_retries)
+            return emb1 + emb2
+        else:
+            return get_embeddings_batch(texts, model, retry_count + 1, max_retries)
+
     except Exception as e:
-        print(f"Erreur lors du calcul des embeddings pour un lot: {e}")
-        # Tentative de retry simple après une pause
-        time.sleep(2) 
-        try:
-            print("Nouvelle tentative de calcul des embeddings pour le lot...")
-            response = client.embeddings.create(input=texts, model=model)
-            return [item.embedding for item in response.data]
-        except Exception as e_retry:
-            print(f"Échec du calcul des embeddings pour le lot après nouvelle tentative: {e_retry}")
-            return [None] * len(texts) # Retourne None pour les embeddings échoués
+        logging.error(f"Embedding error (batch {batch_size}): {e}")
+        # Fallback: process un par un
+        if batch_size > 1:
+            logging.info("Fallback: processing batch individually")
+            embeddings = []
+            for text in texts:
+                try:
+                    resp = client.embeddings.create(input=[text], model=model)
+                    embeddings.append(resp.data[0].embedding)
+                except Exception as e2:
+                    logging.error(f"Failed individual embedding: {e2}")
+                    embeddings.append([0.0] * 3072)  # Zero vector fallback
+            return embeddings
+        else:
+            # Single text failed, return zero vector
+            logging.error(f"Single embedding failed, returning zero vector")
+            return [[0.0] * 3072]
 
 def process_chunks_for_embedding(chunks_batch):
     """
@@ -411,56 +503,131 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
     """
     Charge les chunks depuis `input_json_file`, génère les embeddings denses,
     et les sauvegarde dans `output_json_file`.
+
+    Cette fonction utilise une parallélisation optimisée avec:
+    - ThreadPoolExecutor limité à 4 workers pour éviter les rate limits
+    - Monitoring du throughput (embeddings/seconde)
+    - Tracking des rate limit hits
+
+    Args:
+        input_json_file: Chemin vers le fichier JSON contenant les chunks.
+        output_json_file: Chemin de sortie (auto-généré si None).
+
+    Returns:
+        Chemin du fichier de sortie ou None en cas d'erreur.
     """
     if output_json_file is None:
         base_name = os.path.splitext(input_json_file)[0]
         output_json_file = f"{base_name}_with_embeddings.json"
-    
+
     if not os.path.exists(input_json_file):
         print(f"Le fichier d'entrée '{input_json_file}' n'existe pas.")
         return None
-    
+
     with open(input_json_file, 'r', encoding='utf-8') as f:
         all_chunks_from_file = json.load(f)
-    
+
     total_chunks = len(all_chunks_from_file)
     print(f"Chargement de {total_chunks} chunks depuis '{input_json_file}' pour génération d'embeddings.")
 
     # Emit init event for SSE progress tracking (chunks only - documents were processed in step 3.1)
     print(f"PROGRESS|init|{total_chunks}|Generating embeddings for {total_chunks} chunks", flush=True)
 
-    # Regrouper par doc_id pour le traitement par lot (optimisation API)
-    chunks_by_doc = {}
-    for chunk in all_chunks_from_file:
-        doc_id = chunk.get("doc_id", "unknown_doc")
-        if doc_id not in chunks_by_doc:
-            chunks_by_doc[doc_id] = []
-        chunks_by_doc[doc_id].append(chunk)
+    # Créer tous les batches à traiter (flat list, pas groupés par doc)
+    all_batches = []
+    batch_to_indices = {}  # Map batch index to chunk indices in original list
 
+    for i in range(0, total_chunks, DEFAULT_EMBEDDING_BATCH_SIZE):
+        batch = all_chunks_from_file[i : i + DEFAULT_EMBEDDING_BATCH_SIZE]
+        batch_idx = len(all_batches)
+        all_batches.append(batch)
+        batch_to_indices[batch_idx] = list(range(i, min(i + DEFAULT_EMBEDDING_BATCH_SIZE, total_chunks)))
+
+    total_batches = len(all_batches)
+    print(f"Préparation de {total_batches} batches (taille max: {DEFAULT_EMBEDDING_BATCH_SIZE})")
+
+    # Monitoring variables
+    batch_start = time.time()
+    embeddings_generated = 0
+    rate_limit_hits = 0
+    results = [None] * total_batches  # Pre-allocate results array
+
+    # Max 4 workers pour éviter rate limits OpenAI
+    max_embedding_workers = min(DEFAULT_MAX_WORKERS, 4)
+    logging.info(f"Using {max_embedding_workers} workers for embedding generation")
+
+    with ThreadPoolExecutor(max_workers=max_embedding_workers) as executor:
+        futures = {
+            executor.submit(process_chunks_for_embedding, batch): batch_idx
+            for batch_idx, batch in enumerate(all_batches)
+        }
+
+        for future in tqdm(as_completed(futures), total=total_batches, desc="Generating embeddings"):
+            batch_idx = futures[future]
+            try:
+                batch_embeddings = future.result()
+                results[batch_idx] = batch_embeddings
+                embeddings_generated += len(batch_embeddings)
+
+                # Emit chunk-level progress
+                print(f"PROGRESS|chunk|{embeddings_generated}/{total_chunks}|Chunk {embeddings_generated}/{total_chunks}", flush=True)
+
+            except RateLimitError:
+                rate_limit_hits += 1
+                logging.error(f"Batch {batch_idx} failed after retries (rate limit)")
+                # Mark as failed - assign zero vectors
+                failed_batch = all_batches[batch_idx]
+                for chunk in failed_batch:
+                    chunk["embedding"] = [0.0] * 3072
+                results[batch_idx] = failed_batch
+                embeddings_generated += len(failed_batch)
+
+            except Exception as e:
+                logging.error(f"Batch {batch_idx} failed with error: {e}")
+                failed_batch = all_batches[batch_idx]
+                for chunk in failed_batch:
+                    chunk["embedding"] = [0.0] * 3072
+                results[batch_idx] = failed_batch
+                embeddings_generated += len(failed_batch)
+
+    # Flatten results maintaining order
     all_chunks_with_embeddings = []
+    for batch_result in results:
+        if batch_result:
+            all_chunks_with_embeddings.extend(batch_result)
 
-    # Process chunks grouped by document (for API efficiency)
-    processed_chunk_count = 0
-    for doc_id, doc_chunks_list in tqdm(chunks_by_doc.items(), desc="Génération Embeddings"):
-        print(f"  Traitement du document {doc_id} ({len(doc_chunks_list)} chunks) pour embeddings...")
+    # Performance logging
+    elapsed = time.time() - batch_start
+    throughput = embeddings_generated / elapsed if elapsed > 0 else 0
+    logging.info(f"Embeddings: {embeddings_generated} in {elapsed:.1f}s ({throughput:.1f}/s)")
+    logging.info(f"Rate limit hits: {rate_limit_hits}")
+    print(f"Performance: {embeddings_generated} embeddings en {elapsed:.1f}s ({throughput:.1f} emb/s)")
+    if total_batches > 0:
+        print(f"Rate limit hits: {rate_limit_hits}/{total_batches} batches ({100*rate_limit_hits/total_batches:.1f}%)")
 
-        embedded_doc_chunks = []
-        for i in range(0, len(doc_chunks_list), DEFAULT_EMBEDDING_BATCH_SIZE):
-            batch = doc_chunks_list[i : i + DEFAULT_EMBEDDING_BATCH_SIZE]
-            processed_batch = process_chunks_for_embedding(batch)  # Modifies batch in-place
-            embedded_doc_chunks.extend(processed_batch)
-            # Emit chunk-level progress (primary progress bar)
-            current_in_doc = min(i + DEFAULT_EMBEDDING_BATCH_SIZE, len(doc_chunks_list))
-            print(f"PROGRESS|chunk|{processed_chunk_count + current_in_doc}/{total_chunks}|Chunk {processed_chunk_count + current_in_doc}/{total_chunks}", flush=True)
-
-        all_chunks_with_embeddings.extend(embedded_doc_chunks)
-        processed_chunk_count += len(embedded_doc_chunks)
-
-        # Sauvegarde intermédiaire (optionnelle)
-        if processed_chunk_count > 0 and processed_chunk_count % 1000 < DEFAULT_EMBEDDING_BATCH_SIZE:  # Approx every 1000
-            temp_output_file = f"{os.path.splitext(output_json_file)[0]}_temp_embeddings.json"
-            save_processed_chunks_to_json_overwrite(all_chunks_with_embeddings, temp_output_file)
-            print(f"Sauvegarde temporaire de {len(all_chunks_with_embeddings)} chunks avec embeddings dans '{temp_output_file}'.")
+    # Record metrics
+    if METRICS_AVAILABLE and metrics_collector:
+        try:
+            metrics_collector.increment_counter(
+                'embeddings_generated',
+                embeddings_generated,
+                model='text-embedding-3-large',
+                type='dense'
+            )
+            metrics_collector.observe_histogram(
+                'embedding_duration',
+                elapsed,
+                model='text-embedding-3-large'
+            )
+            if rate_limit_hits > 0:
+                metrics_collector.increment_counter(
+                    'errors',
+                    rate_limit_hits,
+                    operation='embedding',
+                    error_type='RateLimitError'
+                )
+        except Exception:
+            pass  # Don't fail on metrics errors
 
     save_processed_chunks_to_json_overwrite(all_chunks_with_embeddings, output_json_file)
     print(f"Tous les embeddings denses ont été générés. Total {len(all_chunks_with_embeddings)} chunks sauvegardés dans '{output_json_file}'.")

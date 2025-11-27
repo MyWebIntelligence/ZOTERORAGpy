@@ -148,6 +148,16 @@ import argparse
 import requests
 from dotenv import load_dotenv
 
+# Metrics tracking (optional - works with or without prometheus)
+try:
+    from scripts.metrics_helper import track_pdf_extraction, track_error, log_metrics_summary
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
+    track_pdf_extraction = None
+    track_error = None
+    log_metrics_summary = None
+
 # Load environment variables early
 load_dotenv()
 
@@ -746,52 +756,85 @@ def extract_text_with_ocr(
     Raises:
         OCRExtractionError: If all extraction methods fail
     """
+    # Track extraction time for metrics
+    start_time = time.time()
+    provider_used = "unknown"
+    extraction_success = False
 
     last_error: Optional[Exception] = None
 
-    if MISTRAL_API_KEY:
-        try:
-            logger.debug("Tentative d'OCR Mistral pour %s", pdf_path)
-            mistral_text = _extract_text_with_mistral(pdf_path, max_pages=max_pages)
-            return _finalize_ocr_result(mistral_text, "mistral", return_details)
-        except Exception as mistral_error:
-            last_error = mistral_error
-            logger.warning(
-                "Échec Mistral OCR pour %s: %s",
-                pdf_path,
-                mistral_error,
+    try:
+        if MISTRAL_API_KEY:
+            try:
+                logger.debug("Tentative d'OCR Mistral pour %s", pdf_path)
+                mistral_text = _extract_text_with_mistral(pdf_path, max_pages=max_pages)
+                provider_used = "mistral"
+                extraction_success = True
+                return _finalize_ocr_result(mistral_text, "mistral", return_details)
+            except Exception as mistral_error:
+                last_error = mistral_error
+                logger.warning(
+                    "Échec Mistral OCR pour %s: %s",
+                    pdf_path,
+                    mistral_error,
+                )
+                # Track error
+                if METRICS_AVAILABLE and track_error:
+                    track_error('pdf_extraction', type(mistral_error).__name__)
+        else:
+            logger.debug("MISTRAL_API_KEY absente, OCR Mistral ignoré pour %s", pdf_path)
+
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            try:
+                logger.debug("Fallback OpenAI OCR pour %s", pdf_path)
+                openai_text = _extract_text_with_openai(pdf_path, openai_key, max_pages=max_pages)
+                provider_used = "openai"
+                extraction_success = True
+                return _finalize_ocr_result(openai_text, "openai", return_details)
+            except Exception as openai_error:
+                last_error = openai_error
+                logger.warning(
+                    "Échec OpenAI OCR pour %s: %s",
+                    pdf_path,
+                    openai_error,
+                )
+                # Track error
+                if METRICS_AVAILABLE and track_error:
+                    track_error('pdf_extraction', type(openai_error).__name__)
+        else:
+            logger.debug("OPENAI_API_KEY absente, OCR OpenAI ignoré pour %s", pdf_path)
+
+        if not MISTRAL_API_KEY and not openai_key:
+            logger.error(
+                "Aucune clé API OCR configurée (MISTRAL_API_KEY ou OPENAI_API_KEY). "
+                "Basculer sur l'extraction locale peut dégrader la qualité du texte."
             )
-    else:
-        logger.debug("MISTRAL_API_KEY absente, OCR Mistral ignoré pour %s", pdf_path)
 
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        try:
-            logger.debug("Fallback OpenAI OCR pour %s", pdf_path)
-            openai_text = _extract_text_with_openai(pdf_path, openai_key, max_pages=max_pages)
-            return _finalize_ocr_result(openai_text, "openai", return_details)
-        except Exception as openai_error:
-            last_error = openai_error
-            logger.warning(
-                "Échec OpenAI OCR pour %s: %s",
-                pdf_path,
-                openai_error,
-            )
-    else:
-        logger.debug("OPENAI_API_KEY absente, OCR OpenAI ignoré pour %s", pdf_path)
+        if last_error:
+            logger.info("Retour au processus OCR historique pour %s", pdf_path)
 
-    if not MISTRAL_API_KEY and not openai_key:
-        logger.error(
-            "Aucune clé API OCR configurée (MISTRAL_API_KEY ou OPENAI_API_KEY). "
-            "Basculer sur l'extraction locale peut dégrader la qualité du texte."
-        )
+        legacy_text = _extract_text_with_legacy_pdf(pdf_path, max_pages=max_pages)
+        if legacy_text.strip():
+            provider_used = "legacy"
+            extraction_success = True
+            return _finalize_ocr_result(legacy_text, "legacy", return_details)
 
-    if last_error:
-        logger.info("Retour au processus OCR historique pour %s", pdf_path)
-
-    legacy_text = _extract_text_with_legacy_pdf(pdf_path, max_pages=max_pages)
-    if legacy_text.strip():
-        return _finalize_ocr_result(legacy_text, "legacy", return_details)
+    finally:
+        # Record metrics
+        duration = time.time() - start_time
+        if METRICS_AVAILABLE and track_pdf_extraction:
+            # Use context manager pattern for metrics
+            try:
+                from scripts.metrics_helper import _collector
+                _collector.increment_counter(
+                    'pdf_processed',
+                    provider=provider_used,
+                    status='success' if extraction_success else 'failure'
+                )
+                _collector.observe_histogram('pdf_duration', duration, provider=provider_used)
+            except Exception:
+                pass  # Don't fail on metrics errors
 
     error_message = (
         "Impossible d'extraire le texte du document. Configurez MISTRAL_API_KEY ou OPENAI_API_KEY "
