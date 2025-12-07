@@ -153,7 +153,7 @@ def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3,
     puis retenter séquentiellement en cas d'erreur.
 
     Args:
-        model: Nom du modèle (ex: "gpt-4o-mini" pour OpenAI, "openai/gemini-2.5-flash" pour OpenRouter)
+        model: Nom du modèle (ex: "gpt-4o-mini" pour OpenAI, "google/gemini-2.5-flash" pour OpenRouter)
                Si le modèle contient "/" → utilise OpenRouter, sinon OpenAI
     """
     # Auto-detect which client to use based on model format
@@ -250,7 +250,7 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model=
     4. Sauvegarde des chunks avec save_raw_chunks_to_json_incrementally
 
     Args:
-        model: Modèle LLM pour le recodage (ex: "gpt-4o-mini" ou "openai/gemini-2.5-flash")
+        model: Modèle LLM pour le recodage (ex: "gpt-4o-mini" ou "google/gemini-2.5-flash")
     """
     if TEXT_SPLITTER is None:
         print("Erreur: TEXT_SPLITTER n'est pas initialisé. Impossible de traiter le document.")
@@ -344,7 +344,7 @@ def process_all_documents(df, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-
     Utilise un nombre limité de workers pour process_document_chunks pour éviter la surcharge API.
 
     Args:
-        model: Modèle LLM pour le recodage (ex: "gpt-4o-mini" ou "openai/gemini-2.5-flash")
+        model: Modèle LLM pour le recodage (ex: "gpt-4o-mini" ou "google/gemini-2.5-flash")
     """
     # Max 3 documents processed in parallel for their chunking/recoding stages
     num_doc_workers = min(DEFAULT_DOC_WORKERS, DEFAULT_MAX_WORKERS)
@@ -729,7 +729,7 @@ if __name__ == '__main__':
     parser.add_argument("--phase", choices=['initial', 'dense', 'sparse', 'all'], default='all',
                         help="Specify processing phase: 'initial' (chunking), 'dense' (dense embeddings), 'sparse' (sparse embeddings), or 'all'.")
     parser.add_argument("--model", type=str, default="gpt-4o-mini",
-                        help="LLM model for text recoding. Use 'gpt-4o-mini' (OpenAI) or 'openai/gemini-2.5-flash' (OpenRouter). Default: gpt-4o-mini")
+                        help="LLM model for text recoding. Use 'gpt-4o-mini' (OpenAI) or 'google/gemini-2.5-flash' (OpenRouter). Default: gpt-4o-mini")
 
     args = parser.parse_args()
 

@@ -223,7 +223,7 @@ class TestBuildNoteHtml:
         sentinel, html = llm_note_generator.build_note_html(
             metadata,
             text_content="Text",
-            model="openai/gemini-2.5-flash",  # OpenRouter format
+            model="google/gemini-2.5-flash",  # OpenRouter format
             use_llm=True
         )
 

@@ -299,7 +299,7 @@ Après avoir traité un export Zotero (étapes 1-3.3) :
    - ☑️ Cochez "Zotero Reading Notes"
    - Sélectionnez le modèle LLM :
      - `gpt-4o-mini` (OpenAI - défaut, bon rapport qualité/prix)
-     - `openai/gemini-2.0-flash-exp` (OpenRouter - très économique)
+     - `google/gemini-2.0-flash-exp` (OpenRouter - très économique)
      - `anthropic/claude-3-5-haiku` (OpenRouter - excellent pour textes académiques)
      - `gpt-4o` (OpenAI - meilleure qualité)
    - Cliquez sur "Generate Zotero Notes"
@@ -400,7 +400,7 @@ python scripts/rad_chunk.py \
   --input sources/MaBiblio/output.csv \
   --output sources/MaBiblio \
   --phase all \
-  --model openai/gemini-2.5-flash
+  --model google/gemini-2.5-flash
 ```
 Sorties attendues dans `sources/MaBiblio/`:
 - `output_chunks.json`
