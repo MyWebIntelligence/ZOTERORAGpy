@@ -857,5 +857,129 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
     return total_inserted_count
 
 
-# The __main__ block has been removed as per the refactoring requirements.
-# The script's functions are now intended to be called with parameters from a web interface.
+# ----------------------------------------------------------------------
+# CLI Entry Point
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Upload embeddings to vector databases (Pinecone, Weaviate, Qdrant)"
+    )
+    parser.add_argument(
+        "--input", "-i",
+        required=True,
+        help="Path to the JSON file containing embeddings"
+    )
+    parser.add_argument(
+        "--db",
+        choices=["pinecone", "weaviate", "qdrant"],
+        required=True,
+        help="Target vector database"
+    )
+    parser.add_argument(
+        "--index",
+        help="Pinecone index name (required for pinecone)"
+    )
+    parser.add_argument(
+        "--namespace",
+        default=None,
+        help="Pinecone namespace (optional)"
+    )
+    parser.add_argument(
+        "--class-name",
+        default="Article",
+        help="Weaviate class name (default: Article)"
+    )
+    parser.add_argument(
+        "--tenant",
+        default="default",
+        help="Weaviate tenant name (default: default)"
+    )
+    parser.add_argument(
+        "--collection",
+        help="Qdrant collection name (required for qdrant)"
+    )
+
+    args = parser.parse_args()
+
+    # Get credentials from environment
+    pinecone_api_key = os.getenv("PINECONE_API_KEY")
+    weaviate_api_key = os.getenv("WEAVIATE_API_KEY")
+    weaviate_url = os.getenv("WEAVIATE_URL")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY")
+    qdrant_url = os.getenv("QDRANT_URL")
+
+    print(f"=== rad_vectordb.py ===")
+    print(f"Input file: {args.input}")
+    print(f"Target DB: {args.db}")
+
+    result = None
+
+    if args.db == "pinecone":
+        if not args.index:
+            print("ERROR: --index is required for Pinecone")
+            exit(1)
+        if not pinecone_api_key:
+            print("ERROR: PINECONE_API_KEY environment variable not set")
+            exit(1)
+
+        print(f"Index: {args.index}")
+        print(f"Namespace: {args.namespace or '(default)'}")
+        print(f"API Key: {pinecone_api_key[:10]}...")
+
+        result = insert_to_pinecone(
+            embeddings_json_file=args.input,
+            index_name=args.index,
+            pinecone_api_key=pinecone_api_key,
+            namespace=args.namespace
+        )
+
+    elif args.db == "weaviate":
+        if not weaviate_url:
+            print("ERROR: WEAVIATE_URL environment variable not set")
+            exit(1)
+        if not weaviate_api_key:
+            print("ERROR: WEAVIATE_API_KEY environment variable not set")
+            exit(1)
+
+        print(f"URL: {weaviate_url}")
+        print(f"Class: {args.class_name}")
+        print(f"Tenant: {args.tenant}")
+
+        result = insert_to_weaviate_hybrid(
+            embeddings_json_file=args.input,
+            url=weaviate_url,
+            api_key=weaviate_api_key,
+            class_name=args.class_name,
+            tenant_name=args.tenant
+        )
+
+    elif args.db == "qdrant":
+        if not args.collection:
+            print("ERROR: --collection is required for Qdrant")
+            exit(1)
+        if not qdrant_url:
+            print("ERROR: QDRANT_URL environment variable not set")
+            exit(1)
+
+        print(f"URL: {qdrant_url}")
+        print(f"Collection: {args.collection}")
+
+        result = insert_to_qdrant(
+            embeddings_json_file=args.input,
+            collection_name=args.collection,
+            qdrant_url=qdrant_url,
+            qdrant_api_key=qdrant_api_key
+        )
+
+    # Print result
+    print(f"\n=== Result ===")
+    if isinstance(result, dict):
+        print(f"Status: {result.get('status', 'unknown')}")
+        print(f"Message: {result.get('message', '')}")
+        print(f"Inserted: {result.get('inserted_count', 0)}")
+        exit(0 if result.get('status') == 'success' else 1)
+    else:
+        print(f"Inserted count: {result}")
+        exit(0 if result and result > 0 else 1)
