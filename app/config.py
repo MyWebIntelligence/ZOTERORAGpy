@@ -99,5 +99,9 @@ class Settings:
     WEAVIATE_API_KEY: Optional[str] = os.getenv("WEAVIATE_API_KEY")
     QDRANT_API_KEY: Optional[str] = os.getenv("QDRANT_API_KEY")
 
+    # User Registration Settings
+    # Sandbox mode: when True, new users are blocked until admin approval
+    USERS_SANDBOX: bool = os.getenv("USERS_SANDBOX", "FALSE").upper() == "TRUE"
+
 
 settings = Settings()

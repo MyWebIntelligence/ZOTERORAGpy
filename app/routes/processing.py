@@ -12,6 +12,12 @@ Key Features:
 - Embedding Generation: Generates dense and sparse embeddings.
 - Vector DB Upload: Uploads processed embeddings to vector databases.
 - Process Management: Supports stopping running scripts and tracking progress via SSE.
+
+Security:
+- All processing endpoints require authentication.
+- Credentials are retrieved from user's personal settings (encrypted in DB).
+- Non-admin users cannot access .env credentials.
+- Subprocess environments are built with user-specific credentials.
 """
 import os
 import subprocess
@@ -19,11 +25,20 @@ import logging
 import json
 import pandas as pd
 import asyncio
-from fastapi import APIRouter, Form
+from typing import Dict, Optional
+from fastapi import APIRouter, Form, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import APP_DIR, RAGPY_DIR, UPLOAD_DIR
 from app.services.process_manager import process_manager
+from app.middleware.auth import get_current_active_user
+from app.models.user import User
+from app.core.credentials import (
+    build_subprocess_env,
+    get_credential_or_env,
+    get_credential_error_message,
+    CredentialMissingError
+)
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -34,7 +49,8 @@ router = APIRouter()
 async def run_tracked_subprocess(
     cmd: list,
     session_folder: str,
-    timeout: int = 1800
+    timeout: int = 1800,
+    env: Optional[Dict[str, str]] = None
 ) -> subprocess.CompletedProcess:
     """
     Lance un subprocess ASYNC avec tracking PID pour permettre l'arrêt par session.
@@ -43,18 +59,22 @@ async def run_tracked_subprocess(
     permettant ainsi de traiter les requêtes de stop en parallèle.
 
     Args:
-        cmd: Commande à exécuter (liste d'arguments)
-        session_folder: Identifiant de la session pour le tracking
-        timeout: Timeout en secondes (défaut: 30 min)
+        cmd: Commande à exécuter (liste d'arguments).
+        session_folder: Identifiant de la session pour le tracking.
+        timeout: Timeout en secondes (défaut: 30 min).
+        env: Dictionnaire d'environnement pour le subprocess. Si None, utilise
+             l'environnement actuel. Utilisez build_subprocess_env() pour créer
+             un environnement sécurisé avec les credentials utilisateur.
 
     Returns:
-        subprocess.CompletedProcess avec stdout, stderr, returncode
+        subprocess.CompletedProcess avec stdout, stderr, returncode.
     """
     # Utiliser asyncio.create_subprocess_exec pour ne pas bloquer
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
+        env=env  # Pass custom environment if provided
     )
 
     # Enregistrer le PID pour permettre l'arrêt
@@ -137,7 +157,8 @@ async def stop_all_scripts(session: str = Form(...)):
 @router.post("/process_dataframe")
 async def process_dataframe(
     path: str = Form(...),
-    force_fresh: bool = Form(False)
+    force_fresh: bool = Form(False),
+    current_user: User = Depends(get_current_active_user)
 ):
     """
     Processes a Zotero JSON file to extract text content and create a CSV file.
@@ -259,12 +280,35 @@ async def process_dataframe(
         else:
             # Run extraction script with improved error handling
             try:
+                # Build secure subprocess environment with user credentials
+                # rad_dataframe.py requires MISTRAL_API_KEY for OCR (or OPENAI_API_KEY as fallback)
+                try:
+                    subprocess_env = build_subprocess_env(
+                        current_user,
+                        required_keys=["mistral_api_key"]  # Primary OCR provider
+                    )
+                except CredentialMissingError as e:
+                    # Try OpenAI as fallback
+                    try:
+                        subprocess_env = build_subprocess_env(
+                            current_user,
+                            required_keys=["openai_api_key"]
+                        )
+                        logger.info(f"Using OpenAI fallback for OCR (user {current_user.email})")
+                    except CredentialMissingError:
+                        logger.warning(f"User {current_user.email} missing OCR credentials")
+                        return JSONResponse(status_code=403, content={
+                            "error": get_credential_error_message("mistral_api_key"),
+                            "credential_required": "mistral_api_key",
+                            "configure_url": "/settings/credentials"
+                        })
+
                 # Construct absolute path to the script using RAGPY_DIR
                 project_scripts_dir = os.path.join(RAGPY_DIR, "scripts")
                 script_path = os.path.join(project_scripts_dir, "rad_dataframe.py")
                 script_path = os.path.abspath(script_path)
 
-                logger.info(f"Executing rad_dataframe.py with command: python3 {script_path} ...")
+                logger.info(f"Executing rad_dataframe.py for user {current_user.email}")
 
                 # Use tracked subprocess for session-aware process management
                 result = await run_tracked_subprocess(
@@ -275,7 +319,8 @@ async def process_dataframe(
                         "--output", out_csv
                     ],
                     session_folder=path,
-                    timeout=1800
+                    timeout=1800,
+                    env=subprocess_env  # Use user-specific credentials
                 )
 
                 # Manually check the return code and handle
@@ -347,7 +392,11 @@ async def process_dataframe(
 
 
 @router.post("/initial_text_chunking")
-async def initial_text_chunking(path: str = Form(...), model: str = Form(None)):
+async def initial_text_chunking(
+    path: str = Form(...),
+    model: str = Form(None),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     Generates initial text chunks from a CSV file.
 
@@ -400,8 +449,26 @@ async def initial_text_chunking(path: str = Form(...), model: str = Form(None)):
     logger.info(f"  Input CSV: {input_csv}")
     logger.info(f"  Output dir: {absolute_processing_path}")
     logger.info(f"  Model: {model}")
-    
+
     try:
+        # Determine required credentials based on model
+        # Models with '/' format use OpenRouter, otherwise OpenAI
+        if model and '/' in model:
+            required_keys = ["openrouter_api_key"]
+        else:
+            required_keys = ["openai_api_key"]
+
+        # Build secure subprocess environment with user credentials
+        try:
+            subprocess_env = build_subprocess_env(current_user, required_keys=required_keys)
+        except CredentialMissingError as e:
+            logger.warning(f"User {current_user.email} missing credential: {e.credential_key}")
+            return JSONResponse(status_code=403, content={
+                "error": str(e),
+                "credential_required": e.credential_key,
+                "configure_url": "/settings/credentials"
+            })
+
         # Run rad_chunk.py with phase=initial (tracked for session-aware stop)
         result = await run_tracked_subprocess(
             cmd=[
@@ -412,7 +479,8 @@ async def initial_text_chunking(path: str = Form(...), model: str = Form(None)):
                 "--model", model
             ],
             session_folder=path,
-            timeout=1800
+            timeout=1800,
+            env=subprocess_env
         )
 
         if result.returncode != 0:
@@ -465,7 +533,10 @@ async def initial_text_chunking(path: str = Form(...), model: str = Form(None)):
 
 
 @router.post("/process_dataframe_sse")
-async def process_dataframe_sse(path: str = Form(...)):
+async def process_dataframe_sse(
+    path: str = Form(...),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     Process dataframe with Server-Sent Events for real-time progress updates.
     Streams progress from rad_dataframe.py execution.
@@ -501,19 +572,39 @@ async def process_dataframe_sse(path: str = Form(...)):
     
     json_path = os.path.join(absolute_processing_path, json_files[0])
     out_csv = os.path.join(absolute_processing_path, 'output.csv')
-    
+
+    # Build secure subprocess environment with user credentials
+    # rad_dataframe.py requires MISTRAL_API_KEY for OCR (or OPENAI_API_KEY as fallback)
+    try:
+        subprocess_env = build_subprocess_env(
+            current_user,
+            required_keys=["mistral_api_key"]
+        )
+    except CredentialMissingError:
+        # Try OpenAI as fallback
+        try:
+            subprocess_env = build_subprocess_env(
+                current_user,
+                required_keys=["openai_api_key"]
+            )
+            logger.info(f"Using OpenAI fallback for OCR (user {current_user.email})")
+        except CredentialMissingError:
+            async def error_generator():
+                yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message('mistral_api_key')}\", \"credential_required\": \"mistral_api_key\"}}\n\n"
+            return StreamingResponse(error_generator(), media_type="text/event-stream")
+
     # Build command
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_dataframe.py")
     cmd = ["python3", "-u", script_path, "--json", json_path, "--dir", absolute_processing_path, "--output", out_csv]
-    
-    logger.info(f"Executing: {' '.join(cmd)}")
+
+    logger.info(f"Executing for user {current_user.email}: {' '.join(cmd)}")
 
     # Use combined parser: prioritize structured PROGRESS logs, then tqdm, then custom logs
     parser = create_combined_parser(parse_multilevel_progress, parse_tqdm_progress, parse_dataframe_logs)
 
     # Wrap generator to add document count on complete
     async def sse_with_count():
-        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800, env=subprocess_env):
             if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
                 try:
                     if os.path.exists(out_csv):
@@ -529,12 +620,16 @@ async def process_dataframe_sse(path: str = Form(...)):
 
 
 @router.post("/dense_embedding_generation")
-async def dense_embedding_generation(path: str = Form(...)):
+async def dense_embedding_generation(
+    path: str = Form(...),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     Generate dense embeddings using rad_chunk.py with phase=dense.
+    Requires OpenAI API key for embedding generation.
     """
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
-    logger.info(f"Dense embedding generation for path: '{path}'")
+    logger.info(f"Dense embedding generation for path: '{path}' by user {current_user.email}")
     
     if not os.path.isdir(absolute_processing_path):
         return JSONResponse(status_code=400, content={"error": f"Directory not found: {path}"})
@@ -548,7 +643,19 @@ async def dense_embedding_generation(path: str = Form(...)):
     
     output_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings.json')
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
-    
+
+    # Build secure subprocess environment with user credentials
+    # Dense embedding generation requires OpenAI API key
+    try:
+        subprocess_env = build_subprocess_env(current_user, required_keys=["openai_api_key"])
+    except CredentialMissingError as e:
+        logger.warning(f"User {current_user.email} missing credential: {e.credential_key}")
+        return JSONResponse(status_code=403, content={
+            "error": str(e),
+            "credential_required": e.credential_key,
+            "configure_url": "/settings/credentials"
+        })
+
     try:
         result = await run_tracked_subprocess(
             cmd=[
@@ -558,7 +665,8 @@ async def dense_embedding_generation(path: str = Form(...)):
                 "--phase", "dense"
             ],
             session_folder=path,
-            timeout=1800
+            timeout=1800,
+            env=subprocess_env
         )
 
         if result.returncode != 0:
@@ -594,12 +702,16 @@ async def dense_embedding_generation(path: str = Form(...)):
 
 
 @router.post("/sparse_embedding_generation")
-async def sparse_embedding_generation(path: str = Form(...)):
+async def sparse_embedding_generation(
+    path: str = Form(...),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     Generate sparse embeddings using rad_chunk.py with phase=sparse.
+    Uses local spaCy model - no external API credentials required.
     """
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
-    logger.info(f"Sparse embedding generation for path: '{path}'")
+    logger.info(f"Sparse embedding generation for path: '{path}' by user {current_user.email}")
     
     if not os.path.isdir(absolute_processing_path):
         return JSONResponse(status_code=400, content={"error": f"Directory not found: {path}"})
@@ -613,7 +725,11 @@ async def sparse_embedding_generation(path: str = Form(...)):
     
     output_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings_sparse.json')
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
-    
+
+    # Build subprocess environment (no external credentials required for sparse/spaCy)
+    # Still use build_subprocess_env for proper credential isolation
+    subprocess_env = build_subprocess_env(current_user)
+
     try:
         result = await run_tracked_subprocess(
             cmd=[
@@ -623,7 +739,8 @@ async def sparse_embedding_generation(path: str = Form(...)):
                 "--phase", "sparse"
             ],
             session_folder=path,
-            timeout=1800
+            timeout=1800,
+            env=subprocess_env
         )
 
         if result.returncode != 0:
@@ -666,13 +783,15 @@ async def upload_db(
     pinecone_namespace: str = Form(None),
     weaviate_class_name: str = Form(None),
     weaviate_tenant_name: str = Form(None),
-    qdrant_collection_name: str = Form(None)
+    qdrant_collection_name: str = Form(None),
+    current_user: User = Depends(get_current_active_user)
 ):
     """
     Upload embeddings to vector database using rad_vectordb.py.
+    Requires credentials based on the selected database.
     """
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
-    logger.info(f"Vector DB upload for path: '{path}', db: {db_choice}")
+    logger.info(f"Vector DB upload for path: '{path}', db: {db_choice}, user: {current_user.email}")
     
     if not os.path.isdir(absolute_processing_path):
         return JSONResponse(status_code=400, content={"error": f"Directory not found: {path}"})
@@ -687,10 +806,31 @@ async def upload_db(
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_vectordb.py")
     if not os.path.exists(script_path):
         return JSONResponse(status_code=500, content={"error": "Vector DB script not found"})
-    
+
+    # Determine required credentials based on db_choice
+    if db_choice == "pinecone":
+        required_keys = ["pinecone_api_key"]
+    elif db_choice == "weaviate":
+        required_keys = ["weaviate_url"]  # API key optional for some setups
+    elif db_choice == "qdrant":
+        required_keys = ["qdrant_url"]  # API key optional for local instances
+    else:
+        return JSONResponse(status_code=400, content={"error": f"Unknown database type: {db_choice}"})
+
+    # Build secure subprocess environment with user credentials
+    try:
+        subprocess_env = build_subprocess_env(current_user, required_keys=required_keys)
+    except CredentialMissingError as e:
+        logger.warning(f"User {current_user.email} missing credential: {e.credential_key}")
+        return JSONResponse(status_code=403, content={
+            "error": str(e),
+            "credential_required": e.credential_key,
+            "configure_url": "/settings/credentials"
+        })
+
     # Build command based on db_choice
     cmd = ["python3", script_path, "--input", input_file, "--db", db_choice]
-    
+
     if db_choice == "pinecone":
         if pinecone_index_name:
             cmd.extend(["--index", pinecone_index_name])
@@ -704,12 +844,13 @@ async def upload_db(
     elif db_choice == "qdrant":
         if qdrant_collection_name:
             cmd.extend(["--collection", qdrant_collection_name])
-    
+
     try:
         result = await run_tracked_subprocess(
             cmd=cmd,
             session_folder=path,
-            timeout=3600  # 1h for large uploads
+            timeout=3600,  # 1h for large uploads
+            env=subprocess_env
         )
 
         if result.returncode != 0:
@@ -750,7 +891,8 @@ async def upload_db(
 async def generate_zotero_notes_sse(
     session: str = Form(...),
     extended_analysis: str = Form("false"),
-    model: str = Form(None)
+    model: str = Form(None),
+    current_user: User = Depends(get_current_active_user)
 ):
     """
     Generate Zotero notes with SSE progress updates.
@@ -760,8 +902,11 @@ async def generate_zotero_notes_sse(
     2. Generates notes via LLM using build_note_html()
     3. Creates notes in Zotero via API (if credentials available)
     4. Streams real-time progress via SSE
+
+    Requires:
+    - OpenAI API key (or OpenRouter for alternative models)
+    - Zotero credentials (optional - for sync to Zotero library)
     """
-    from dotenv import load_dotenv
     from app.utils.llm_note_generator import (
         build_note_html_async, build_abstract_text_async, sentinel_in_html
     )
@@ -770,11 +915,8 @@ async def generate_zotero_notes_sse(
         update_item_abstract, ZoteroAPIError
     )
 
-    # Reload .env to pick up any credential changes
-    load_dotenv(override=True)
-
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, session))
-    logger.info(f"Zotero notes generation for session: '{session}', extended: {extended_analysis}, model: {model}")
+    logger.info(f"Zotero notes generation for session: '{session}', extended: {extended_analysis}, model: {model}, user: {current_user.email}")
 
     # Parse extended_analysis flag
     use_extended = extended_analysis.lower() in ("true", "1", "yes")
@@ -805,10 +947,25 @@ async def generate_zotero_notes_sse(
 
             total_items = len(df)
 
-            # Check Zotero credentials
-            zotero_api_key = os.getenv("ZOTERO_API_KEY", "")
-            zotero_user_id = os.getenv("ZOTERO_USER_ID", "")
-            zotero_group_id = os.getenv("ZOTERO_GROUP_ID", "")
+            # Check LLM credentials (required for note generation)
+            # Retrieve both API keys (one may be None)
+            openai_key = get_credential_or_env(current_user, "openai_api_key")
+            openrouter_key = get_credential_or_env(current_user, "openrouter_api_key")
+
+            # Validate based on model type
+            if model and '/' in model:
+                if not openrouter_key:
+                    yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message('openrouter_api_key')}\", \"credential_required\": \"openrouter_api_key\"}}\n\n"
+                    return
+            else:
+                if not openai_key:
+                    yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message('openai_api_key')}\", \"credential_required\": \"openai_api_key\"}}\n\n"
+                    return
+
+            # Get Zotero credentials (optional - for sync to library)
+            zotero_api_key = get_credential_or_env(current_user, "zotero_api_key") or ""
+            zotero_user_id = get_credential_or_env(current_user, "zotero_user_id") or ""
+            zotero_group_id = get_credential_or_env(current_user, "zotero_group_id") or ""
 
             # Determine library type and ID
             has_zotero_creds = bool(zotero_api_key)
@@ -881,7 +1038,9 @@ async def generate_zotero_notes_sse(
                             text_content=texteocr,
                             model=model,
                             use_llm=True,
-                            extended_analysis=True
+                            extended_analysis=True,
+                            openai_api_key=openai_key,
+                            openrouter_api_key=openrouter_key
                         )
 
                         # Store generated note
@@ -945,7 +1104,9 @@ async def generate_zotero_notes_sse(
                         summary_text = await build_abstract_text_async(
                             metadata=metadata,
                             text_content=texteocr,
-                            model=model
+                            model=model,
+                            openai_api_key=openai_key,
+                            openrouter_api_key=openrouter_key
                         )
 
                         # Store generated summary
@@ -1030,7 +1191,11 @@ async def generate_zotero_notes_sse(
 # ============================================================================
 
 @router.post("/initial_text_chunking_sse")
-async def initial_text_chunking_sse(path: str = Form(...), model: str = Form(None)):
+async def initial_text_chunking_sse(
+    path: str = Form(...),
+    model: str = Form(None),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     SSE version of initial_text_chunking for real-time progress updates.
     Uses multilevel progress parser for dual progress bars (documents + chunks).
@@ -1056,7 +1221,21 @@ async def initial_text_chunking_sse(path: str = Form(...), model: str = Form(Non
     
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     model = model or "gpt-4o-mini"
-    
+
+    # Determine required credentials based on model
+    if model and '/' in model:
+        required_keys = ["openrouter_api_key"]
+    else:
+        required_keys = ["openai_api_key"]
+
+    # Build secure subprocess environment with user credentials
+    try:
+        subprocess_env = build_subprocess_env(current_user, required_keys=required_keys)
+    except CredentialMissingError as e:
+        async def error_generator():
+            yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\", \"credential_required\": \"{e.credential_key}\"}}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
+
     cmd = [
         "python3", "-u", script_path,  # -u for unbuffered output
         "--input", input_csv,
@@ -1072,7 +1251,7 @@ async def initial_text_chunking_sse(path: str = Form(...), model: str = Form(Non
     output_file = os.path.join(absolute_processing_path, 'output_chunks.json')
 
     async def sse_with_count():
-        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800, env=subprocess_env):
             # Intercept complete event to add count
             if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
                 try:
@@ -1090,10 +1269,14 @@ async def initial_text_chunking_sse(path: str = Form(...), model: str = Form(Non
 
 
 @router.post("/dense_embedding_generation_sse")
-async def dense_embedding_generation_sse(path: str = Form(...)):
+async def dense_embedding_generation_sse(
+    path: str = Form(...),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     SSE version of dense_embedding_generation for real-time progress updates.
     Uses multilevel progress parser for dual progress bars (documents + chunks).
+    Requires OpenAI API key for embedding generation.
     """
     from app.utils.sse_helpers import (
         run_subprocess_with_sse, create_combined_parser,
@@ -1106,6 +1289,14 @@ async def dense_embedding_generation_sse(path: str = Form(...)):
     if not os.path.exists(input_chunks):
         async def error_generator():
             yield f"data: {{\"type\": \"error\", \"message\": \"output_chunks.json not found\"}}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
+
+    # Build secure subprocess environment with user credentials
+    try:
+        subprocess_env = build_subprocess_env(current_user, required_keys=["openai_api_key"])
+    except CredentialMissingError as e:
+        async def error_generator():
+            yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\", \"credential_required\": \"{e.credential_key}\"}}\n\n"
         return StreamingResponse(error_generator(), media_type="text/event-stream")
 
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
@@ -1124,7 +1315,7 @@ async def dense_embedding_generation_sse(path: str = Form(...)):
     logger.info(f"Dense embedding expecting output at: {output_file}")
 
     async def sse_with_count():
-        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800, env=subprocess_env):
             if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
                 try:
                     logger.info(f"Dense complete event received, checking for output file: {output_file}")
@@ -1145,10 +1336,14 @@ async def dense_embedding_generation_sse(path: str = Form(...)):
 
 
 @router.post("/sparse_embedding_generation_sse")
-async def sparse_embedding_generation_sse(path: str = Form(...)):
+async def sparse_embedding_generation_sse(
+    path: str = Form(...),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     SSE version of sparse_embedding_generation for real-time progress updates.
     Uses multilevel progress parser for chunk-level progress display.
+    Uses local spaCy model - no external API credentials required.
     """
     from app.utils.sse_helpers import (
         run_subprocess_with_sse, create_combined_parser,
@@ -1162,6 +1357,10 @@ async def sparse_embedding_generation_sse(path: str = Form(...)):
         async def error_generator():
             yield f"data: {{\"type\": \"error\", \"message\": \"output_chunks_with_embeddings.json not found\"}}\n\n"
         return StreamingResponse(error_generator(), media_type="text/event-stream")
+
+    # Build subprocess environment (no external credentials required for sparse/spaCy)
+    # Still use build_subprocess_env for proper credential isolation
+    subprocess_env = build_subprocess_env(current_user)
 
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     cmd = [
@@ -1179,7 +1378,7 @@ async def sparse_embedding_generation_sse(path: str = Form(...)):
     logger.info(f"Sparse embedding expecting output at: {output_file}")
 
     async def sse_with_count():
-        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800):
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800, env=subprocess_env):
             if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
                 try:
                     logger.info(f"Sparse complete event received, checking for output file: {output_file}")

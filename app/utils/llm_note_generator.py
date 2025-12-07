@@ -55,41 +55,55 @@ def get_llm_semaphore() -> asyncio.Semaphore:
     return _llm_semaphore
 
 
-def _get_llm_clients() -> Tuple[Optional[OpenAI], Optional[OpenAI], str]:
+def _get_llm_clients(
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None,
+    openrouter_model: Optional[str] = None
+) -> Tuple[Optional[OpenAI], Optional[OpenAI], str]:
     """
-    Initializes and returns LLM clients based on environment variables.
+    Initializes and returns LLM clients.
 
-    This function dynamically loads API keys from the environment, allowing for
-    real-time updates to credentials without restarting the server. It configures
-    and returns clients for OpenAI and OpenRouter if their respective API keys
-    are available.
+    This function accepts API keys as parameters for secure credential handling.
+    If no credentials are passed, falls back to environment variables for
+    backward compatibility.
+
+    Args:
+        openai_api_key: OpenAI API key. If None, uses OPENAI_API_KEY from env.
+        openrouter_api_key: OpenRouter API key. If None, uses OPENROUTER_API_KEY from env.
+        openrouter_model: Default OpenRouter model. If None, uses OPENROUTER_DEFAULT_MODEL from env.
 
     Returns:
         A tuple containing:
         - openai_client (Optional[OpenAI]): An initialized OpenAI client if the
-          `OPENAI_API_KEY` is set, otherwise None.
+          API key is available, otherwise None.
         - openrouter_client (Optional[OpenAI]): An initialized client for OpenRouter
-          if the `OPENROUTER_API_KEY` is set, otherwise None.
-        - default_model (str): The default model identifier, sourced from
-          `OPENROUTER_DEFAULT_MODEL` or a fallback value.
-    """
-    # Reload .env to pick up any changes
-    load_dotenv(override=True)
+          if the API key is available, otherwise None.
+        - default_model (str): The default model identifier.
 
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
-    default_model = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
+    Security Note:
+        When using this module from authenticated endpoints, always pass
+        credentials explicitly from the user's credential store to prevent
+        non-admin users from accessing .env credentials.
+    """
+    # Use provided credentials or fall back to environment
+    if openai_api_key is None or openrouter_api_key is None:
+        # Reload .env only if falling back to environment
+        load_dotenv(override=True)
+
+    _openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+    _openrouter_api_key = openrouter_api_key or os.getenv("OPENROUTER_API_KEY")
+    default_model = openrouter_model or os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
 
     openai_client = None
     openrouter_client = None
 
-    if openai_api_key:
-        openai_client = OpenAI(api_key=openai_api_key)
+    if _openai_api_key:
+        openai_client = OpenAI(api_key=_openai_api_key)
         logger.debug("OpenAI client initialized for note generation")
 
-    if openrouter_api_key:
+    if _openrouter_api_key:
         openrouter_client = OpenAI(
-            api_key=openrouter_api_key,
+            api_key=_openrouter_api_key,
             base_url="https://openrouter.ai/api/v1"
         )
         logger.debug("OpenRouter client initialized for note generation")
@@ -262,7 +276,14 @@ Commence directement par le contenu HTML, sans préambule."""
         return prompt
 
 
-def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2, extended_analysis: bool = True) -> str:
+def _generate_with_llm(
+    prompt: str,
+    model: Optional[str] = None,
+    temperature: float = 0.2,
+    extended_analysis: bool = True,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
+) -> str:
     """
     Generate note content using LLM.
 
@@ -272,6 +293,8 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2,
                If None, uses OPENROUTER_DEFAULT_MODEL from .env
         temperature: Sampling temperature (0.0 to 1.0)
         extended_analysis: If True, use max_tokens=16000. If False, use max_tokens=2000.
+        openai_api_key: Optional OpenAI API key. If None, uses environment.
+        openrouter_api_key: Optional OpenRouter API key. If None, uses environment.
 
     Returns:
         Generated HTML content
@@ -280,8 +303,11 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2,
         ValueError: If no LLM client is available
         Exception: If the API call fails
     """
-    # Get fresh clients from environment
-    openai_client, openrouter_client, default_model = _get_llm_clients()
+    # Get clients with provided credentials or from environment
+    openai_client, openrouter_client, default_model = _get_llm_clients(
+        openai_api_key=openai_api_key,
+        openrouter_api_key=openrouter_api_key
+    )
 
     # Use default model if no model specified
     if not model:
@@ -443,7 +469,9 @@ def build_note_html(
     text_content: Optional[str] = None,
     model: Optional[str] = None,
     use_llm: bool = True,
-    extended_analysis: bool = True
+    extended_analysis: bool = True,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
 ) -> Tuple[str, str]:
     """
     Build a reading note in HTML format with a unique sentinel.
@@ -458,6 +486,10 @@ def build_note_html(
         use_llm: Whether to use LLM or fallback to template (default: True)
         extended_analysis: If True, generate exhaustive analysis (8000-12000 words).
                           If False, generate quick summary (200-300 words).
+        openai_api_key: Optional OpenAI API key for secure credential passing.
+                        If None, falls back to environment variable.
+        openrouter_api_key: Optional OpenRouter API key for secure credential passing.
+                           If None, falls back to environment variable.
 
     Returns:
         Tuple of (sentinel, note_html):
@@ -476,8 +508,11 @@ def build_note_html(
         >>> print(sentinel)
         ragpy-note-id:abc123...
     """
-    # Get fresh clients from environment
-    openai_client, openrouter_client, default_model = _get_llm_clients()
+    # Get clients with provided credentials or from environment
+    openai_client, openrouter_client, default_model = _get_llm_clients(
+        openai_api_key=openai_api_key,
+        openrouter_api_key=openrouter_api_key
+    )
 
     # Use default model if no model specified
     if not model:
@@ -500,7 +535,13 @@ def build_note_html(
             else:
                 # Build prompt and generate with LLM
                 prompt = _build_prompt(metadata, content, language, extended_analysis=extended_analysis)
-                body_html = _generate_with_llm(prompt, model=model, extended_analysis=extended_analysis)
+                body_html = _generate_with_llm(
+                    prompt,
+                    model=model,
+                    extended_analysis=extended_analysis,
+                    openai_api_key=openai_api_key,
+                    openrouter_api_key=openrouter_api_key
+                )
         except Exception as e:
             logger.error(f"LLM generation failed, using template fallback: {e}")
             body_html = _fallback_template(metadata, language)
@@ -521,7 +562,9 @@ def build_note_html(
 def build_abstract_text(
     metadata: Dict,
     text_content: Optional[str] = None,
-    model: Optional[str] = None
+    model: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
 ) -> str:
     """
     Build an abstract/summary text to enrich Zotero's abstractNote field.
@@ -533,6 +576,10 @@ def build_abstract_text(
         metadata: Dictionary with item metadata (title, authors, abstract, etc.)
         text_content: Full text content (texteocr). If None, will use abstract only.
         model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
+        openai_api_key: Optional OpenAI API key for secure credential passing.
+                        If None, falls back to environment variable.
+        openrouter_api_key: Optional OpenRouter API key for secure credential passing.
+                           If None, falls back to environment variable.
 
     Returns:
         Plain text summary string (200-350 words)
@@ -549,8 +596,11 @@ def build_abstract_text(
         >>> print(summary)
         This study investigates...
     """
-    # Get fresh clients from environment
-    openai_client, openrouter_client, default_model = _get_llm_clients()
+    # Get clients with provided credentials or from environment
+    openai_client, openrouter_client, default_model = _get_llm_clients(
+        openai_api_key=openai_api_key,
+        openrouter_api_key=openrouter_api_key
+    )
 
     # Use default model if no model specified
     if not model:
@@ -578,7 +628,13 @@ def build_abstract_text(
         prompt = _build_prompt(metadata, content, language, extended_analysis=False)
 
         # Generate with LLM (use smaller max_tokens for plain text summary)
-        summary = _generate_with_llm(prompt, model=model, extended_analysis=False)
+        summary = _generate_with_llm(
+            prompt,
+            model=model,
+            extended_analysis=False,
+            openai_api_key=openai_api_key,
+            openrouter_api_key=openrouter_api_key
+        )
 
         # Clean up the response - remove any HTML tags that might have slipped through
         import re
@@ -639,13 +695,19 @@ async def build_note_html_async(
     text_content: Optional[str] = None,
     model: Optional[str] = None,
     use_llm: bool = True,
-    extended_analysis: bool = True
+    extended_analysis: bool = True,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
 ) -> Tuple[str, str]:
     """
     Async version of build_note_html with global concurrency control.
 
     Uses a semaphore to limit concurrent LLM calls across all users.
     See build_note_html for full documentation.
+
+    Args:
+        openai_api_key: Optional OpenAI API key for secure credential passing.
+        openrouter_api_key: Optional OpenRouter API key for secure credential passing.
     """
     semaphore = get_llm_semaphore()
 
@@ -662,7 +724,9 @@ async def build_note_html_async(
                     text_content=text_content,
                     model=model,
                     use_llm=use_llm,
-                    extended_analysis=extended_analysis
+                    extended_analysis=extended_analysis,
+                    openai_api_key=openai_api_key,
+                    openrouter_api_key=openrouter_api_key
                 )
             )
             return result
@@ -673,13 +737,19 @@ async def build_note_html_async(
 async def build_abstract_text_async(
     metadata: Dict,
     text_content: Optional[str] = None,
-    model: Optional[str] = None
+    model: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
 ) -> str:
     """
     Async version of build_abstract_text with global concurrency control.
 
     Uses a semaphore to limit concurrent LLM calls across all users.
     See build_abstract_text for full documentation.
+
+    Args:
+        openai_api_key: Optional OpenAI API key for secure credential passing.
+        openrouter_api_key: Optional OpenRouter API key for secure credential passing.
     """
     semaphore = get_llm_semaphore()
 
@@ -694,7 +764,9 @@ async def build_abstract_text_async(
                 lambda: build_abstract_text(
                     metadata=metadata,
                     text_content=text_content,
-                    model=model
+                    model=model,
+                    openai_api_key=openai_api_key,
+                    openrouter_api_key=openrouter_api_key
                 )
             )
             return result

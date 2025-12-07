@@ -38,6 +38,16 @@ def run_migrations():
                 conn.commit()
             logger.info("Migration completed: api_credentials column added")
 
+        # Migration: Ajouter is_pending_approval a la table users (sandbox mode)
+        if "is_pending_approval" not in columns:
+            logger.info("Migration: Adding is_pending_approval column to users table")
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "ALTER TABLE users ADD COLUMN is_pending_approval BOOLEAN DEFAULT 0 NOT NULL"
+                ))
+                conn.commit()
+            logger.info("Migration completed: is_pending_approval column added")
+
     # Migration: Ajouter indexes sur pipeline_sessions pour optimiser les queries
     if "pipeline_sessions" in inspector.get_table_names():
         _migrate_pipeline_sessions_indexes(inspector)

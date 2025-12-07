@@ -280,7 +280,13 @@ def _validate_filter_result(data: Dict) -> CitationFilterResult:
         raise ValueError(f"Filter result validation failed: {str(e)}")
 
 
-def _call_llm_api(prompt: str, model: str = "gpt-4o-mini", temperature: float = 0.2) -> str:
+def _call_llm_api(
+    prompt: str,
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.2,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
+) -> str:
     """
     Call LLM API (synchronous wrapper for OpenAI/OpenRouter).
 
@@ -288,6 +294,8 @@ def _call_llm_api(prompt: str, model: str = "gpt-4o-mini", temperature: float = 
         prompt: Formatted prompt
         model: Model identifier
         temperature: Sampling temperature (0-1)
+        openai_api_key: Optional OpenAI API key (falls back to env for admin users)
+        openrouter_api_key: Optional OpenRouter API key (falls back to env for admin users)
 
     Returns:
         Raw LLM response text
@@ -295,7 +303,10 @@ def _call_llm_api(prompt: str, model: str = "gpt-4o-mini", temperature: float = 
     Raises:
         ValueError: If API call fails or no clients available
     """
-    openai_client, openrouter_client, default_model = _get_llm_clients()
+    openai_client, openrouter_client, default_model = _get_llm_clients(
+        openai_api_key=openai_api_key,
+        openrouter_api_key=openrouter_api_key
+    )
 
     # Determine which client to use
     if "/" in model:  # OpenRouter format
@@ -336,7 +347,9 @@ async def filter_citation_with_llm(
     collection_name: str,
     collection_description: str,
     model: str = "gpt-4o-mini",
-    max_retries: int = 1
+    max_retries: int = 1,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
 ) -> Union[Dict, str]:
     """
     Filter citation using LLM with global concurrency control.
@@ -358,6 +371,8 @@ async def filter_citation_with_llm(
         collection_description: Collection description
         model: LLM model identifier
         max_retries: Number of retries on failure
+        openai_api_key: Optional OpenAI API key (for non-admin users)
+        openrouter_api_key: Optional OpenRouter API key (for non-admin users)
 
     Returns:
         If relevant: Dictionary with keys:
@@ -410,7 +425,13 @@ async def filter_citation_with_llm(
                 loop = asyncio.get_event_loop()
                 response_text = await loop.run_in_executor(
                     None,
-                    lambda: _call_llm_api(prompt, model=model, temperature=0.2)
+                    lambda: _call_llm_api(
+                        prompt,
+                        model=model,
+                        temperature=0.2,
+                        openai_api_key=openai_api_key,
+                        openrouter_api_key=openrouter_api_key
+                    )
                 )
 
                 # Parse response

@@ -161,22 +161,32 @@ async def get_current_active_user(
     FastAPI dependency to get an active and verified user.
 
     This function builds on `get_current_user` by adding checks to ensure
-    the user's account is active, not locked, and has been verified.
+    the user's account is active, not locked, has been verified, and is
+    approved by admin (if sandbox mode is enabled).
 
     Args:
         user: The user object from `get_current_user`.
 
     Returns:
-        The `User` object if the user is active and verified.
+        The `User` object if the user is active, verified, and approved.
 
     Raises:
-        HTTPException: If the account is inactive (403), locked (423), or
-                       not verified (403).
+        HTTPException: If the account is pending approval (403), inactive (403),
+                       locked (423), or not verified (403).
     """
+    # Check for pending admin approval (sandbox mode)
+    # This check comes BEFORE is_active to provide a specific error message
+    if hasattr(user, 'is_pending_approval') and user.is_pending_approval:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account is still blocked. The site administrator has not yet approved it.",
+            headers={"X-Admin-Approval-Required": "true"}
+        )
+
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Compte désactivé"
+            detail="Votre compte a été désactivé. Contactez un administrateur."
         )
 
     if user.is_locked:

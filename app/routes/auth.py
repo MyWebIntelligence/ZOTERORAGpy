@@ -88,6 +88,10 @@ async def register(
 
     should_be_admin = not admin_exists
 
+    # Determine if sandbox mode should apply
+    # First admin is NEVER blocked, even in sandbox mode
+    should_be_blocked = settings.USERS_SANDBOX and not should_be_admin
+
     # Créer l'utilisateur
     new_user = User(
         email=user_data.email.lower(),
@@ -97,8 +101,9 @@ async def register(
         organization=user_data.organization,
         title=user_data.title,
         roles=["USER", "ADMIN"] if should_be_admin else ["USER"],
-        is_active=True,
+        is_active=not should_be_blocked,  # Blocked if sandbox mode
         is_verified=should_be_admin,  # Auto-vérifié si devient admin
+        is_pending_approval=should_be_blocked,  # Pending approval if sandbox mode
         verification_token=None if should_be_admin else generate_verification_token()
     )
 
@@ -116,7 +121,9 @@ async def register(
         details={
             "email": new_user.email,
             "auto_promoted_admin": should_be_admin,
-            "reason": "no_admin_existed" if should_be_admin else None
+            "reason": "no_admin_existed" if should_be_admin else None,
+            "sandbox_mode": settings.USERS_SANDBOX,
+            "pending_approval": should_be_blocked
         },
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("User-Agent")
@@ -141,6 +148,7 @@ async def register(
         roles=new_user.roles or [],
         is_active=new_user.is_active,
         is_verified=new_user.is_verified,
+        is_pending_approval=new_user.is_pending_approval,
         is_admin=new_user.is_admin,
         created_at=new_user.created_at,
         last_login=new_user.last_login
@@ -568,6 +576,7 @@ async def get_current_user_info(
         roles=current_user.roles or [],
         is_active=current_user.is_active,
         is_verified=current_user.is_verified,
+        is_pending_approval=current_user.is_pending_approval,
         is_admin=current_user.is_admin,
         created_at=current_user.created_at,
         last_login=current_user.last_login

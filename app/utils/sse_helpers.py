@@ -30,7 +30,8 @@ async def run_subprocess_with_sse(
     session_folder: Optional[str] = None,
     error_keywords: Optional[list[str]] = None,
     timeout: Optional[int] = None,
-    heartbeat_interval: int = 15
+    heartbeat_interval: int = 15,
+    env: Optional[Dict[str, str]] = None
 ) -> AsyncGenerator[str, None]:
     """
     Execute a subprocess and stream SSE events by parsing stdout/stderr.
@@ -42,6 +43,8 @@ async def run_subprocess_with_sse(
         error_keywords: List of keywords that indicate errors in output
         timeout: Optional timeout in seconds
         heartbeat_interval: Seconds between heartbeat messages to keep connection alive (default: 15)
+        env: Optional environment dictionary for subprocess. If None, uses current env.
+             Use build_subprocess_env() to create a secure environment with user credentials.
 
     Yields:
         SSE-formatted strings: "data: {JSON}\\n\\n"
@@ -62,7 +65,8 @@ async def run_subprocess_with_sse(
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            env=env  # Pass custom environment if provided
         )
 
         # Register PID for session-aware process management

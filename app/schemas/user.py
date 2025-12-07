@@ -37,6 +37,7 @@ class UserResponse(BaseModel):
     roles: List[str] = []
     is_active: bool
     is_verified: bool
+    is_pending_approval: bool = False
     is_admin: bool
     created_at: Optional[datetime] = None
     last_login: Optional[datetime] = None
@@ -55,6 +56,7 @@ class UserResponse(BaseModel):
                 "roles": ["USER", "ADMIN"],
                 "is_active": True,
                 "is_verified": True,
+                "is_pending_approval": False,
                 "is_admin": True,
                 "created_at": "2024-01-15T10:30:00Z",
                 "last_login": "2024-01-20T14:00:00Z"
@@ -89,6 +91,7 @@ class UserAdminUpdate(BaseModel):
     roles: Optional[List[str]] = None
     is_active: Optional[bool] = None
     is_verified: Optional[bool] = None
+    is_pending_approval: Optional[bool] = None
 
     class Config:
         json_schema_extra = {
@@ -96,7 +99,8 @@ class UserAdminUpdate(BaseModel):
                 "first_name": "Jean",
                 "last_name": "Dupont",
                 "roles": ["USER", "ADMIN"],
-                "is_active": True
+                "is_active": True,
+                "is_pending_approval": False
             }
         }
 
@@ -127,6 +131,7 @@ class AdminStats(BaseModel):
     active_users: int
     admin_users: int
     verified_users: int
+    pending_approval_users: int = 0  # Users awaiting admin approval (sandbox mode)
     total_projects: int
     recent_logins: int  # Connexions des 7 derniers jours
 
@@ -137,6 +142,7 @@ class AdminStats(BaseModel):
                 "active_users": 45,
                 "admin_users": 3,
                 "verified_users": 40,
+                "pending_approval_users": 2,
                 "total_projects": 25,
                 "recent_logins": 30
             }
