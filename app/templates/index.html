@@ -521,12 +521,36 @@ do{% extends "base.html" %}
     display: block;
   }
 
-  .db-params input {
+  .db-params input,
+  .db-params select {
     width: 100%;
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     font-size: var(--text-sm);
+    background: var(--color-surface);
+  }
+
+  .db-params .input-with-button {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+  }
+
+  .db-params .input-with-button select {
+    flex: 1;
+  }
+
+  .db-params .input-with-button .btn {
+    flex-shrink: 0;
+    padding: var(--space-2);
+  }
+
+  .db-params small {
+    display: block;
+    margin-top: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
   }
 
   /* Progress Bar - Override components.css conflicting rules */
@@ -896,13 +920,10 @@ do{% extends "base.html" %}
       <div class="card mb-4">
         <div class="card-body">
           <h4 class="text-brand mb-3"><i class="bi bi-database"></i> Pinecone</h4>
-          <div class="form-group">
+          <div class="form-group mb-0">
             <label class="form-label" for="pineconeKey">API Key</label>
             <input type="text" class="form-input" id="pineconeKey" name="PINECONE_API_KEY" autocomplete="off" placeholder="Pinecone API Key">
-          </div>
-          <div class="form-group mb-0">
-            <label class="form-label" for="pineconeEnv">Environment</label>
-            <input type="text" class="form-input" id="pineconeEnv" name="PINECONE_ENV" autocomplete="off" placeholder="Pinecone Environment">
+            <small class="text-secondary">Only API key needed. Indexes are auto-discovered.</small>
           </div>
         </div>
       </div>
@@ -1248,12 +1269,22 @@ do{% extends "base.html" %}
 
               <div id="pineconeParams" class="db-params">
                 <div>
-                  <label for="pineconeIndexName">Index Name</label>
-                  <input type="text" id="pineconeIndexName" name="pinecone_index_name" value="articles" placeholder="e.g., articles">
+                  <label for="pineconeIndexName">Index</label>
+                  <div class="input-with-button">
+                    <select id="pineconeIndexName" name="pinecone_index_name" class="form-select">
+                      <option value="">-- Select an index --</option>
+                    </select>
+                    <button type="button" id="refreshPineconeIndexes" class="btn btn-ghost btn-sm" title="Refresh indexes">
+                      <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                  </div>
+                  <small id="pineconeIndexInfo" class="text-secondary" style="display:none;"></small>
                 </div>
                 <div>
                   <label for="pineconeNamespace">Namespace (optional)</label>
-                  <input type="text" id="pineconeNamespace" name="pinecone_namespace" placeholder="e.g., workshop">
+                  <select id="pineconeNamespace" name="pinecone_namespace" class="form-select">
+                    <option value="">-- Default namespace --</option>
+                  </select>
                 </div>
               </div>
 
@@ -2210,11 +2241,105 @@ do{% extends "base.html" %}
   const weaviateParamsDiv = document.getElementById('weaviateParams');
   const qdrantParamsDiv = document.getElementById('qdrantParams');
 
+  // Pinecone indexes cache
+  let pineconeIndexesCache = null;
+
+  // Fetch Pinecone indexes from API
+  async function fetchPineconeIndexes(forceRefresh = false) {
+    const select = document.getElementById('pineconeIndexName');
+    const namespaceSelect = document.getElementById('pineconeNamespace');
+    const infoDiv = document.getElementById('pineconeIndexInfo');
+    const refreshBtn = document.getElementById('refreshPineconeIndexes');
+
+    // Show loading state
+    select.innerHTML = '<option value="">Loading indexes...</option>';
+    select.disabled = true;
+    if (refreshBtn) refreshBtn.disabled = true;
+
+    try {
+      const response = await fetch('/api/pinecone/indexes');
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        select.innerHTML = `<option value="">Error: ${data.error || 'Failed to load'}</option>`;
+        infoDiv.style.display = 'none';
+        return;
+      }
+
+      pineconeIndexesCache = data.indexes;
+
+      // Populate select
+      select.innerHTML = '<option value="">-- Select an index --</option>';
+      data.indexes.forEach(idx => {
+        const option = document.createElement('option');
+        option.value = idx.name;
+        option.textContent = `${idx.name} (${idx.vector_count || 0} vectors, dim=${idx.dimension})`;
+        option.dataset.host = idx.host;
+        option.dataset.dimension = idx.dimension;
+        option.dataset.namespaces = JSON.stringify(idx.namespaces || []);
+        select.appendChild(option);
+      });
+
+      if (data.indexes.length === 0) {
+        select.innerHTML = '<option value="">No indexes found</option>';
+      }
+
+    } catch (err) {
+      console.error('Error fetching Pinecone indexes:', err);
+      select.innerHTML = '<option value="">Error loading indexes</option>';
+    } finally {
+      select.disabled = false;
+      if (refreshBtn) refreshBtn.disabled = false;
+    }
+  }
+
+  // Update namespace dropdown when index changes
+  document.getElementById('pineconeIndexName').addEventListener('change', function() {
+    const namespaceSelect = document.getElementById('pineconeNamespace');
+    const infoDiv = document.getElementById('pineconeIndexInfo');
+    const selectedOption = this.options[this.selectedIndex];
+
+    if (!this.value) {
+      namespaceSelect.innerHTML = '<option value="">-- Default namespace --</option>';
+      infoDiv.style.display = 'none';
+      return;
+    }
+
+    // Show index info
+    const dim = selectedOption.dataset.dimension;
+    const host = selectedOption.dataset.host;
+    infoDiv.textContent = `Dimension: ${dim} | Host: ${host}`;
+    infoDiv.style.display = 'block';
+
+    // Populate namespaces
+    const namespaces = JSON.parse(selectedOption.dataset.namespaces || '[]');
+    namespaceSelect.innerHTML = '<option value="">-- Default namespace --</option>';
+    namespaces.forEach(ns => {
+      if (ns) {
+        const opt = document.createElement('option');
+        opt.value = ns;
+        opt.textContent = ns;
+        namespaceSelect.appendChild(opt);
+      }
+    });
+  });
+
+  // Refresh button
+  document.getElementById('refreshPineconeIndexes').addEventListener('click', () => {
+    fetchPineconeIndexes(true);
+  });
+
   dbChoiceSelect.addEventListener('change', function() {
     pineconeParamsDiv.style.display = 'none';
     weaviateParamsDiv.style.display = 'none';
     qdrantParamsDiv.style.display = 'none';
-    if (this.value === 'pinecone') pineconeParamsDiv.style.display = 'grid';
+    if (this.value === 'pinecone') {
+      pineconeParamsDiv.style.display = 'grid';
+      // Fetch indexes if not already loaded
+      if (!pineconeIndexesCache) {
+        fetchPineconeIndexes();
+      }
+    }
     else if (this.value === 'weaviate') weaviateParamsDiv.style.display = 'grid';
     else if (this.value === 'qdrant') qdrantParamsDiv.style.display = 'grid';
   });
