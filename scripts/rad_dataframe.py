@@ -1021,7 +1021,19 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
     ]
 
     # Load progress (items already processed)
+    progress_file = get_progress_file_path(output_csv)
     processed_keys = load_progress(output_csv)
+
+    # CRITICAL FIX: If no progress file but CSV exists, we have stale data
+    # This happens when user runs new extraction without cleaning up old files
+    if not os.path.exists(progress_file) and os.path.exists(output_csv):
+        logger.warning(f"No progress file found but CSV exists. Clearing stale data to start fresh.")
+        try:
+            os.remove(output_csv)
+            logger.info(f"Removed stale CSV: {output_csv}")
+        except Exception as e:
+            logger.error(f"Failed to remove stale CSV: {e}")
+
     # Use thread-safe set for parallel mode
     processed_keys_lock = threading.Lock()
     all_errors = []

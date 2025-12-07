@@ -15,6 +15,7 @@ Key Features:
 import time
 import uuid
 import logging
+import random
 from typing import Optional, Dict, List
 import requests
 
@@ -23,8 +24,8 @@ logger = logging.getLogger(__name__)
 # Constants
 ZOTERO_API_BASE = "https://api.zotero.org"
 ZOTERO_API_VERSION = "3"
-MAX_RETRIES = 3
-RETRY_DELAY = 2  # seconds
+MAX_RETRIES = 5  # Increased for library contention scenarios
+RETRY_DELAY = 2  # seconds (base delay)
 
 
 class ZoteroAPIError(Exception):
@@ -314,10 +315,11 @@ def create_child_note(
                     }
 
             elif response.status_code == 412:
-                # Version conflict - retry with new version
-                logger.warning(f"Version conflict (412), retrying (attempt {attempt + 1}/{MAX_RETRIES})")
+                # Version conflict - retry with new version and exponential backoff
+                backoff_delay = RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(f"Version conflict (412), retrying in {backoff_delay:.1f}s (attempt {attempt + 1}/{MAX_RETRIES})")
                 library_version = None  # Force refresh on next iteration
-                time.sleep(RETRY_DELAY)
+                time.sleep(backoff_delay)
                 continue
 
             elif response.status_code == 429:
