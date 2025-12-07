@@ -33,6 +33,7 @@ from app.models.pipeline_session import PipelineSession, SessionStatus
 from app.models.project import Project
 from app.middleware.auth import get_current_active_user
 from app.models.user import User
+from app.core.credentials import get_credential_or_env, get_credential_error_message
 from app.utils.publishorperish_parser import parse_pop_json
 from app.utils.citation_fetcher import fetch_citation_content
 from app.utils.citation_filter import filter_citation_with_llm
@@ -261,6 +262,23 @@ async def filter_citations_sse(
                 yield f'data: {{"type": "error", "message": "Failed to load configuration: {str(e)}"}}\n\n'
                 return
 
+            # Get LLM credentials (user credentials with admin fallback to .env)
+            openai_api_key = get_credential_or_env(current_user, "openai_api_key")
+            openrouter_api_key = get_credential_or_env(current_user, "openrouter_api_key")
+
+            # Validate credentials based on model type
+            model_name = config.get("model", "gpt-4o-mini")
+            if "/" in model_name:  # OpenRouter model format (e.g., google/gemini-2.5-flash)
+                if not openrouter_api_key:
+                    error_msg = get_credential_error_message("openrouter_api_key")
+                    yield f'data: {{"type": "error", "message": "{error_msg}", "credential_required": "openrouter_api_key"}}\n\n'
+                    return
+            else:  # OpenAI model
+                if not openai_api_key:
+                    error_msg = get_credential_error_message("openai_api_key")
+                    yield f'data: {{"type": "error", "message": "{error_msg}", "credential_required": "openai_api_key"}}\n\n'
+                    return
+
             # Update session status
             pipeline_session.status = SessionStatus.FILTERING_CITATIONS
             db.commit()
@@ -312,7 +330,9 @@ async def filter_citations_sse(
                             project_description=config["project_description"],
                             collection_name=config["collection_name"],
                             collection_description=config["collection_description"],
-                            model=config["model"]
+                            model=config["model"],
+                            openai_api_key=openai_api_key,
+                            openrouter_api_key=openrouter_api_key
                         )
 
                     # Categorize result
@@ -480,13 +500,22 @@ async def import_citations_sse(
                 yield f'data: {{"type": "error", "message": "Invalid citation index in selection"}}\n\n'
                 return
 
-            # Get Zotero credentials from environment
-            zotero_api_key = os.getenv("ZOTERO_API_KEY")
-            library_type = os.getenv("ZOTERO_LIBRARY_TYPE", "users")
-            library_id = os.getenv("ZOTERO_USER_ID")
+            # Get Zotero credentials (user credentials with admin fallback to .env)
+            zotero_api_key = get_credential_or_env(current_user, "zotero_api_key")
+            zotero_user_id = get_credential_or_env(current_user, "zotero_user_id")
+            zotero_group_id = get_credential_or_env(current_user, "zotero_group_id")
 
-            if not zotero_api_key or not library_id:
-                yield f'data: {{"type": "error", "message": "Zotero credentials not configured"}}\n\n'
+            # Determine library type based on available credentials
+            library_type = "groups" if zotero_group_id else "users"
+            library_id = zotero_group_id or zotero_user_id
+
+            if not zotero_api_key:
+                error_msg = get_credential_error_message("zotero_api_key")
+                yield f'data: {{"type": "error", "message": "{error_msg}", "credential_required": "zotero_api_key"}}\n\n'
+                return
+            if not library_id:
+                error_msg = get_credential_error_message("zotero_user_id")
+                yield f'data: {{"type": "error", "message": "{error_msg}", "credential_required": "zotero_user_id"}}\n\n'
                 return
 
             # Update session status

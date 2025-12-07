@@ -66,6 +66,11 @@ async def get_admin_stats(
     active_users = db.query(User).filter(User.is_active == True).count()
     verified_users = db.query(User).filter(User.is_verified == True).count()
 
+    # Compter les utilisateurs en attente d'approbation (sandbox mode)
+    pending_approval_users = db.query(User).filter(
+        User.is_pending_approval == True
+    ).count()
+
     # Compter les admins (JSON contains)
     admin_users = db.query(User).filter(
         User.roles.contains(["ADMIN"])
@@ -85,6 +90,7 @@ async def get_admin_stats(
         active_users=active_users,
         admin_users=admin_users,
         verified_users=verified_users,
+        pending_approval_users=pending_approval_users,
         total_projects=total_projects,
         recent_logins=recent_logins
     )
@@ -97,6 +103,7 @@ async def list_users(
     search: Optional[str] = Query(None, max_length=100),
     is_active: Optional[bool] = None,
     is_admin: Optional[bool] = None,
+    is_pending_approval: Optional[bool] = None,
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin)
 ):
@@ -127,6 +134,9 @@ async def list_users(
             # Pas admin = ne contient pas ADMIN (approximation)
             query = query.filter(~User.roles.contains(["ADMIN"]))
 
+    if is_pending_approval is not None:
+        query = query.filter(User.is_pending_approval == is_pending_approval)
+
     # Compter le total
     total = query.count()
 
@@ -150,6 +160,7 @@ async def list_users(
             roles=u.roles or [],
             is_active=u.is_active,
             is_verified=u.is_verified,
+            is_pending_approval=u.is_pending_approval,
             is_admin=u.is_admin,
             created_at=u.created_at,
             last_login=u.last_login
@@ -194,6 +205,7 @@ async def get_user(
         roles=user.roles or [],
         is_active=user.is_active,
         is_verified=user.is_verified,
+        is_pending_approval=user.is_pending_approval,
         is_admin=user.is_admin,
         created_at=user.created_at,
         last_login=user.last_login
@@ -242,6 +254,11 @@ async def update_user(
         user.is_active = user_data.is_active
     if user_data.is_verified is not None:
         user.is_verified = user_data.is_verified
+    if user_data.is_pending_approval is not None:
+        user.is_pending_approval = user_data.is_pending_approval
+        # If approving the user, also activate them
+        if not user_data.is_pending_approval and not user.is_active:
+            user.is_active = True
 
     db.commit()
     db.refresh(user)
@@ -269,6 +286,7 @@ async def update_user(
         roles=user.roles or [],
         is_active=user.is_active,
         is_verified=user.is_verified,
+        is_pending_approval=user.is_pending_approval,
         is_admin=user.is_admin,
         created_at=user.created_at,
         last_login=user.last_login
@@ -553,6 +571,50 @@ async def admin_verify_user(
     )
 
     return {"message": "Utilisateur vérifié avec succès"}
+
+
+@router.post("/users/{user_id}/approve")
+async def admin_approve_user(
+    user_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin)
+):
+    """
+    Approve a pending user (sandbox mode).
+
+    This endpoint is used to approve users who registered when USERS_SANDBOX=TRUE.
+    Once approved, the user can access the application.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur non trouvé"
+        )
+
+    if not user.is_pending_approval:
+        return {"message": "L'utilisateur n'est pas en attente d'approbation"}
+
+    # Approve the user
+    user.is_active = True
+    user.is_pending_approval = False
+    db.commit()
+
+    # Log d'audit
+    create_audit_log(
+        db=db,
+        action=AuditAction.USER_UNBLOCK,
+        user_id=admin.id,
+        resource_type="user",
+        resource_id=user.id,
+        details={"action": "admin_approval", "approved_by": admin.email},
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("User-Agent")
+    )
+
+    return {"message": "Utilisateur approuvé avec succès", "user_id": user.id, "email": user.email}
 
 
 # --- Pipeline Sessions Admin ---

@@ -45,6 +45,8 @@ class User(Base, TimestampMixin):
     # Statuts
     is_active = Column(Boolean, default=True, nullable=False)
     is_verified = Column(Boolean, default=False, nullable=False)
+    # Sandbox mode: user is pending admin approval
+    is_pending_approval = Column(Boolean, default=False, nullable=False)
 
     # Sécurité
     failed_login_attempts = Column(Integer, default=0, nullable=False)
@@ -134,6 +136,7 @@ class User(Base, TimestampMixin):
             "roles": self.roles or [],
             "is_active": self.is_active,
             "is_verified": self.is_verified,
+            "is_pending_approval": self.is_pending_approval,
             "is_admin": self.is_admin,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,

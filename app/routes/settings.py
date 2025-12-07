@@ -2,21 +2,28 @@
 Settings Routes
 ===============
 
-This module manages application-level settings and credentials. It allows users
-(typically admins or authorized users) to view and update API keys and configuration
-variables stored in the `.env` file.
+This module manages application-level settings and credentials. It allows ADMIN users
+only to view and update API keys and configuration variables stored in the `.env` file.
 
 Key Features:
-- Credential Management: Retrieve and save API keys (OpenAI, Pinecone, etc.).
-- Environment Configuration: Interface for modifying the `.env` file safely.
-- Vector DB Discovery: List available indexes from Pinecone, Weaviate, Qdrant.
+- Credential Management: Retrieve and save API keys (OpenAI, Pinecone, etc.) - ADMIN ONLY.
+- Environment Configuration: Interface for modifying the `.env` file safely - ADMIN ONLY.
+- Vector DB Discovery: List available indexes from Pinecone, Weaviate, Qdrant - AUTHENTICATED.
+
+Security Note:
+    All endpoints in this module require authentication.
+    .env file access is restricted to ADMIN role only.
+    Regular users should use their personal credentials stored in the database
+    via the /users/me/credentials endpoint.
 """
 import os
 import logging
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Query, Depends
 from fastapi.responses import JSONResponse
 
 from app.core.config import RAGPY_DIR
+from app.middleware.auth import require_admin, get_current_active_user
+from app.models.user import User
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -24,10 +31,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("/get_credentials")
-async def get_credentials():
+async def get_credentials(
+    admin_user: User = Depends(require_admin)
+):
     """
     Get credentials from ragpy/.env for the settings form.
+
+    **ADMIN ONLY**: This endpoint exposes sensitive API keys from the .env file.
+    Regular users should use /users/me/credentials for their personal credentials.
+
+    Args:
+        admin_user: The authenticated admin user (injected by require_admin).
+
+    Returns:
+        JSONResponse: Dictionary of credential key-value pairs.
+
+    Raises:
+        HTTPException 401: If not authenticated.
+        HTTPException 403: If user is not an admin.
     """
+    logger.info(f"Admin user {admin_user.email} accessing .env credentials")
     env_path = os.path.join(RAGPY_DIR, ".env")
     env_path = os.path.abspath(env_path)
     
@@ -75,11 +98,27 @@ async def get_credentials():
 
 @router.post("/save_credentials")
 async def save_credentials(
-    data: dict = Body(...)
+    data: dict = Body(...),
+    admin_user: User = Depends(require_admin)
 ):
     """
     Save credentials for OpenAI, OpenRouter, Mistral, Pinecone, Weaviate, Qdrant to ragpy/.env.
+
+    **ADMIN ONLY**: This endpoint modifies the application's .env file.
+    Regular users should use PUT /users/me/credentials for their personal credentials.
+
+    Args:
+        data: Dictionary of credential key-value pairs to save.
+        admin_user: The authenticated admin user (injected by require_admin).
+
+    Returns:
+        JSONResponse: Status message indicating success or failure.
+
+    Raises:
+        HTTPException 401: If not authenticated.
+        HTTPException 403: If user is not an admin.
     """
+    logger.info(f"Admin user {admin_user.email} saving .env credentials")
     env_path = os.path.join(RAGPY_DIR, ".env")
     env_path = os.path.abspath(env_path)
     logger.info(f"Attempting to save credentials to .env file at: {env_path}")
@@ -130,27 +169,48 @@ async def save_credentials(
 
 
 @router.get("/api/pinecone/indexes")
-async def list_pinecone_indexes(api_key: str = Query(None)):
+async def list_pinecone_indexes(
+    api_key: str = Query(None),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     List all available Pinecone indexes using the provided or configured API key.
+
+    **AUTHENTICATED**: Requires a valid authenticated user.
 
     With Pinecone v3+, each index has its own host URL. This endpoint returns
     the list of indexes with their metadata so the frontend can populate a dropdown.
 
     Args:
-        api_key: Optional API key. If not provided, uses PINECONE_API_KEY from env.
+        api_key: Optional API key. If not provided, uses user's credentials or PINECONE_API_KEY from env.
+        current_user: The authenticated user (injected by get_current_active_user).
 
     Returns:
         JSON with list of indexes containing name, dimension, metric, host, and stats.
+
+    Raises:
+        HTTPException 401: If not authenticated.
+        HTTPException 403: If account is inactive or not verified.
     """
-    # Get API key from parameter or environment
-    pinecone_api_key = api_key or os.getenv("PINECONE_API_KEY", "")
+    # Import credential helpers
+    from app.core.credentials import (
+        get_credential_or_env,
+        get_credential_error_message,
+        CredentialMissingError
+    )
+
+    # Get API key: parameter > user credentials > environment (admin only)
+    pinecone_api_key = api_key or get_credential_or_env(current_user, "pinecone_api_key")
 
     if not pinecone_api_key:
-        logger.warning("Pinecone API key not configured")
+        logger.warning(f"User {current_user.email} missing Pinecone credentials")
         return JSONResponse(
-            status_code=400,
-            content={"error": "Pinecone API key not configured. Please add it in Settings."}
+            status_code=403,
+            content={
+                "error": get_credential_error_message("pinecone_api_key"),
+                "credential_required": "pinecone_api_key",
+                "configure_url": "/settings/credentials"
+            }
         )
 
     try:
@@ -204,24 +264,42 @@ async def list_pinecone_indexes(api_key: str = Query(None)):
 
 
 @router.get("/api/weaviate/collections")
-async def list_weaviate_collections(api_key: str = Query(None), url: str = Query(None)):
+async def list_weaviate_collections(
+    api_key: str = Query(None),
+    url: str = Query(None),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     List all available Weaviate collections/classes.
 
+    **AUTHENTICATED**: Requires a valid authenticated user.
+
     Args:
-        api_key: Optional API key. If not provided, uses WEAVIATE_API_KEY from env.
-        url: Optional Weaviate URL. If not provided, uses WEAVIATE_URL from env.
+        api_key: Optional API key. If not provided, uses user's credentials or WEAVIATE_API_KEY from env.
+        url: Optional Weaviate URL. If not provided, uses user's credentials or WEAVIATE_URL from env.
+        current_user: The authenticated user (injected by get_current_active_user).
 
     Returns:
         JSON with list of collections.
+
+    Raises:
+        HTTPException 401: If not authenticated.
+        HTTPException 403: If account is inactive or not verified.
     """
-    weaviate_api_key = api_key or os.getenv("WEAVIATE_API_KEY", "")
-    weaviate_url = url or os.getenv("WEAVIATE_URL", "")
+    from app.core.credentials import get_credential_or_env, get_credential_error_message
+
+    weaviate_api_key = api_key or get_credential_or_env(current_user, "weaviate_api_key")
+    weaviate_url = url or get_credential_or_env(current_user, "weaviate_url")
 
     if not weaviate_url:
+        logger.warning(f"User {current_user.email} missing Weaviate URL")
         return JSONResponse(
-            status_code=400,
-            content={"error": "Weaviate URL not configured."}
+            status_code=403,
+            content={
+                "error": get_credential_error_message("weaviate_url"),
+                "credential_required": "weaviate_url",
+                "configure_url": "/settings/credentials"
+            }
         )
 
     try:
@@ -257,24 +335,42 @@ async def list_weaviate_collections(api_key: str = Query(None), url: str = Query
 
 
 @router.get("/api/qdrant/collections")
-async def list_qdrant_collections(api_key: str = Query(None), url: str = Query(None)):
+async def list_qdrant_collections(
+    api_key: str = Query(None),
+    url: str = Query(None),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     List all available Qdrant collections.
 
+    **AUTHENTICATED**: Requires a valid authenticated user.
+
     Args:
-        api_key: Optional API key. If not provided, uses QDRANT_API_KEY from env.
-        url: Optional Qdrant URL. If not provided, uses QDRANT_URL from env.
+        api_key: Optional API key. If not provided, uses user's credentials or QDRANT_API_KEY from env.
+        url: Optional Qdrant URL. If not provided, uses user's credentials or QDRANT_URL from env.
+        current_user: The authenticated user (injected by get_current_active_user).
 
     Returns:
         JSON with list of collections.
+
+    Raises:
+        HTTPException 401: If not authenticated.
+        HTTPException 403: If account is inactive or not verified.
     """
-    qdrant_api_key = api_key or os.getenv("QDRANT_API_KEY", "")
-    qdrant_url = url or os.getenv("QDRANT_URL", "")
+    from app.core.credentials import get_credential_or_env, get_credential_error_message
+
+    qdrant_api_key = api_key or get_credential_or_env(current_user, "qdrant_api_key")
+    qdrant_url = url or get_credential_or_env(current_user, "qdrant_url")
 
     if not qdrant_url:
+        logger.warning(f"User {current_user.email} missing Qdrant URL")
         return JSONResponse(
-            status_code=400,
-            content={"error": "Qdrant URL not configured."}
+            status_code=403,
+            content={
+                "error": get_credential_error_message("qdrant_url"),
+                "credential_required": "qdrant_url",
+                "configure_url": "/settings/credentials"
+            }
         )
 
     try:

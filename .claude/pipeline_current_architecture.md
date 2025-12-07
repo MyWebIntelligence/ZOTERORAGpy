@@ -1,7 +1,7 @@
 # Architecture actuelle du pipeline RAGpy
 
 **Date de création** : 2025-10-21
-**Dernière mise à jour** : 2025-11-25 (Sémaphore global LLM, retry logic, optimisation concurrence)
+**Dernière mise à jour** : 2025-12-07 (Sécurité credentials role-based ADMIN/NON-ADMIN)
 **Objectif** : Documenter l'architecture existante complète avec analyse détaillée
 
 ---
@@ -426,6 +426,7 @@ chardet==5.2.0                   # Détection encoding
 
 - ~~Dépendances sans version épinglée~~ → Versions fixes (2025-11-24)
 - **Authentification JWT** ✅ implémentée avec vérification email (Resend)
+- **Sécurité credentials role-based** ✅ implémentée (2025-12-07)
 
 **Restant** :
 
@@ -436,7 +437,65 @@ chardet==5.2.0                   # Détection encoding
 
 1. **Scan vulnérabilités** avec `pip-audit` ou `safety`
 2. **Rate limiting** sur endpoints API
-3. **Secrets management** : Revoir `.env` et `app/core/credentials.py`
+
+### 🔐 **Modèle de sécurité des credentials (2025-12-07)**
+
+Le système implémente un **modèle role-based** pour l'accès aux API keys :
+
+| Rôle | Credentials personnels | Fallback `.env` |
+|------|------------------------|-----------------|
+| **ADMIN** | ✅ Prioritaire | ✅ Si vide |
+| **NON-ADMIN** | ✅ Uniquement | ❌ JAMAIS |
+
+**Architecture** :
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                    SECURITY MODEL                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  User Request → Auth Middleware → get_credential_or_env()       │
+│                                        │                         │
+│                         ┌──────────────┴──────────────┐         │
+│                         │                             │          │
+│                    [ADMIN]                      [NON-ADMIN]      │
+│                         │                             │          │
+│              ┌──────────┴──────────┐         Personal DB only    │
+│              │                     │                 │           │
+│         Personal DB          .env fallback     ❌ No .env        │
+│              │                     │                 │           │
+│              └─────────┬───────────┘          403 if missing     │
+│                        │                                         │
+│                   API Request                                    │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Module `app/core/credentials.py`** :
+
+```python
+# Fonction principale - récupération sécurisée
+def get_credential_or_env(user, credential_key, raise_if_missing=False):
+    # 1. Credentials personnels (tous les users)
+    # 2. Fallback .env (ADMIN uniquement)
+    # 3. Erreur ou None (selon raise_if_missing)
+
+# Environnement subprocess sécurisé
+def build_subprocess_env(user, required_keys=None):
+    # ADMIN: Keep .env + overlay personal
+    # NON-ADMIN: CLEAR .env + inject personal only
+```
+
+**Fichiers impactés** :
+
+| Fichier | Rôle sécurité |
+|---------|---------------|
+| `app/core/credentials.py` | Module central - chiffrement Fernet, `get_credential_or_env()`, `build_subprocess_env()` |
+| `app/routes/processing.py` | Auth obligatoire + subprocess env sécurisé |
+| `app/routes/settings.py` | Erreurs 403 explicites pour vector DB |
+| `app/routes/citations.py` | Credentials Zotero + LLM sécurisés |
+| `app/utils/llm_note_generator.py` | Injection credentials en paramètres |
+| `app/utils/citation_filter.py` | Injection credentials pour filtrage LLM |
 
 ---
 
@@ -491,12 +550,12 @@ chardet==5.2.0                   # Détection encoding
 8. **Authentification complète** ✅ : JWT + vérification email (Resend)
 9. **Contrôle concurrence LLM** ✅ : Sémaphore global multi-utilisateurs (2025-11-25)
 10. **Retry logic LLM** ✅ : Résilience API avec retry automatique (2025-11-25)
+11. **Sécurité credentials role-based** ✅ : Isolation ADMIN/NON-ADMIN (2025-12-07)
 
 ### ⚠️ **Limitations restantes**
 
 1. **Tests intégration insuffisants** : Tests vector databases à compléter
-2. **Secrets management** : Revoir `.env` et `app/core/credentials.py`
-3. **CORS permissif** : Restreindre en production
+2. **CORS permissif** : Restreindre en production
 
 ### 🎯 **Actions prioritaires**
 

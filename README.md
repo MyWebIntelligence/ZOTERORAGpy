@@ -4,6 +4,7 @@ Pipeline de traitement de documents (PDF, exports Zotero, **CSV**) et interface 
 
 **Nouveau** :
 - **Authentification utilisateur complète** avec vérification email (Resend) et gestion des rôles
+- **Sécurité credentials role-based** : Isolation ADMIN (fallback `.env`) / NON-ADMIN (credentials personnels uniquement)
 - **OCR Mistral** pour extraction PDF haute qualité
 - Support d'ingestion CSV directe (bypass OCR) pour économiser temps et coûts API
 - **Génération automatique de fiches de lecture Zotero** via LLM avec push automatique vers votre bibliothèque
@@ -267,6 +268,41 @@ Les administrateurs peuvent :
 | `/auth/forgot-password` | POST | Demander reset password |
 | `/auth/reset-password` | POST | Réinitialiser avec token |
 | `/auth/me` | GET | Infos utilisateur connecté |
+
+#### Gestion des credentials API (par utilisateur)
+
+RAGpy implémente un système de **credentials par utilisateur** avec isolation selon le rôle :
+
+| Rôle | Credentials personnels | Fallback `.env` |
+|------|------------------------|-----------------|
+| **ADMIN** | ✅ Prioritaire | ✅ Si vide |
+| **NON-ADMIN** | ✅ Uniquement | ❌ JAMAIS |
+
+**Configuration des credentials** :
+
+1. Connectez-vous à l'application
+2. Cliquez sur **⚙️ Settings** en haut à droite
+3. Accédez à la section **"Mes Identifiants"** (ou "My Credentials")
+4. Renseignez vos clés API personnelles :
+   - OpenAI API Key
+   - OpenRouter API Key
+   - Mistral API Key (pour OCR)
+   - Pinecone / Weaviate / Qdrant (bases vectorielles)
+   - Zotero API Key
+
+**Avantages** :
+
+- **Isolation complète** : Chaque utilisateur utilise ses propres clés API
+- **Sécurité renforcée** : Les utilisateurs non-admin n'ont jamais accès aux credentials `.env`
+- **Chiffrement** : Les credentials sont chiffrés (Fernet) avant stockage en base de données
+- **Messages d'erreur explicites** : En cas de credential manquant, l'utilisateur est guidé vers la configuration
+
+**Endpoints credentials** :
+
+| Endpoint | Méthode | Description |
+|----------|---------|-------------|
+| `/users/me/credentials` | GET | Voir ses credentials (masqués) |
+| `/users/me/credentials` | PUT | Mettre à jour ses credentials |
 
 ### 6) Génération de fiches de lecture Zotero
 

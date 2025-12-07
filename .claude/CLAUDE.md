@@ -493,6 +493,158 @@ Les appels LLM incluent une logique de retry automatique :
 
 ---
 
+## Sécurité des Credentials par Rôle (2025-12-07)
+
+### Modèle de sécurité
+
+RAGpy implémente un modèle de sécurité **role-based** pour l'accès aux credentials API :
+
+| Rôle | Comportement |
+|------|--------------|
+| **ADMIN** | Credentials personnels → fallback `.env` si vide |
+| **NON-ADMIN** | Credentials personnels UNIQUEMENT, **JAMAIS** `.env` |
+
+### Module `app/core/credentials.py`
+
+Ce module gère le chiffrement, le stockage et la récupération sécurisée des credentials utilisateur.
+
+**Composants clés** :
+
+```python
+# Exception personnalisée avec messages français
+class CredentialMissingError(Exception):
+    """Raised when a required credential is missing for a user."""
+    credential_key: str
+    message: str
+    is_admin: bool
+
+# Mapping credential → variable d'environnement
+CREDENTIAL_ENV_MAPPING = {
+    "openai_api_key": "OPENAI_API_KEY",
+    "openrouter_api_key": "OPENROUTER_API_KEY",
+    "mistral_api_key": "MISTRAL_API_KEY",
+    "pinecone_api_key": "PINECONE_API_KEY",
+    # ... autres credentials
+}
+
+# Messages d'erreur en français
+CREDENTIAL_ERROR_MESSAGES = {
+    "openai_api_key": "Clé API OpenAI requise. Configurez-la dans Paramètres > Mes Identifiants.",
+    "mistral_api_key": "Clé API Mistral requise pour l'OCR des PDFs.",
+    # ... autres messages
+}
+```
+
+### Fonction `get_credential_or_env()`
+
+Récupère un credential avec logique de fallback basée sur le rôle :
+
+```python
+def get_credential_or_env(
+    user: User,
+    credential_key: str,
+    env_key: str = None,
+    raise_if_missing: bool = False
+) -> Optional[str]:
+    """
+    Security Model:
+        - ADMIN: Personal credentials first, fallback to .env
+        - NON-ADMIN: Personal credentials ONLY, no .env access
+    """
+```
+
+**Usage dans les routes** :
+```python
+from app.core.credentials import get_credential_or_env, get_credential_error_message
+
+# Dans un endpoint
+openai_key = get_credential_or_env(current_user, "openai_api_key")
+if not openai_key:
+    return JSONResponse(status_code=403, content={
+        "error": get_credential_error_message("openai_api_key"),
+        "credential_required": "openai_api_key"
+    })
+```
+
+### Fonction `build_subprocess_env()`
+
+Construit un environnement sécurisé pour les subprocesses avec isolation des credentials :
+
+```python
+def build_subprocess_env(
+    user: User,
+    required_keys: List[str] = None
+) -> Dict[str, str]:
+    """
+    Security Model:
+        - ADMIN: Keep existing .env credentials, overlay with personal credentials
+        - NON-ADMIN: REMOVE all credential env vars, inject only personal credentials
+
+    Example:
+        >>> env = build_subprocess_env(user, required_keys=["openai_api_key"])
+        >>> process = await asyncio.create_subprocess_exec(*cmd, env=env)
+    """
+```
+
+**Usage dans `app/routes/processing.py`** :
+```python
+from app.core.credentials import build_subprocess_env, CredentialMissingError
+
+@router.post("/process_dataframe")
+async def process_dataframe(..., current_user: User = Depends(get_current_active_user)):
+    try:
+        subprocess_env = build_subprocess_env(
+            current_user,
+            required_keys=["mistral_api_key"]
+        )
+    except CredentialMissingError as e:
+        return JSONResponse(status_code=403, content={
+            "error": str(e),
+            "credential_required": e.credential_key
+        })
+
+    # Lancer subprocess avec env sécurisé
+    process = await asyncio.create_subprocess_exec(*cmd, env=subprocess_env)
+```
+
+### Injection de credentials pour LLM
+
+Pour les appels LLM directs (sans subprocess), les credentials sont passés en paramètres :
+
+```python
+# app/utils/llm_note_generator.py
+async def build_note_html_async(
+    ...,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
+):
+    openai_client, openrouter_client, default_model = _get_llm_clients(
+        openai_api_key=openai_api_key,
+        openrouter_api_key=openrouter_api_key
+    )
+```
+
+### Fichiers modifiés pour la sécurité credentials
+
+| Fichier | Modifications |
+|---------|---------------|
+| `app/core/credentials.py` | `CredentialMissingError`, `CREDENTIAL_ENV_MAPPING`, `build_subprocess_env()` |
+| `app/routes/processing.py` | Auth obligatoire + `build_subprocess_env()` pour tous les endpoints |
+| `app/routes/settings.py` | Erreurs 403 explicites pour vector DB endpoints |
+| `app/routes/citations.py` | `get_credential_or_env()` pour Zotero et LLM |
+| `app/utils/llm_note_generator.py` | Paramètres credentials au lieu de `os.getenv()` |
+| `app/utils/citation_filter.py` | Paramètres credentials pour filtrage LLM |
+
+### Bonnes pratiques
+
+1. **Toujours utiliser `get_credential_or_env()`** au lieu de `os.getenv()` direct
+2. **Valider les credentials AVANT** de lancer un subprocess coûteux
+3. **Retourner des erreurs 403** avec `credential_required` pour guider l'utilisateur
+4. **Utiliser `build_subprocess_env()`** pour tous les subprocesses nécessitant des credentials
+5. **Passer les credentials en paramètres** pour les appels LLM directs
+
+---
+
 ## Architecture Celery (Phase 3 - Production)
 
 ### Vue d'ensemble
