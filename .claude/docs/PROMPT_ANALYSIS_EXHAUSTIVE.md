@@ -237,7 +237,7 @@ ZOTERO_USER_ID=...
 ### Format
 
 - **OpenAI** : `gpt-4o-mini`, `gpt-4o`, `o1-mini`, etc.
-- **OpenRouter** : `provider/model`, ex: `openai/gemini-2.5-flash`, `anthropic/claude-3.5-sonnet`
+- **OpenRouter** : `provider/model`, ex: `google/gemini-2.5-flash`, `anthropic/claude-3.5-sonnet`
 
 **Détection automatique** : Si le modèle contient `/`, le système utilise OpenRouter, sinon OpenAI.
 
@@ -248,7 +248,7 @@ ZOTERO_USER_ID=...
 | Modèle | Provider | Coût estimé | Qualité | Vitesse |
 |--------|----------|-------------|---------|---------|
 | `gpt-4o-mini` | OpenAI | $ | Bonne | Rapide |
-| `openai/gemini-2.5-flash` | OpenRouter | $ | Bonne | Très rapide |
+| `google/gemini-2.5-flash` | OpenRouter | $ | Bonne | Très rapide |
 | `anthropic/claude-3-haiku` | OpenRouter | $ | Très bonne | Rapide |
 
 #### Pour analyses exhaustives (5000-15000 mots)
@@ -257,14 +257,14 @@ ZOTERO_USER_ID=...
 |--------|----------|-------------|---------|---------|
 | `gpt-4o` | OpenAI | $$$ | Excellente | Moyenne |
 | `anthropic/claude-3.5-sonnet` | OpenRouter | $$$ | Excellente | Moyenne |
-| `openai/gemini-2.5-pro` | OpenRouter | $$ | Très bonne | Rapide |
+| `google/gemini-2.5-pro` | OpenRouter | $$ | Très bonne | Rapide |
 | `openai/o1-mini` | OpenRouter | $$$$ | Excellente | Lente |
 
 #### Pour corpus volumineux (budget limité)
 
 | Modèle | Provider | Coût estimé | Qualité | Vitesse |
 |--------|----------|-------------|---------|---------|
-| `openai/gemini-2.5-flash` | OpenRouter | $ | Bonne | Très rapide |
+| `google/gemini-2.5-flash` | OpenRouter | $ | Bonne | Très rapide |
 | `deepseek/deepseek-chat` | OpenRouter | $ | Correcte | Rapide |
 | `meta-llama/llama-3.3-70b` | OpenRouter | $ | Bonne | Rapide |
 
@@ -280,7 +280,7 @@ ZOTERO_USER_ID=...
 | Modèle | Coût/article | Coût/100 articles |
 |--------|--------------|-------------------|
 | `gpt-4o-mini` | $0.01 | $1 |
-| `openai/gemini-2.5-flash` | $0.005 | $0.50 |
+| `google/gemini-2.5-flash` | $0.005 | $0.50 |
 | `gpt-4o` | $0.20 | $20 |
 | `anthropic/claude-3.5-sonnet` | $0.25 | $25 |
 | `openai/o1-mini` | $0.40 | $40 |
@@ -465,7 +465,7 @@ title,authors,date,problematique
 ```
 
 **Configuration** :
-- Modèle : `openai/gemini-2.5-flash` (économique pour corpus)
+- Modèle : `google/gemini-2.5-flash` (économique pour corpus)
 - Upload CSV avec colonne `problematique`
 
 **Résultat** :
@@ -573,7 +573,7 @@ grep "Generated note content" logs/app.log
 - Qualité : Excellente
 
 **Pour 100-500 articles** :
-- Modèle : `openai/gemini-2.5-flash`
+- Modèle : `google/gemini-2.5-flash`
 - Coût : ~$25-50
 - Qualité : Très bonne
 

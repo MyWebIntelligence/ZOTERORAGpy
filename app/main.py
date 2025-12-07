@@ -53,6 +53,7 @@ from app.routes.ingestion import router as ingestion_router
 from app.routes.processing import router as processing_router
 from app.routes.settings import router as settings_router
 from app.routes.celery_tasks import router as celery_router
+from app.routes.citations import router as citations_router, session_router as citation_sessions_router
 
 from app.middleware.auth import get_optional_user, get_current_active_user
 from app.core.credentials import get_credential_or_env, get_user_credentials
@@ -160,6 +161,8 @@ app.include_router(ingestion_router)
 app.include_router(processing_router)
 app.include_router(settings_router)
 app.include_router(celery_router)
+app.include_router(citations_router)
+app.include_router(citation_sessions_router)
 
 # --- Prometheus Metrics Instrumentation ---
 if PROMETHEUS_AVAILABLE and os.getenv('ENABLE_METRICS', 'true').lower() in ('true', '1', 'yes'):

@@ -171,7 +171,7 @@ app/
     <h4>3.1 Initial Text Chunking</h4>
     <select id="chunkingModel">
       <option value="gpt-4o-mini">OpenAI (gpt-4o-mini)</option>
-      <option value="openai/gemini-2.5-flash">OpenRouter (économique)</option>
+      <option value="google/gemini-2.5-flash">OpenRouter (économique)</option>
     </select>
     <button onclick="processChunking()">Generate Chunks</button>
   </div>
@@ -187,7 +187,7 @@ app/
   
   <select id="zoteroModel">
     <option value="gpt-4o-mini">OpenAI (gpt-4o-mini)</option>
-    <option value="openai/gemini-2.5-flash">OpenRouter (économique)</option>
+    <option value="google/gemini-2.5-flash">OpenRouter (économique)</option>
   </select>
   
   <label>

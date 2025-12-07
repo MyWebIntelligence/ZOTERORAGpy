@@ -148,7 +148,7 @@ Enrichir le CSV issu de `rad_dataframe.py` via trois phases successives:
 
 **Variables d'optimisation** :
 - `OPENROUTER_API_KEY` - Alternative économique (~75% économie sur recodage)
-- `OPENROUTER_DEFAULT_MODEL` - Modèle par défaut (ex: `openai/gemini-2.5-flash`)
+- `OPENROUTER_DEFAULT_MODEL` - Modèle par défaut (ex: `google/gemini-2.5-flash`)
 - `MAX_CONCURRENT_LLM_CALLS` - Limite globale d'appels LLM simultanés (défaut: 5)
 
 **Librairies requises** :
@@ -194,7 +194,7 @@ python scripts/rad_chunk.py --input data.csv --output ./out --phase initial
 
 # Utiliser OpenRouter (économique)
 python scripts/rad_chunk.py --input data.csv --output ./out --phase initial \
-  --model openai/gemini-2.5-flash
+  --model google/gemini-2.5-flash
 ```
 
 **Auto-détection** : Les modèles avec format `provider/model` utilisent automatiquement OpenRouter. Fallback vers OpenAI si OpenRouter indisponible.

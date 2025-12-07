@@ -1,0 +1,72 @@
+[
+  {
+    "uid": "GS:RhFv3xMAAAAJ",
+    "title": "Attention is all you need",
+    "authors": ["A Vaswani", "N Shazeer", "N Parmar", "J Uszkoreit", "L Jones", "AN Gomez", "Ł Kaiser", "I Polosukhin"],
+    "year": 2017,
+    "source": "Advances in neural information processing systems",
+    "publisher": "NeurIPS",
+    "article_url": "https://arxiv.org/abs/1706.03762",
+    "fulltext_url": "https://arxiv.org/pdf/1706.03762.pdf",
+    "cites": 95234,
+    "abstract": "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely.",
+    "doi": "10.48550/arXiv.1706.03762",
+    "type": "PDF"
+  },
+  {
+    "uid": "GS:8k9SFxcAAAAJ",
+    "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+    "authors": ["J Devlin", "MW Chang", "K Lee", "K Toutanova"],
+    "year": 2019,
+    "source": "Proceedings of NAACL-HLT",
+    "publisher": "Association for Computational Linguistics",
+    "article_url": "https://aclanthology.org/N19-1423/",
+    "fulltext_url": "https://aclanthology.org/N19-1423.pdf",
+    "cites": 78456,
+    "abstract": "We introduce a new language representation model called BERT, which stands for Bidirectional Encoder Representations from Transformers. Unlike recent language representation models, BERT is designed to pre-train deep bidirectional representations from unlabeled text by jointly conditioning on both left and right context in all layers.",
+    "doi": "10.18653/v1/N19-1423",
+    "type": "PDF"
+  },
+  {
+    "uid": "GS:NoURLExample",
+    "title": "A survey of large language models without accessible URLs",
+    "authors": ["J Smith", "M Johnson"],
+    "year": 2024,
+    "source": "Journal of AI Research",
+    "publisher": "JAIR",
+    "article_url": null,
+    "fulltext_url": null,
+    "cites": 45,
+    "abstract": "This paper surveys recent developments in large language models, focusing on architectural innovations and training methodologies.",
+    "doi": null,
+    "type": null
+  },
+  {
+    "uid": "GS:IrrelevantPaper",
+    "title": "Cooking recipes optimization using machine learning",
+    "authors": ["P Chef", "C Baker"],
+    "year": 2023,
+    "source": "International Journal of Culinary Science",
+    "publisher": "IJCS",
+    "article_url": "https://example.com/cooking-ml",
+    "fulltext_url": null,
+    "cites": 12,
+    "abstract": "We apply machine learning techniques to optimize cooking recipes, focusing on ingredient combinations and cooking times for better taste outcomes.",
+    "doi": "10.1234/cooking.2023.001",
+    "type": null
+  },
+  {
+    "uid": "GS:MalformedAuthors",
+    "title": "Understanding et al. in academic citations",
+    "authors": ["Smith et al."],
+    "year": 2022,
+    "source": "Citation Studies",
+    "publisher": "CS Press",
+    "article_url": "https://example.com/citations",
+    "fulltext_url": null,
+    "cites": 8,
+    "abstract": "An analysis of the usage of 'et al.' in academic literature.",
+    "doi": null,
+    "type": null
+  }
+]

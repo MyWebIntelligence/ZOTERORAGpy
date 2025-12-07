@@ -192,7 +192,7 @@ OPENAI_API_KEY=sk-...  # Embeddings + recodage
 ```bash
 # Réduction coûts (~75% économie)
 OPENROUTER_API_KEY=sk-or-v1-...
-OPENROUTER_DEFAULT_MODEL=openai/gemini-2.5-flash
+OPENROUTER_DEFAULT_MODEL=google/gemini-2.5-flash
 
 # OCR premium
 MISTRAL_API_KEY=...
@@ -467,6 +467,7 @@ chardet==5.2.0                   # Détection encoding
 **Fonctionnalités utilisateur** :
 
 - ~~**Authentification multi-utilisateurs**~~ ✅ Implémenté (JWT + Resend)
+- **Import Bibliographique Avancé** : Publish or Perish → Filtrage LLM → Zotero (Spécifications validées)
 - **Gestion de projets** avec historique
 - **API REST complète** pour intégrations externes
 - **Tableau de bord** analytics et métriques

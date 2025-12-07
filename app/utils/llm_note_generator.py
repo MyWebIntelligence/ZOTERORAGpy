@@ -268,7 +268,7 @@ def _generate_with_llm(prompt: str, model: str = None, temperature: float = 0.2,
 
     Args:
         prompt: The prompt to send to the LLM
-        model: Model name (e.g., "gpt-4o-mini" or "openai/gemini-2.5-flash").
+        model: Model name (e.g., "gpt-4o-mini" or "google/gemini-2.5-flash").
                If None, uses OPENROUTER_DEFAULT_MODEL from .env
         temperature: Sampling temperature (0.0 to 1.0)
         extended_analysis: If True, use max_tokens=16000. If False, use max_tokens=2000.
@@ -454,7 +454,7 @@ def build_note_html(
         metadata: Dictionary with item metadata (title, authors, abstract, etc.)
         text_content: Full text content (texteocr). If None, will use abstract only.
         model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
-               Examples: "gpt-4o-mini", "openai/gemini-2.5-flash"
+               Examples: "gpt-4o-mini", "google/gemini-2.5-flash"
         use_llm: Whether to use LLM or fallback to template (default: True)
         extended_analysis: If True, generate exhaustive analysis (8000-12000 words).
                           If False, generate quick summary (200-300 words).

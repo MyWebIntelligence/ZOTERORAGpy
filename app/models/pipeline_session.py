@@ -37,6 +37,10 @@ class SessionStatus(str, Enum):
     COMPLETED = "completed"       # Fully processed
     ERROR = "error"               # Error occurred
 
+    # Citation Import statuses
+    FILTERING_CITATIONS = "filtering_citations"  # LLM filtering citations by relevance
+    IMPORTING_CITATIONS = "importing_citations"  # Importing filtered citations to Zotero
+
 
 class PipelineSession(Base):
     """

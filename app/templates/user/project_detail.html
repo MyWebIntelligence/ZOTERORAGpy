@@ -77,6 +77,10 @@
                         <i class="bi bi-pencil"></i>
                         Modifier le projet
                     </button>
+                    <button class="btn btn-primary btn-full" onclick="openModal('importCitationsModal')">
+                        <i class="bi bi-file-earmark-arrow-up"></i>
+                        Import Citations (PoP)
+                    </button>
                     <button class="btn btn-danger btn-full" onclick="openModal('deleteModal')">
                         <i class="bi bi-trash"></i>
                         Supprimer le projet
@@ -217,6 +221,220 @@
         </div>
     </div>
 </div>
+
+<!-- Citation Import Modals -->
+
+<!-- Modal 1: Upload Form -->
+<div class="modal" id="importCitationsModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Import Citations (Publish or Perish)</h3>
+            <button class="modal-close" onclick="closeModal('importCitationsModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <form id="importCitationsForm" enctype="multipart/form-data">
+                <div class="form-group">
+                    <label for="popJsonFile" class="form-label">
+                        Fichier JSON Publish or Perish
+                        <span class="form-required">*</span>
+                    </label>
+                    <input type="file" class="form-input" id="popJsonFile" accept=".json" required>
+                    <small class="form-help">Export JSON depuis Publish or Perish</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="collectionName" class="form-label">
+                        Nom de la collection Zotero
+                        <span class="form-required">*</span>
+                    </label>
+                    <input type="text" class="form-input" id="collectionName" required
+                           placeholder="Ex: LLM Annotation Studies">
+                    <small class="form-help">Si existe, ajout dans collection. Sinon, création.</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="collectionDescription" class="form-label">
+                        Description de la bibliographie
+                    </label>
+                    <textarea class="form-textarea" id="collectionDescription" rows="3"
+                              placeholder="Contexte et critères de sélection..."></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="llmModel" class="form-label">Modèle LLM</label>
+                    <select class="form-select" id="llmModel">
+                        <option value="gpt-4o-mini">GPT-4o Mini (rapide, économique)</option>
+                        <option value="google/gemini-2.5-flash">Gemini 2.5 Flash (via OpenRouter)</option>
+                        <option value="gpt-4o">GPT-4o (plus précis, coûteux)</option>
+                    </select>
+                </div>
+
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle"></i>
+                    <strong>Processus :</strong> Le LLM analysera chaque citation pour déterminer sa pertinence au projet. Vous pourrez valider la sélection avant import.
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('importCitationsModal')">Annuler</button>
+            <button type="button" class="btn btn-primary" onclick="uploadPopJson()">Continuer</button>
+        </div>
+    </div>
+</div>
+
+<!-- Modal 2: Large Batch Confirmation -->
+<div class="modal" id="confirmLargeBatchModal">
+    <div class="modal-content modal-sm">
+        <div class="modal-header">
+            <h3 class="modal-title">Confirmation requise</h3>
+            <button class="modal-close" onclick="closeModal('confirmLargeBatchModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div class="alert alert-warning">
+                <i class="bi bi-exclamation-triangle"></i>
+                <p>Le fichier contient <strong id="citationCount">0</strong> citations.</p>
+                <p>Le traitement peut prendre du temps et générer des coûts API.</p>
+            </div>
+            <p>Voulez-vous continuer ?</p>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('confirmLargeBatchModal')">Annuler</button>
+            <button type="button" class="btn btn-primary" onclick="startFiltering()">Continuer</button>
+        </div>
+    </div>
+</div>
+
+<!-- Modal 3: Filtering Progress -->
+<div class="modal" id="filteringProgressModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Filtrage des citations en cours...</h3>
+        </div>
+        <div class="modal-body">
+            <div class="progress-container">
+                <div class="progress-bar" id="filteringProgressBar" style="width: 0%"></div>
+            </div>
+            <p class="progress-text" id="filteringProgressText">0 / 0 citations traitées</p>
+
+            <div class="live-log" id="filteringLiveLog">
+                <!-- Live updates -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal 4: Preview & Selection -->
+<div class="modal" id="previewCitationsModal">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3 class="modal-title">Validation de la sélection</h3>
+            <button class="modal-close" onclick="closeModal('previewCitationsModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div class="preview-stats">
+                <div class="stat-card stat-success">
+                    <div class="stat-value" id="relevantCount">0</div>
+                    <div class="stat-label">Pertinentes</div>
+                </div>
+                <div class="stat-card stat-secondary">
+                    <div class="stat-value" id="skippedCount">0</div>
+                    <div class="stat-label">Ignorées</div>
+                </div>
+            </div>
+
+            <div class="preview-tabs">
+                <button class="tab-btn active" onclick="showTab('relevant')">Pertinentes</button>
+                <button class="tab-btn" onclick="showTab('skipped')">Ignorées</button>
+            </div>
+
+            <div id="relevantTab" class="tab-content active">
+                <div class="form-group">
+                    <label class="form-checkbox">
+                        <input type="checkbox" id="selectAllRelevant" onchange="toggleSelectAll()" checked>
+                        Tout sélectionner
+                    </label>
+                </div>
+                <div id="relevantList" class="citations-list">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <div id="skippedTab" class="tab-content">
+                <div id="skippedList" class="citations-list">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('previewCitationsModal')">Annuler</button>
+            <button type="button" class="btn btn-primary" onclick="importSelected()">
+                Importer la sélection (<span id="selectedCount">0</span>)
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Modal 5: Importing Progress -->
+<div class="modal" id="importingProgressModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Import dans Zotero en cours...</h3>
+        </div>
+        <div class="modal-body">
+            <div class="progress-container">
+                <div class="progress-bar" id="importingProgressBar" style="width: 0%"></div>
+            </div>
+            <p class="progress-text" id="importingProgressText">0 / 0 importées</p>
+
+            <div class="live-log" id="importingLiveLog">
+                <!-- Live updates -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal 6: Import Results -->
+<div class="modal" id="importResultsModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Import terminé</h3>
+            <button class="modal-close" onclick="closeModal('importResultsModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div class="results-stats">
+                <div class="stat-card stat-success">
+                    <div class="stat-value" id="createdCount">0</div>
+                    <div class="stat-label">Créées</div>
+                </div>
+                <div class="stat-card stat-info">
+                    <div class="stat-value" id="updatedCount">0</div>
+                    <div class="stat-label">Mises à jour</div>
+                </div>
+                <div class="stat-card stat-danger">
+                    <div class="stat-value" id="errorsCount">0</div>
+                    <div class="stat-label">Erreurs</div>
+                </div>
+            </div>
+
+            <div id="errorSection" style="display: none;">
+                <h4>Erreurs rencontrées</h4>
+                <div id="errorList" class="error-list"></div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-primary" onclick="closeModal('importResultsModal'); loadSessions();">Fermer</button>
+        </div>
+    </div>
+</div>
+
 {% endblock %}
 
 {% block extra_css %}
@@ -642,7 +860,9 @@ function getStatusBadge(status) {
         'embedded': { class: 'badge-primary', label: 'Embeddings OK' },
         'uploading': { class: 'badge-info', label: 'Upload...' },
         'completed': { class: 'badge-success', label: 'Termine' },
-        'error': { class: 'badge-danger', label: 'Erreur' }
+        'error': { class: 'badge-danger', label: 'Erreur' },
+        'filtering_citations': { class: 'badge-info', label: 'Filtrage LLM...' },
+        'importing_citations': { class: 'badge-info', label: 'Import Zotero...' }
     };
     const info = statusMap[status] || { class: 'badge-secondary', label: status };
     return `<span class="badge ${info.class}">${info.label}</span>`;
@@ -751,6 +971,437 @@ async function deleteSession(sessionId) {
         console.error('Error:', error);
         showToast('Erreur lors de la suppression', 'error');
     }
+}
+
+// ===== Citation Import Handlers =====
+
+// Global state for citation import workflow
+let currentSessionId = null;
+let previewData = null;
+
+// Step 1: Upload JSON and create session
+async function uploadPopJson() {
+    const fileInput = document.getElementById('popJsonFile');
+    const collectionName = document.getElementById('collectionName').value.trim();
+    const collectionDescription = document.getElementById('collectionDescription').value.trim();
+    const model = document.getElementById('llmModel').value;
+
+    // Validation
+    if (!fileInput.files[0]) {
+        showToast('Veuillez sélectionner un fichier JSON', 'error');
+        return;
+    }
+    if (!collectionName) {
+        showToast('Le nom de la collection est requis', 'error');
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('json_file', fileInput.files[0]);
+    formData.append('collection_name', collectionName);
+    formData.append('collection_description', collectionDescription);
+    formData.append('model', model);
+
+    try {
+        const response = await fetch(`/api/projects/${projectId}/upload_pop_json`, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Upload failed');
+        }
+
+        const data = await response.json();
+        currentSessionId = data.session_id;
+
+        closeModal('importCitationsModal');
+
+        // Check if confirmation required (> 100 citations)
+        if (data.requires_confirmation) {
+            document.getElementById('citationCount').textContent = data.total_citations;
+            openModal('confirmLargeBatchModal');
+        } else {
+            startFiltering();
+        }
+
+    } catch (error) {
+        console.error('Upload error:', error);
+        showToast(error.message || 'Erreur lors de l\'upload', 'error');
+    }
+}
+
+// Step 2: Start filtering with SSE
+async function startFiltering() {
+    closeModal('confirmLargeBatchModal');
+    openModal('filteringProgressModal');
+
+    // Reset progress UI
+    document.getElementById('filteringProgressBar').style.width = '0%';
+    document.getElementById('filteringProgressText').textContent = '0 / 0 citations traitées';
+    document.getElementById('filteringLiveLog').innerHTML = '';
+
+    const formData = new FormData();
+    formData.append('session_id', currentSessionId);
+
+    try {
+        const response = await fetch(`/api/projects/${projectId}/filter_citations_sse`, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to start filtering');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let totalCitations = 0;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+
+            // Process complete lines, keep incomplete line in buffer
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (line.startsWith('data:')) {
+                    try {
+                        const data = JSON.parse(line.slice(5).trim());
+                        handleFilteringSSE(data, totalCitations);
+
+                        if (data.type === 'init') {
+                            totalCitations = data.total;
+                        }
+                    } catch (e) {
+                        console.error('Error parsing SSE data:', e, line);
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Filtering error:', error);
+        closeModal('filteringProgressModal');
+        showToast('Erreur lors du filtrage', 'error');
+    }
+}
+
+// Handle filtering SSE events
+function handleFilteringSSE(data, total) {
+    switch(data.type) {
+        case 'init':
+            document.getElementById('filteringProgressText').textContent = `0 / ${data.total} citations traitées`;
+            break;
+
+        case 'progress':
+            const percent = total > 0 ? Math.round((data.current / total) * 100) : 0;
+            document.getElementById('filteringProgressBar').style.width = `${percent}%`;
+            document.getElementById('filteringProgressText').textContent = `${data.current} / ${total} citations traitées`;
+
+            const badgeClass = data.status === 'relevant' ? 'badge-success' : 'badge-secondary';
+            const log = document.getElementById('filteringLiveLog');
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            logEntry.innerHTML = `<span class="badge ${badgeClass}">${data.status}</span> ${escapeHtml(data.title)}`;
+            log.appendChild(logEntry);
+            log.scrollTop = log.scrollHeight;
+            break;
+
+        case 'complete':
+            closeModal('filteringProgressModal');
+            loadPreviewAndShow(data.relevant, data.skipped);
+            break;
+
+        case 'error':
+            const errorLog = document.getElementById('filteringLiveLog');
+            const errorEntry = document.createElement('div');
+            errorEntry.className = 'log-entry error';
+            errorEntry.innerHTML = `<span class="badge badge-danger">error</span> ${escapeHtml(data.message || 'Unknown error')}`;
+            errorLog.appendChild(errorEntry);
+            break;
+    }
+}
+
+// Step 3: Load preview and show selection modal
+async function loadPreviewAndShow(relevantCount, skippedCount) {
+    try {
+        const response = await fetch(`/api/sessions/${currentSessionId}/preview`, {
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to load preview');
+        }
+
+        previewData = await response.json();
+
+        // Update counts
+        document.getElementById('relevantCount').textContent = relevantCount;
+        document.getElementById('skippedCount').textContent = skippedCount;
+
+        // Populate lists
+        populateRelevantList(previewData.relevant || []);
+        populateSkippedList(previewData.skipped || []);
+
+        // Reset to relevant tab
+        showTab('relevant');
+
+        openModal('previewCitationsModal');
+    } catch (error) {
+        console.error('Error loading preview:', error);
+        showToast('Erreur lors du chargement du preview', 'error');
+    }
+}
+
+// Populate relevant citations list with checkboxes
+function populateRelevantList(items) {
+    const container = document.getElementById('relevantList');
+
+    if (!items || items.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state-small">
+                <p class="text-muted">Aucune citation pertinente trouvée</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = items.map((item, idx) => {
+        const citation = item.citation || {};
+        const authors = Array.isArray(citation.authors) ? citation.authors.join(', ') : (citation.authors || 'N/A');
+        const year = citation.year || 'N/A';
+        const source = citation.source || citation.publisher || 'N/A';
+
+        return `
+            <div class="citation-card">
+                <label class="citation-checkbox">
+                    <input type="checkbox" class="relevant-checkbox" data-index="${idx}" onchange="updateSelectedCount()" checked>
+                    <div class="citation-content">
+                        <h4>${escapeHtml(citation.title || 'Sans titre')}</h4>
+                        <p class="citation-meta">
+                            ${escapeHtml(authors)} (${year})
+                        </p>
+                        <p class="citation-source">${escapeHtml(source)}</p>
+                        ${citation.doi ? `<p class="citation-doi">DOI: ${escapeHtml(citation.doi)}</p>` : ''}
+                    </div>
+                </label>
+            </div>
+        `;
+    }).join('');
+
+    updateSelectedCount();
+}
+
+// Populate skipped citations list (read-only)
+function populateSkippedList(items) {
+    const container = document.getElementById('skippedList');
+
+    if (!items || items.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state-small">
+                <p class="text-muted">Aucune citation ignorée</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = items.map(item => {
+        const citation = item.citation || {};
+        const authors = Array.isArray(citation.authors) ? citation.authors.join(', ') : (citation.authors || 'N/A');
+        const year = citation.year || 'N/A';
+
+        return `
+            <div class="citation-card skipped">
+                <div class="citation-content">
+                    <h4>${escapeHtml(citation.title || 'Sans titre')}</h4>
+                    <p class="citation-meta">
+                        ${escapeHtml(authors)} (${year})
+                    </p>
+                    <p class="citation-reason"><em>${escapeHtml(item.reason || 'Non pertinent')}</em></p>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+// Update selected count display
+function updateSelectedCount() {
+    const checked = document.querySelectorAll('.relevant-checkbox:checked').length;
+    document.getElementById('selectedCount').textContent = checked;
+}
+
+// Toggle select all checkboxes
+function toggleSelectAll(type) {
+    if (type === 'relevant') {
+        const selectAllCheckbox = document.getElementById('selectAllRelevant');
+        const checked = selectAllCheckbox.checked;
+        document.querySelectorAll('.relevant-checkbox').forEach(cb => {
+            cb.checked = checked;
+        });
+        updateSelectedCount();
+    }
+}
+
+// Switch between relevant/skipped tabs
+function showTab(tabName) {
+    // Remove active class from all tabs
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.remove('active');
+    });
+
+    // Add active class to selected tab
+    const tabButton = event ? event.target : document.querySelector(`.tab-btn[onclick*="${tabName}"]`);
+    if (tabButton) {
+        tabButton.classList.add('active');
+    }
+    document.getElementById(`${tabName}Tab`).classList.add('active');
+}
+
+// Step 4: Import selected citations with SSE
+async function importSelected() {
+    const selectedCheckboxes = document.querySelectorAll('.relevant-checkbox:checked');
+    const selectedIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
+
+    if (selectedIndices.length === 0) {
+        showToast('Veuillez sélectionner au moins une citation', 'warning');
+        return;
+    }
+
+    closeModal('previewCitationsModal');
+    openModal('importingProgressModal');
+
+    // Reset progress UI
+    document.getElementById('importingProgressBar').style.width = '0%';
+    document.getElementById('importingProgressText').textContent = '0 / 0 importées';
+    document.getElementById('importingLiveLog').innerHTML = '';
+
+    const formData = new FormData();
+    formData.append('session_id', currentSessionId);
+    formData.append('selected_indices', JSON.stringify(selectedIndices));
+
+    try {
+        const response = await fetch(`/api/projects/${projectId}/import_citations_sse`, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to start import');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let totalToImport = selectedIndices.length;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (line.startsWith('data:')) {
+                    try {
+                        const data = JSON.parse(line.slice(5).trim());
+                        handleImportingSSE(data, totalToImport);
+                    } catch (e) {
+                        console.error('Error parsing SSE data:', e, line);
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Import error:', error);
+        closeModal('importingProgressModal');
+        showToast('Erreur lors de l\'import', 'error');
+    }
+}
+
+// Handle importing SSE events
+function handleImportingSSE(data, total) {
+    switch(data.type) {
+        case 'init':
+            document.getElementById('importingProgressText').textContent = `0 / ${data.total} importées`;
+            break;
+
+        case 'progress':
+            const percent = total > 0 ? Math.round((data.current / total) * 100) : 0;
+            document.getElementById('importingProgressBar').style.width = `${percent}%`;
+            document.getElementById('importingProgressText').textContent = `${data.current} / ${total} importées`;
+
+            const badgeClass = data.action === 'created' ? 'badge-success' : 'badge-info';
+            const log = document.getElementById('importingLiveLog');
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            logEntry.innerHTML = `<span class="badge ${badgeClass}">${data.action}</span> ${escapeHtml(data.title)}`;
+            log.appendChild(logEntry);
+            log.scrollTop = log.scrollHeight;
+            break;
+
+        case 'error':
+            const errorLog = document.getElementById('importingLiveLog');
+            const errorEntry = document.createElement('div');
+            errorEntry.className = 'log-entry error';
+            errorEntry.innerHTML = `<span class="badge badge-danger">error</span> ${escapeHtml(data.message || 'Unknown error')}`;
+            errorLog.appendChild(errorEntry);
+            break;
+
+        case 'complete':
+            closeModal('importingProgressModal');
+            showResults(data.created, data.updated, data.errors);
+            break;
+    }
+}
+
+// Step 5: Show final results
+function showResults(created, updated, errors) {
+    document.getElementById('createdCount').textContent = created || 0;
+    document.getElementById('updatedCount').textContent = updated || 0;
+    document.getElementById('errorsCount').textContent = errors || 0;
+
+    // Show/hide error section
+    const errorSection = document.getElementById('errorSection');
+    if (errors > 0) {
+        errorSection.style.display = 'block';
+    } else {
+        errorSection.style.display = 'none';
+    }
+
+    openModal('importResultsModal');
+
+    // Reload sessions list to show the completed import
+    loadSessions();
+
+    // Reset state
+    currentSessionId = null;
+    previewData = null;
+
+    // Reset form
+    document.getElementById('importCitationsForm').reset();
 }
 
 // Load data on page load
