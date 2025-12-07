@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+do{% extends "base.html" %}
 
 {% block title %}RAGpy - Data Processing Pipeline{% endblock %}
 
@@ -529,12 +529,16 @@
     font-size: var(--text-sm);
   }
 
-  /* Progress Bar */
+  /* Progress Bar - Override components.css conflicting rules */
   .progress-container {
     margin-top: var(--space-4);
-    padding: var(--space-4);
-    background: var(--color-bg-tertiary);
+    padding: var(--space-5);
+    background: var(--color-bg-tertiary) !important;
     border-radius: var(--radius-lg);
+    border: 2px solid var(--color-brand-primary);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    height: auto !important;  /* Override components.css height: 8px */
+    overflow: visible !important;  /* Override components.css overflow: hidden */
   }
 
   .progress-header {
@@ -556,10 +560,11 @@
   }
 
   .progress-bar-wrapper {
-    height: 8px;
+    height: 20px;
     background: var(--color-border);
     border-radius: var(--radius-full);
     overflow: hidden;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
   }
 
   .progress-bar-fill {
@@ -603,7 +608,7 @@
   }
 
   .progress-secondary .progress-bar-wrapper {
-    height: 4px;
+    height: 12px;
   }
 
   .progress-secondary .progress-bar-fill {
@@ -1754,12 +1759,14 @@
 
     return function handleProgressEvent(data) {
       const level = data.level || 'row';  // Default to row if no level specified
+      console.log('handleProgressEvent called:', data.type, level, data);
 
       if (data.type === 'init') {
         primaryTotal = data.total || 0;
         config.primaryCount.textContent = `0/${primaryTotal}`;
         config.primaryStatus.textContent = data.message || 'Processing...';
         config.primaryBar.style.width = '0%';
+        console.log('INIT: Set primaryTotal to', primaryTotal, 'bar width to 0%');
         // Reset secondary
         if (config.secondaryContainer) {
           config.secondaryContainer.classList.remove('active');
@@ -1773,6 +1780,7 @@
           config.primaryCount.textContent = `${data.current}/${data.total}`;
           config.primaryStatus.textContent = data.message || `Processing ${data.current}/${data.total}`;
           primaryTotal = data.total;
+          console.log('PROGRESS (primary): Set bar width to', percent + '%', 'count:', data.current + '/' + data.total);
           // Reset secondary when moving to new row
           if (config.secondaryContainer && config.secondaryBar) {
             config.secondaryBar.style.width = '0%';
@@ -1808,10 +1816,13 @@
 
     resultDiv.innerHTML = '';
     progressDiv.style.display = 'block';
+    progressDiv.style.border = '5px solid red';  // DEBUG: Make container very visible
+    progressBar.style.backgroundColor = 'lime';  // DEBUG: Make bar very visible
     progressBar.style.width = '0%';
     progressCount.textContent = '0/0';
     progressStatus.textContent = 'Starting...';
     secondaryContainer.classList.remove('active');
+    console.log('DEBUG: progressDiv set to block, element:', progressDiv, 'computed display:', window.getComputedStyle(progressDiv).display);
 
     // Track document total for final count display
     let lastTotal = 0;
@@ -1848,6 +1859,8 @@
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.substring(6));
+              console.log('SSE Event:', data); // Debug logging
+
               if (data.type === 'init' || data.type === 'progress') {
                 handleProgress(data);
                 // Track total for final display
@@ -1870,6 +1883,8 @@
               } else if (data.type === 'error') {
                 progressStatus.textContent = 'Error';
                 resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+              } else if (data.type === 'heartbeat') {
+                // Keep-alive - don't change visible progress
               }
             } catch (e) {
               console.error('Failed to parse SSE:', e);
@@ -1966,6 +1981,8 @@
               } else if (data.type === 'error') {
                 progressStatus.textContent = 'Error';
                 resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+              } else if (data.type === 'heartbeat') {
+                // Keep-alive - don't change visible progress
               }
             } catch (e) {
               console.error('Failed to parse SSE:', e);
@@ -2062,6 +2079,8 @@
               } else if (data.type === 'error') {
                 progressStatus.textContent = 'Error';
                 resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+              } else if (data.type === 'heartbeat') {
+                // Keep-alive - don't change visible progress
               }
             } catch (e) {
               console.error('Failed to parse SSE:', e);
@@ -2158,6 +2177,8 @@
               } else if (data.type === 'error') {
                 progressStatus.textContent = 'Error';
                 resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
+              } else if (data.type === 'heartbeat') {
+                // Keep-alive - don't change visible progress
               }
             } catch (e) {
               console.error('Failed to parse SSE:', e);
@@ -2412,6 +2433,13 @@
                 progressStatus.textContent = 'Error';
                 resultDiv.innerHTML = `<p class="error-text">Error: ${data.message}</p>`;
                 resetButton();
+              } else if (data.type === 'heartbeat') {
+                // Keep-alive message - just update status to show we're still connected
+                if (progressStatus.textContent.includes('Processing') || progressStatus.textContent === 'Starting...') {
+                  // Don't change status if we're already showing progress
+                } else {
+                  progressStatus.textContent = data.message || 'Processing...';
+                }
               }
             } catch (e) {
               console.error('Failed to parse SSE:', e);

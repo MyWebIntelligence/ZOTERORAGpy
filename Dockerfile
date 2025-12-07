@@ -46,7 +46,9 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Variables Uvicorn avec valeurs par défaut
-ENV UVICORN_WORKERS=4
+# NOTE: Using 1 worker for SSE streaming reliability
+# Multiple workers cause duplicate logs and SSE connection issues
+ENV UVICORN_WORKERS=1
 ENV UVICORN_TIMEOUT_KEEP_ALIVE=120
 ENV UVICORN_LIMIT_CONCURRENCY=100
 
