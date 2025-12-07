@@ -53,10 +53,14 @@ ENV UVICORN_TIMEOUT_KEEP_ALIVE=120
 ENV UVICORN_LIMIT_CONCURRENCY=100
 
 # Commande de démarrage (shell form pour expansion variables)
+# --proxy-headers: Trust X-Forwarded-Proto, X-Forwarded-For from reverse proxy
+# --forwarded-allow-ips: Allow all IPs to set forwarded headers (use specific IP in production)
 CMD uvicorn app.main:app \
     --host 0.0.0.0 \
     --port 8000 \
     --workers ${UVICORN_WORKERS} \
     --timeout-keep-alive ${UVICORN_TIMEOUT_KEEP_ALIVE} \
     --limit-concurrency ${UVICORN_LIMIT_CONCURRENCY} \
-    --backlog 2048
+    --backlog 2048 \
+    --proxy-headers \
+    --forwarded-allow-ips "*"
