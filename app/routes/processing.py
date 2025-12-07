@@ -135,7 +135,10 @@ async def stop_all_scripts(session: str = Form(...)):
 
 
 @router.post("/process_dataframe")
-async def process_dataframe(path: str = Form(...)): # path is now relative to UPLOAD_DIR
+async def process_dataframe(
+    path: str = Form(...),
+    force_fresh: bool = Form(False)
+):
     """
     Processes a Zotero JSON file to extract text content and create a CSV file.
 
@@ -147,10 +150,12 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
     - If 'output.csv' exists and all rows have 'texteocr' content, OCR is skipped.
     - If 'output.csv' exists but some rows have empty 'texteocr' content, those
       rows are removed before proceeding.
+    - If force_fresh=True, deletes existing CSV and progress files to start fresh.
 
     Args:
         path (str): The relative path to the session directory under the main upload
                     directory. This path is provided as form data.
+        force_fresh (bool): If True, deletes existing output files and starts from scratch.
 
     Returns:
         JSONResponse: A JSON response containing the path to the created CSV file
@@ -158,7 +163,7 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
                       JSON object with an error message.
     """
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
-    logger.info(f"Received relative path: '{path}', resolved to absolute: '{absolute_processing_path}'")
+    logger.info(f"Received relative path: '{path}', resolved to absolute: '{absolute_processing_path}', force_fresh: {force_fresh}")
 
     # Find first JSON in directory
     try:
@@ -167,6 +172,18 @@ async def process_dataframe(path: str = Form(...)): # path is now relative to UP
             return JSONResponse(status_code=400, content={"error": f"Processing directory not found: {path}"})
 
         out_csv = os.path.join(absolute_processing_path, 'output.csv')
+        progress_file = os.path.join(absolute_processing_path, 'output.progress.json')
+
+        # Force fresh start if requested - delete existing files
+        if force_fresh:
+            logger.info("Force fresh mode: clearing existing output files")
+            for file_to_remove in [out_csv, progress_file]:
+                if os.path.exists(file_to_remove):
+                    try:
+                        os.remove(file_to_remove)
+                        logger.info(f"Removed: {file_to_remove}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove {file_to_remove}: {e}")
 
         # Check if output.csv already exists with texteocr content
         # Determine OCR mode: "full", "skip", or "csv_cleanup"
@@ -820,6 +837,9 @@ async def generate_zotero_notes_sse(
             skipped = 0
             errors = 0
 
+            # Track library version for chaining (reduces 412 conflicts)
+            current_library_version = None
+
             # Storage for generated notes (if local mode or for backup)
             generated_notes = []
 
@@ -888,22 +908,25 @@ async def generate_zotero_notes_sse(
                                     exists += 1
                                     status = "exists"
                                 else:
-                                    # Create the child note
+                                    # Create the child note with version chaining
                                     result = await loop.run_in_executor(
                                         None,
-                                        lambda lt=library_type, lid=library_id, ik=item_key, nh=note_html, ak=zotero_api_key: create_child_note(
+                                        lambda lt=library_type, lid=library_id, ik=item_key, nh=note_html, ak=zotero_api_key, lv=current_library_version: create_child_note(
                                             library_type=lt,
                                             library_id=lid,
                                             item_key=ik,
                                             note_html=nh,
                                             tags=["ragpy-generated"],
-                                            api_key=ak
+                                            api_key=ak,
+                                            library_version=lv
                                         )
                                     )
 
                                     if result.get("success"):
                                         created += 1
                                         status = "created"
+                                        # Update version for next call (reduces 412 conflicts)
+                                        current_library_version = result.get("new_version")
                                     else:
                                         errors += 1
                                         status = "error"
