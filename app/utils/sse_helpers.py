@@ -29,7 +29,8 @@ async def run_subprocess_with_sse(
     *,
     session_folder: Optional[str] = None,
     error_keywords: Optional[list[str]] = None,
-    timeout: Optional[int] = None
+    timeout: Optional[int] = None,
+    heartbeat_interval: int = 15
 ) -> AsyncGenerator[str, None]:
     """
     Execute a subprocess and stream SSE events by parsing stdout/stderr.
@@ -40,6 +41,7 @@ async def run_subprocess_with_sse(
         session_folder: Session identifier for PID tracking (enables session-aware stop)
         error_keywords: List of keywords that indicate errors in output
         timeout: Optional timeout in seconds
+        heartbeat_interval: Seconds between heartbeat messages to keep connection alive (default: 15)
 
     Yields:
         SSE-formatted strings: "data: {JSON}\\n\\n"
@@ -47,10 +49,13 @@ async def run_subprocess_with_sse(
     Event types emitted:
         - init: Initial setup with total count if known
         - progress: Progress updates with current/total
+        - heartbeat: Keep-alive message during long operations
         - complete: Successful completion
         - error: Error occurred
     """
     error_keywords = error_keywords or ["error", "failed", "exception", "traceback"]
+    import time
+    last_heartbeat = time.time()
 
     try:
         # Create subprocess with both stdout and stderr captured
@@ -67,6 +72,9 @@ async def run_subprocess_with_sse(
 
         logger.info(f"Started subprocess: {' '.join(cmd)}")
         
+        # ANSI escape sequence regex
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
         async def read_stream(stream, stream_name):
             """Read from stdout or stderr and parse progress."""
             while True:
@@ -78,8 +86,15 @@ async def run_subprocess_with_sse(
                     decoded = line.decode('utf-8', errors='replace').strip()
                     if not decoded:
                         continue
-                        
+                    
+                    # Strip ANSI codes for clean parsing
+                    decoded = ansi_escape.sub('', decoded)
+
                     logger.debug(f"[{stream_name}] {decoded}")
+
+                    # Log PROGRESS lines at INFO level for debugging
+                    if decoded.startswith("PROGRESS|"):
+                        logger.info(f"[{stream_name}] PROGRESS line: {decoded}")
                     
                     # Check for error indicators
                     if any(keyword in decoded.lower() for keyword in error_keywords):
@@ -91,6 +106,7 @@ async def run_subprocess_with_sse(
                     # Try to parse progress
                     event = progress_parser(decoded)
                     if event:
+                        logger.info(f"SSE Parsed event: {event.get('type', 'unknown')} - {event}")
                         yield event
                         
                 except Exception as e:
@@ -114,19 +130,28 @@ async def run_subprocess_with_sse(
         
         # Stream events as they come from either stream
         async def stream_from_queue():
+            nonlocal last_heartbeat
             while True:
                 # Check if both readers are done
                 if all(r.done() for r in readers) and event_queue.empty():
                     break
-                
+
                 try:
                     # Wait for event with timeout to check if readers finished
-                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.5)
                     yield f"data: {json.dumps(event)}\n\n"
+                    last_heartbeat = time.time()  # Reset heartbeat timer on activity
                 except asyncio.TimeoutError:
                     # No event available, check if we should continue
                     if all(r.done() for r in readers):
                         break
+
+                    # Send heartbeat to keep connection alive
+                    current_time = time.time()
+                    if current_time - last_heartbeat >= heartbeat_interval:
+                        yield f"data: {{\"type\": \"heartbeat\", \"message\": \"Processing...\"}}\n\n"
+                        last_heartbeat = current_time
+                        logger.debug(f"Sent heartbeat after {heartbeat_interval}s of inactivity")
                     continue
         
         # Stream all events
@@ -311,7 +336,12 @@ def parse_multilevel_progress(line: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        parts = line.split("|", 3)  # Max 4 parts
+        # Use simple split
+        parts = line.split("|")
+        # Rejoin message part if it contained pipes
+        if len(parts) > 4:
+            parts = parts[:3] + ["|".join(parts[3:])]
+        
         if len(parts) < 3:
             return None
 
@@ -319,13 +349,16 @@ def parse_multilevel_progress(line: str) -> Optional[Dict[str, Any]]:
 
         # Handle init event (special case: total only)
         if level == "init":
-            total = int(parts[2].strip())
-            message = parts[3].strip() if len(parts) > 3 else f"Found {total} items"
-            return {
-                "type": "init",
-                "total": total,
-                "message": message
-            }
+            try:
+                total = int(parts[2].strip())
+                message = parts[3].strip() if len(parts) > 3 else f"Found {total} items"
+                return {
+                    "type": "init",
+                    "total": total,
+                    "message": message
+                }
+            except ValueError:
+                return None
 
         # Parse current/total
         counts = parts[2].strip()

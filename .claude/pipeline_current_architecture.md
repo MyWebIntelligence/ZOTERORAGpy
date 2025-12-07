@@ -133,6 +133,9 @@ graph TD
 #### **Transformations de données critiques**
 
 **1. Hiérarchie OCR avec fallback intelligent**
+
+Le système applique une stratégie de fallback en cascade pour l'OCR afin d'optimiser à la fois la qualité et les coûts. Le processus tente les moteurs dans un ordre de priorité strict :
+
 ```python
 # Ordre de priorité automatique
 Mistral OCR (Markdown) → OpenAI Vision → PyMuPDF Legacy
