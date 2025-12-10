@@ -56,7 +56,8 @@ def test_prompt_placeholders(content):
         "{URL}",
         "{ABSTRACT}",
         "{TEXT}",
-        "{LANGUAGE}"
+        "{LANGUAGE}",
+        "{PROBLEMATIQUE}"
     ]
 
     missing = []
@@ -117,7 +118,8 @@ def test_prompt_replacement():
         "{URL}": "https://example.com",
         "{ABSTRACT}": "Test abstract content",
         "{TEXT}": "Full test text content",
-        "{LANGUAGE}": "français"
+        "{LANGUAGE}": "français",
+        "{PROBLEMATIQUE}": "Test problematique"
     }
 
     result = template

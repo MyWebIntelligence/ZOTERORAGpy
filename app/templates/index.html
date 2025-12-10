@@ -1252,9 +1252,9 @@ do{% extends "base.html" %}
             <div id="sparseEmbeddingResult" class="result"></div>
           </div>
 
-          <!-- 4. Vector DB Upload -->
+          <!-- 4.a Vector DB Upload -->
           <div class="sub-section step-locked" id="db-section">
-            <h3>4. Upload to Vector Database</h3>
+            <h3>4.a Upload to Vector Database</h3>
             <p class="text-secondary text-sm mb-4">Store embeddings for semantic search and RAG applications.</p>
 
             <div class="db-options" id="vectorDbOptions">
@@ -1310,6 +1310,54 @@ do{% extends "base.html" %}
                 <i class="bi bi-cloud-upload"></i> Upload to Vector DB
               </button>
               <div id="dbResult" class="result"></div>
+            </div>
+          </div>
+
+          <!-- 4.b Document Clustering -->
+          <div class="sub-section step-locked" id="clustering-section">
+            <h3>4.b Cluster Documents to Zotero</h3>
+            <p class="text-secondary text-sm mb-4">
+              Automatically group similar documents using UMAP+HDBSCAN clustering and apply tags to your Zotero library.
+            </p>
+
+            <div class="clustering-options">
+              <div class="form-group mb-3">
+                <label class="form-label" for="clusterSessionName">Session Name (for tags)</label>
+                <input type="text" id="clusterSessionName" class="form-control"
+                       placeholder="e.g., MaBiblio"
+                       title="Tags will be formatted as _SessionName_01, _SessionName_02...">
+                <small class="text-secondary">Tags format: <code>_SessionName_01</code>, <code>_SessionName_02</code>...</small>
+              </div>
+
+              <div class="form-group mb-3">
+                <label class="form-label" for="minClusterSize">Min Cluster Size (optional)</label>
+                <input type="number" id="minClusterSize" class="form-control"
+                       min="3" max="50" placeholder="Auto (~N/10)"
+                       title="Minimum documents per cluster. Leave empty for automatic calculation.">
+                <small class="text-secondary">Leave empty for automatic (~N/10 clusters)</small>
+              </div>
+
+              <div class="btn-group-vertical" style="gap: 0.5rem;">
+                <button id="clusterDocumentsBtn" class="btn btn-primary">
+                  <i class="bi bi-diagram-3"></i> Cluster Documents
+                </button>
+                <button id="applyZoteroTagsBtn" class="btn btn-secondary" disabled>
+                  <i class="bi bi-tags"></i> Apply Tags to Zotero
+                </button>
+              </div>
+
+              <div id="clusteringProgress" class="progress-container" style="display:none;">
+                <div class="progress-header">
+                  <span id="clusteringProgressCount" class="progress-count">0/5</span>
+                  <span id="clusteringProgressStatus" class="progress-status">Processing...</span>
+                </div>
+                <div class="progress-bar-wrapper">
+                  <div id="clusteringProgressBar" class="progress-bar-fill"></div>
+                </div>
+                <p id="clusteringProgressText" class="text-sm text-tertiary mt-2"></p>
+              </div>
+
+              <div id="clusteringResult" class="result"></div>
             </div>
           </div>
         </div>
@@ -1659,6 +1707,7 @@ do{% extends "base.html" %}
         completeStep('sparseEmbed', 'output_chunks_with_embeddings_sparse.json');
         markSectionCompleted('sparse-embedding-section');
         unlockSection('db-section');
+        unlockSection('clustering-section');
         const sparseInfo = files.sparse_embedding.chunk_count ? ` (${files.sparse_embedding.chunk_count} chunks)` : '';
         document.getElementById('sparseEmbeddingResult').innerHTML = `<p>✅ Existing sparse embeddings: ${buildDownloadLink('output_chunks_with_embeddings_sparse.json')}${sparseInfo}</p>`;
       }
@@ -2204,6 +2253,7 @@ do{% extends "base.html" %}
                 completeStep('sparseEmbed', fileName);
                 markSectionCompleted('sparse-embedding-section');
                 unlockSection('db-section');
+                unlockSection('clustering-section');
                 showToast('Sparse embeddings generated!', 'success');
               } else if (data.type === 'error') {
                 progressStatus.textContent = 'Error';
@@ -2391,6 +2441,175 @@ do{% extends "base.html" %}
       }
     } catch (err) {
       resultDiv.textContent = 'DB upload failed: ' + err.message;
+    }
+  });
+
+  // ========================================
+  // 4.b DOCUMENT CLUSTERING
+  // ========================================
+  document.getElementById('clusterDocumentsBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('clusterDocumentsBtn');
+    const applyTagsBtn = document.getElementById('applyZoteroTagsBtn');
+    const resultDiv = document.getElementById('clusteringResult');
+    const progressDiv = document.getElementById('clusteringProgress');
+    const progressBar = document.getElementById('clusteringProgressBar');
+    const progressCount = document.getElementById('clusteringProgressCount');
+    const progressStatus = document.getElementById('clusteringProgressStatus');
+    const progressText = document.getElementById('clusteringProgressText');
+
+    if (!ensureSessionPath(resultDiv)) return;
+
+    // Get parameters
+    const sessionName = document.getElementById('clusterSessionName').value.trim();
+    if (!sessionName) {
+      resultDiv.innerHTML = '<p class="text-danger">⚠️ Session Name is required for tag generation.</p>';
+      return;
+    }
+
+    const minClusterSize = document.getElementById('minClusterSize').value;
+
+    // Disable buttons during processing
+    const originalBtnHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Clustering...';
+    applyTagsBtn.disabled = true;
+
+    // Reset UI
+    resultDiv.innerHTML = '';
+    progressDiv.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressCount.textContent = '0/5';
+    progressStatus.textContent = 'Starting...';
+    progressText.textContent = '';
+
+    // Build form data
+    const formData = new FormData();
+    formData.append('session_folder', currentPath);
+    formData.append('session_name', sessionName);
+    if (minClusterSize) {
+      formData.append('min_cluster_size', minClusterSize);
+    }
+
+    try {
+      const response = await fetch('/cluster_documents_sse', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: response.statusText }));
+        throw new Error(errorData.error || errorData.detail || response.statusText);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6).trim();
+            if (data === '[DONE]') continue;
+
+            try {
+              const event = JSON.parse(data);
+
+              if (event.type === 'progress') {
+                const pct = Math.round((event.current / event.total) * 100);
+                progressBar.style.width = pct + '%';
+                progressCount.textContent = `${event.current}/${event.total}`;
+                progressStatus.textContent = event.message || 'Processing...';
+              } else if (event.type === 'complete') {
+                progressBar.style.width = '100%';
+                progressCount.textContent = `${event.total}/${event.total}`;
+                progressStatus.textContent = 'Complete!';
+
+                // Show results
+                const results = event.results;
+                resultDiv.innerHTML = `
+                  <div class="alert alert-success">
+                    <h4><i class="bi bi-check-circle"></i> Clustering Complete</h4>
+                    <ul>
+                      <li><strong>Documents:</strong> ${results.n_documents}</li>
+                      <li><strong>Clusters:</strong> ${results.n_clusters}</li>
+                      <li><strong>Noise (outliers):</strong> ${results.n_noise}</li>
+                    </ul>
+                    <p class="mt-2">Tags format: <code>_${sessionName}_01</code>, <code>_${sessionName}_02</code>...</p>
+                  </div>
+                `;
+
+                // Enable Apply Tags button
+                applyTagsBtn.disabled = false;
+                showToast('Clustering complete!', 'success');
+              } else if (event.type === 'error') {
+                throw new Error(event.message);
+              }
+            } catch (parseErr) {
+              console.warn('SSE parse error:', parseErr, data);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      resultDiv.innerHTML = `<p class="text-danger">❌ Clustering failed: ${err.message}</p>`;
+      progressDiv.style.display = 'none';
+      showToast('Clustering failed', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalBtnHtml;
+    }
+  });
+
+  // Apply Zotero Tags button
+  document.getElementById('applyZoteroTagsBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('applyZoteroTagsBtn');
+    const resultDiv = document.getElementById('clusteringResult');
+
+    if (!ensureSessionPath(resultDiv)) return;
+
+    const originalBtnHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Applying tags...';
+
+    const formData = new FormData();
+    formData.append('session_folder', currentPath);
+
+    try {
+      const response = await fetch('/apply_cluster_tags_zotero', {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || data.detail || response.statusText);
+      }
+
+      resultDiv.innerHTML += `
+        <div class="alert alert-success mt-3">
+          <h4><i class="bi bi-tags"></i> Tags Applied to Zotero</h4>
+          <ul>
+            <li><strong>Success:</strong> ${data.success_count} items</li>
+            <li><strong>Failed:</strong> ${data.failed_count} items</li>
+          </ul>
+          ${data.errors && data.errors.length > 0 ? `<details><summary>Errors</summary><pre>${data.errors.join('\n')}</pre></details>` : ''}
+        </div>
+      `;
+      showToast('Tags applied to Zotero!', 'success');
+    } catch (err) {
+      resultDiv.innerHTML += `<p class="text-danger mt-3">❌ Failed to apply tags: ${err.message}</p>`;
+      showToast('Failed to apply tags', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalBtnHtml;
     }
   });
 

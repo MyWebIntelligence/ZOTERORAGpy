@@ -1367,3 +1367,218 @@ def create_or_update_item(
 
     # All retries exhausted
     raise ZoteroAPIError(500, f"Failed to create item after {MAX_RETRIES} attempts")
+
+
+# ============================================================================
+# Clustering Tag Management
+# ============================================================================
+# The following function supports the document clustering feature (Step 4.b):
+# - Adds cluster tags to multiple Zotero items
+# - Handles version conflicts and rate limits
+# - Returns detailed success/failure counts
+# ============================================================================
+
+
+def add_tags_to_items(
+    library_type: str,
+    library_id: str,
+    tag_mapping: Dict[str, str],
+    api_key: str,
+    replace_all: bool = True
+) -> Dict:
+    """
+    Add or replace cluster tags on multiple Zotero items.
+
+    This function manages tags on Zotero items for organizing documents by cluster.
+    It's designed to work with the clustering feature (Step 4.b) which generates
+    tags like '_MaBiblio_01', '_MaBiblio_02', etc.
+
+    Args:
+        library_type: "users" or "groups" depending on library ownership.
+        library_id: The library ID (user ID or group ID).
+        tag_mapping: Dictionary mapping Zotero item keys to cluster tags.
+                    Example: {"ABC123": "_MaBiblio_01", "DEF456": "_MaBiblio_02"}
+        api_key: Zotero API key with write permissions.
+        replace_all: If True (default), replaces ALL existing tags with only the
+                    cluster tag. If False, adds the cluster tag to existing tags.
+
+    Returns:
+        Dictionary with:
+            - success_count (int): Number of items successfully tagged
+            - failed_count (int): Number of items that failed
+            - skipped_count (int): Number of items where tag already existed (replace_all=False only)
+            - errors (list): List of error details for failed items
+
+    Example:
+        >>> result = add_tags_to_items(
+        ...     library_type="users",
+        ...     library_id="12345",
+        ...     tag_mapping={"ABC": "_MaBiblio_01", "DEF": "_MaBiblio_02"},
+        ...     api_key="your_api_key",
+        ...     replace_all=True  # Remove all existing tags
+        ... )
+        >>> print(f"Tagged {result['success_count']} items")
+
+    Note:
+        - When replace_all=True: ALL existing tags are removed and replaced by cluster tag.
+        - When replace_all=False: Skips items where the tag already exists.
+        - Uses If-Unmodified-Since-Version header for safe concurrent updates.
+        - Implements retry logic for version conflicts (412) and rate limits (429).
+    """
+    prefix = _build_library_prefix(library_type, library_id)
+
+    success_count = 0
+    failed_count = 0
+    skipped_count = 0
+    errors = []
+
+    total_items = len(tag_mapping)
+    mode_str = "REPLACE ALL tags with" if replace_all else "ADD tags to"
+    logger.info(f"Starting to {mode_str} cluster tags on {total_items} Zotero items")
+
+    for idx, (item_key, tag) in enumerate(tag_mapping.items(), 1):
+        try:
+            # Get current item to retrieve existing tags and version
+            item = get_item(library_type, library_id, item_key, api_key)
+            item_data = item.get("data", {})
+            item_version = str(item.get("version", "0"))
+
+            # Get existing tags
+            existing_tags = item_data.get("tags", [])
+            existing_tag_values = {t.get("tag") for t in existing_tags if t.get("tag")}
+
+            if replace_all:
+                # REPLACE mode: Remove all tags, set only the cluster tag
+                updated_tags = [{"tag": tag}]
+                # Skip only if this exact tag is the ONLY existing tag
+                if existing_tag_values == {tag}:
+                    logger.debug(f"Item {item_key} already has only tag '{tag}', skipping")
+                    skipped_count += 1
+                    success_count += 1
+                    continue
+            else:
+                # ADD mode: Skip if tag already exists
+                if tag in existing_tag_values:
+                    logger.debug(f"Tag '{tag}' already exists on item {item_key}")
+                    skipped_count += 1
+                    success_count += 1  # Count as success since goal is achieved
+                    continue
+                # Add new tag to existing tags
+                updated_tags = existing_tags + [{"tag": tag}]
+
+            # Build PATCH request
+            url = f"{ZOTERO_API_BASE}/{prefix}/items/{item_key}"
+
+            # Retry loop for version conflicts
+            for attempt in range(MAX_RETRIES):
+                headers = _build_headers(api_key, {
+                    "If-Unmodified-Since-Version": item_version
+                })
+
+                response = requests.patch(
+                    url,
+                    headers=headers,
+                    json={"tags": updated_tags},
+                    timeout=30
+                )
+
+                if response.status_code == 204:
+                    # Success - no content returned
+                    action = "Replaced tags with" if replace_all else "Added tag"
+                    logger.debug(f"[{idx}/{total_items}] {action} '{tag}' on item {item_key}")
+                    success_count += 1
+                    break
+
+                elif response.status_code == 412:
+                    # Version conflict - refresh version and retry
+                    logger.warning(f"Version conflict for {item_key}, retrying (attempt {attempt + 1})")
+                    item = get_item(library_type, library_id, item_key, api_key)
+                    item_version = str(item.get("version", "0"))
+                    # Update tags in case they changed
+                    existing_tags = item.get("data", {}).get("tags", [])
+                    existing_tag_values = {t.get("tag") for t in existing_tags}
+
+                    if replace_all:
+                        # REPLACE mode: Check if already replaced correctly
+                        if existing_tag_values == {tag}:
+                            skipped_count += 1
+                            success_count += 1
+                            break
+                        updated_tags = [{"tag": tag}]
+                    else:
+                        # ADD mode: Check if tag was added by concurrent operation
+                        if tag in existing_tag_values:
+                            skipped_count += 1
+                            success_count += 1
+                            break
+                        updated_tags = existing_tags + [{"tag": tag}]
+
+                    time.sleep(RETRY_DELAY)
+                    continue
+
+                elif response.status_code == 429:
+                    # Rate limit - wait and retry
+                    retry_after = int(response.headers.get("Retry-After", RETRY_DELAY * 2))
+                    logger.warning(f"Rate limit hit, waiting {retry_after}s")
+                    time.sleep(retry_after)
+                    continue
+
+                elif response.status_code == 404:
+                    # Item not found
+                    logger.warning(f"Item {item_key} not found in Zotero")
+                    failed_count += 1
+                    errors.append({
+                        "item_key": item_key,
+                        "tag": tag,
+                        "error": "Item not found in Zotero"
+                    })
+                    break
+
+                else:
+                    # Other error
+                    logger.error(f"Failed to tag item {item_key}: {response.status_code} - {response.text}")
+                    failed_count += 1
+                    errors.append({
+                        "item_key": item_key,
+                        "tag": tag,
+                        "error": f"HTTP {response.status_code}: {response.text[:100]}"
+                    })
+                    break
+            else:
+                # All retries exhausted
+                failed_count += 1
+                errors.append({
+                    "item_key": item_key,
+                    "tag": tag,
+                    "error": f"Failed after {MAX_RETRIES} attempts"
+                })
+
+        except ZoteroAPIError as e:
+            failed_count += 1
+            errors.append({
+                "item_key": item_key,
+                "tag": tag,
+                "error": str(e)
+            })
+            logger.error(f"Zotero API error for item {item_key}: {e}")
+
+        except Exception as e:
+            failed_count += 1
+            errors.append({
+                "item_key": item_key,
+                "tag": tag,
+                "error": str(e)
+            })
+            logger.error(f"Unexpected error tagging item {item_key}: {e}")
+
+    logger.info(
+        f"Tagging complete: {success_count} succeeded, {failed_count} failed, "
+        f"{skipped_count} already had tag"
+    )
+
+    return {
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "skipped_count": skipped_count,
+        "errors": errors
+    }
