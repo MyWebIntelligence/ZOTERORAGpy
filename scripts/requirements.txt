@@ -43,6 +43,11 @@ prometheus-fastapi-instrumentator==7.0.0
 # Background tasks
 apscheduler==3.10.4
 
+# Document Clustering (Step 4.b - Automatic categorization)
+scikit-learn<1.6  # Required for hdbscan compatibility
+umap-learn>=0.5.4
+hdbscan>=0.8.33
+
 # Celery distributed task queue (Phase 3 - Production Architecture)
 celery==5.3.4
 redis==5.0.1

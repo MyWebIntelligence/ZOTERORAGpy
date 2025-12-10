@@ -3,11 +3,13 @@
 **Date** : 2025-11-25
 **Version** : 1.0.0
 
+**Note**: Ce document est un aperçu des performances à une date donnée. Plusieurs valeurs de configuration peuvent être surchargées par des variables d'environnement, expliquant les différences potentielles avec les valeurs par défaut dans le code.
+
 ## Configuration Actuelle
 
 | Paramètre | Valeur |
 |-----------|--------|
-| Uvicorn workers | 7 |
+| Uvicorn workers | 1 (depuis v1.1.0 pour fiabiliser les SSE) |
 | Docker RAM limit | 8GB |
 | Docker CPU limit | 4 cores |
 | DEFAULT_MAX_WORKERS | 8 |

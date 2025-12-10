@@ -2,7 +2,7 @@
 
 ## 📝 Vue d'ensemble
 
-Le fichier [zotero_prompt.md](zotero_prompt.md) contient le template du prompt utilisé pour générer les fiches de lecture via LLM. Vous pouvez le modifier pour personnaliser le style, la structure et le contenu des fiches générées.
+Le fichier [zotero_prompt.md](../../app/utils/zotero_prompt.md) contient le template du prompt utilisé pour générer les fiches de lecture via LLM. Vous pouvez le modifier pour personnaliser le style, la structure et le contenu des fiches générées.
 
 ## 🔧 Comment ça fonctionne
 
@@ -24,6 +24,7 @@ Vous pouvez utiliser ces placeholders dans votre prompt :
 | `{ABSTRACT}` | Résumé de l'article | "This paper presents..." |
 | `{TEXT}` | Texte complet extrait par OCR | "Full text..." (max 8000 caractères) |
 | `{LANGUAGE}` | Langue cible | "français", "English", "español", etc. |
+| `{PROBLEMATIQUE}` | Problématique de recherche | "Comment les LLMs transforment la recherche..." |
 
 ## ✏️ Exemples de Personnalisation
 

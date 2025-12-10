@@ -10,9 +10,6 @@
 - **Backend** : FastAPI (Python) avec templates Jinja2
 - **Frontend** : HTML5/CSS3/JavaScript vanilla
 - **Communication** : REST API + Server-Sent Events (SSE)
-- **Styling** : CSS custom properties + responsive design
-- **Assets** : Fichiers statiques servis par FastAPI
-
 ### Structure fichiers
 ```
 app/
@@ -20,7 +17,10 @@ app/
 ├── templates/
 │   └── index.html         # Template principal (SPA-style)
 ├── static/
-│   ├── style.css          # Styles globaux et composants
+│   ├── css/
+│   │   ├── design-system.css
+│   │   ├── components.css
+│   │   └── layouts.css
 │   └── favicon.ico        # Icône application
 └── utils/                 # Utilitaires backend (Zotero, etc.)
 ```
@@ -68,7 +68,7 @@ app/
 <!-- Modal avec tous les credentials -->
 <div id="settingsModal" class="modal">
   <div class="modal-content">
-    <!-- 13 champs de configuration API -->
+    <!-- 14 champs de configuration API -->
     <input type="password" id="openai_api_key" placeholder="sk-...">
     <input type="password" id="openrouter_api_key" placeholder="sk-or-v1-...">
     <!-- ... autres providers -->

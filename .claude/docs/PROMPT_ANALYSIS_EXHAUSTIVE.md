@@ -689,7 +689,7 @@ Effectue une revue systématique de cet article selon les critères PRISMA.
 
 ## Support et Contact
 
-**Documentation** : [BUGFIX_LIBRARY_EXTRACTION.md](BUGFIX_LIBRARY_EXTRACTION.md)
+
 
 **Tests** :
 - `tests/test_prompt_file.py` - Validation du template prompt

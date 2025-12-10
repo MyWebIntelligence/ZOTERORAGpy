@@ -101,7 +101,7 @@ for doc in documents:
 
 ### Fichier YAML (optionnel)
 
-Modifier [config/csv_config.yaml](config/csv_config.yaml) :
+Modifier [config/csv_config.yaml](../../config/csv_config.yaml) :
 
 ```yaml
 csv:
@@ -346,11 +346,11 @@ docs = ingest_csv("file.csv", config=config)
 
 ### Fichiers modifiés
 
-1. **[scripts/rad_chunk.py](scripts/rad_chunk.py)**
+1. **[scripts/rad_chunk.py](../../scripts/rad_chunk.py)**
    - Ligne 209 : Ajout de `"csv"` dans la liste des providers sans recodage
    - Lignes 251-269 : Construction **dynamique** des métadonnées (injection de `row_data`)
 
-2. **[scripts/rad_vectordb.py](scripts/rad_vectordb.py)**
+2. **[scripts/rad_vectordb.py](../../scripts/rad_vectordb.py)**
    - Fonction `prepare_vectors_for_pinecone()` : Métadonnées dynamiques
    - Fonction `insert_to_weaviate_hybrid()` : Properties dynamiques + normalisation dates
    - Fonction `prepare_points_for_qdrant()` : Payload dynamique
@@ -378,9 +378,9 @@ docs = ingest_csv("file.csv", config=config)
 
 ## Ressources
 
-- **Documentation architecture** : [.claude/task/pipeline_current_architecture.md](.claude/task/pipeline_current_architecture.md)
-- **Plan de développement** : [.claude/task/csv_upload.md](.claude/task/csv_upload.md)
-- **Tests** : [tests/test_csv_ingestion.py](tests/test_csv_ingestion.py)
+- **Documentation architecture** : [pipeline_current_architecture.md](../pipeline_current_architecture.md)
+
+- **Tests** : [tests/test_csv_ingestion.py](../../tests/test_csv_ingestion.py)
 - **Configuration** : [config/csv_config.yaml](config/csv_config.yaml)
 
 ---

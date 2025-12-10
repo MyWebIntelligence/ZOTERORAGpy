@@ -1396,3 +1396,317 @@ async def sparse_embedding_generation_sse(
             yield event
 
     return StreamingResponse(sse_with_count(), media_type="text/event-stream")
+
+
+# =============================================================================
+# DOCUMENT CLUSTERING (Step 4.b)
+# =============================================================================
+
+@router.post("/cluster_documents")
+async def cluster_documents(
+    session_folder: str = Form(...),
+    session_name: str = Form(...),
+    min_cluster_size: int = Form(None),
+    aggregation: str = Form("mean"),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Cluster documents based on their embeddings using UMAP + HDBSCAN.
+
+    This endpoint performs document-level clustering on embeddings and generates
+    Zotero-compatible tags for automatic organization. It's designed to run after
+    embedding generation (Step 4) as Step 4.b.
+
+    Args:
+        session_folder: Relative path to session folder in uploads/ directory.
+        session_name: Name for tag generation (e.g., 'MaBiblio').
+                     Tags will be formatted as '_MaBiblio_01', '_MaBiblio_02', etc.
+        min_cluster_size: Minimum documents per cluster. If None, auto-calculated
+                         to achieve approximately N/10 clusters.
+        aggregation: Method to aggregate chunk embeddings per document.
+                    Options: 'mean' (default), 'max', 'first'.
+
+    Returns:
+        JSONResponse with:
+            - success (bool): Whether clustering completed successfully
+            - n_documents (int): Total documents clustered
+            - n_clusters (int): Number of clusters found
+            - n_noise (int): Number of unclustered (noise) documents
+            - cluster_sizes (dict): Mapping of cluster_id to document count
+            - output_path (str): Path to clustering_results.json
+
+    Raises:
+        HTTPException 400: If embeddings file not found
+        HTTPException 500: If clustering fails
+
+    Example:
+        POST /cluster_documents
+        Form data:
+            session_folder: "abc123_MaBiblio"
+            session_name: "MaBiblio"
+    """
+    # Validate session folder exists
+    abs_session = os.path.abspath(os.path.join(UPLOAD_DIR, session_folder))
+
+    # Look for embeddings file (prefer sparse, fallback to dense)
+    embeddings_path = os.path.join(abs_session, "output_chunks_with_embeddings_sparse.json")
+    if not os.path.exists(embeddings_path):
+        embeddings_path = os.path.join(abs_session, "output_chunks_with_embeddings.json")
+        if not os.path.exists(embeddings_path):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "Embeddings file not found. Run embedding generation first.",
+                    "missing_file": "output_chunks_with_embeddings.json"
+                }
+            )
+
+    try:
+        # Import clustering module
+        import sys
+        sys.path.insert(0, RAGPY_DIR)
+        from scripts.rad_clustering import run_clustering_pipeline
+
+        # Run clustering pipeline
+        results = run_clustering_pipeline(
+            embeddings_json_path=embeddings_path,
+            output_dir=abs_session,
+            session_name=session_name,
+            min_cluster_size=min_cluster_size if min_cluster_size else None,
+            aggregation_method=aggregation
+        )
+
+        return JSONResponse({
+            "success": True,
+            "n_documents": results["n_documents"],
+            "n_clusters": results["n_clusters"],
+            "n_noise": results["n_noise"],
+            "noise_ratio": results["noise_ratio"],
+            "cluster_sizes": results["cluster_sizes"],
+            "output_path": os.path.join(session_folder, "clustering_results.json")
+        })
+
+    except ValueError as e:
+        logger.warning(f"Clustering validation error: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"error": str(e)}
+        )
+
+    except ImportError as e:
+        logger.error(f"Clustering dependency missing: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Clustering dependencies not installed. Run: pip install umap-learn hdbscan",
+                "details": str(e)
+            }
+        )
+
+    except Exception as e:
+        logger.exception(f"Clustering failed: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Clustering failed: {str(e)}"}
+        )
+
+
+@router.post("/cluster_documents_sse")
+async def cluster_documents_sse(
+    session_folder: str = Form(...),
+    session_name: str = Form(...),
+    min_cluster_size: int = Form(None),
+    aggregation: str = Form("mean"),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    SSE version of cluster_documents for real-time progress updates.
+
+    Streams progress events during clustering:
+    - init: Starting clustering
+    - progress: Step completion (1/5, 2/5, etc.)
+    - complete: Clustering finished with results
+    - error: If clustering fails
+
+    Uses subprocess to run rad_clustering.py with PROGRESS logging.
+    """
+    from app.utils.sse_helpers import (
+        run_subprocess_with_sse, create_combined_parser,
+        parse_multilevel_progress
+    )
+
+    # Validate session folder
+    abs_session = os.path.abspath(os.path.join(UPLOAD_DIR, session_folder))
+
+    # Look for embeddings file
+    embeddings_path = os.path.join(abs_session, "output_chunks_with_embeddings_sparse.json")
+    if not os.path.exists(embeddings_path):
+        embeddings_path = os.path.join(abs_session, "output_chunks_with_embeddings.json")
+        if not os.path.exists(embeddings_path):
+            async def error_generator():
+                yield 'data: {"type": "error", "message": "Embeddings file not found. Run embedding generation first."}\n\n'
+            return StreamingResponse(error_generator(), media_type="text/event-stream")
+
+    # Build subprocess environment (no external credentials needed for clustering)
+    subprocess_env = build_subprocess_env(current_user)
+
+    # Build command
+    script_path = os.path.join(RAGPY_DIR, "scripts", "rad_clustering.py")
+    cmd = [
+        "python3", "-u", script_path,
+        "--input", embeddings_path,
+        "--output", abs_session,
+        "--session-name", session_name,
+        "--aggregation", aggregation
+    ]
+
+    if min_cluster_size:
+        cmd.extend(["--min-cluster-size", str(min_cluster_size)])
+
+    # Use multilevel progress parser
+    parser = create_combined_parser(parse_multilevel_progress)
+
+    # Wrap generator to add cluster count on complete
+    output_file = os.path.join(abs_session, "clustering_results.json")
+
+    async def sse_with_results():
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=session_folder, timeout=600, env=subprocess_env):
+            if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
+                try:
+                    if os.path.exists(output_file):
+                        with open(output_file, 'r', encoding='utf-8') as f:
+                            results = json.load(f)
+                        # Format expected by JavaScript: {type, total, results: {n_documents, n_clusters, n_noise}}
+                        complete_event = {
+                            "type": "complete",
+                            "total": 5,
+                            "results": {
+                                "n_documents": results["n_documents"],
+                                "n_clusters": results["n_clusters"],
+                                "n_noise": results["n_noise"]
+                            }
+                        }
+                        yield f'data: {json.dumps(complete_event)}\n\n'
+                        continue
+                except Exception as e:
+                    logger.error(f"Error reading clustering results: {e}")
+            yield event
+
+    return StreamingResponse(sse_with_results(), media_type="text/event-stream")
+
+
+@router.post("/apply_cluster_tags_zotero")
+async def apply_cluster_tags_zotero(
+    session_folder: str = Form(...),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Apply cluster tags to Zotero items.
+
+    Reads clustering_results.json and adds cluster tags to corresponding
+    Zotero items based on their itemKey field. Tags follow the format
+    '_SessionName_01', '_SessionName_02', etc.
+
+    Args:
+        session_folder: Relative path to session folder containing clustering_results.json
+
+    Returns:
+        JSONResponse with:
+            - success (bool): Whether tagging completed
+            - tagged_count (int): Number of items successfully tagged
+            - failed_count (int): Number of failed items
+            - errors (list): List of error details (truncated to 10)
+
+    Raises:
+        HTTPException 400: If clustering_results.json not found
+        HTTPException 403: If Zotero credentials missing
+
+    Note:
+        Requires Zotero API credentials (zotero_api_key, zotero_user_id or zotero_group_id)
+        to be configured in user settings.
+    """
+    # Get Zotero credentials
+    zotero_api_key = get_credential_or_env(current_user, "zotero_api_key")
+    zotero_user_id = get_credential_or_env(current_user, "zotero_user_id")
+    zotero_group_id = get_credential_or_env(current_user, "zotero_group_id")
+
+    if not zotero_api_key:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": get_credential_error_message("zotero_api_key"),
+                "credential_required": "zotero_api_key",
+                "configure_url": "/settings/credentials"
+            }
+        )
+
+    library_type = "groups" if zotero_group_id else "users"
+    library_id = zotero_group_id or zotero_user_id
+
+    if not library_id:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": get_credential_error_message("zotero_user_id"),
+                "credential_required": "zotero_user_id",
+                "configure_url": "/settings/credentials"
+            }
+        )
+
+    # Load clustering results
+    abs_session = os.path.abspath(os.path.join(UPLOAD_DIR, session_folder))
+    results_path = os.path.join(abs_session, "clustering_results.json")
+
+    if not os.path.exists(results_path):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "clustering_results.json not found. Run clustering first.",
+                "missing_file": "clustering_results.json"
+            }
+        )
+
+    try:
+        with open(results_path, "r", encoding="utf-8") as f:
+            clustering_results = json.load(f)
+
+        # Build tag mapping from itemKey to cluster_tag
+        tag_mapping = {}
+        for doc in clustering_results.get("documents", []):
+            item_key = doc.get("itemKey")
+            cluster_tag = doc.get("cluster_tag")
+            if item_key and cluster_tag:
+                tag_mapping[item_key] = cluster_tag
+
+        if not tag_mapping:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "No Zotero item keys found in clustering results. Ensure documents have itemKey field."
+                }
+            )
+
+        # Import and call Zotero tag function
+        from app.utils.zotero_client import add_tags_to_items
+
+        result = add_tags_to_items(
+            library_type=library_type,
+            library_id=library_id,
+            tag_mapping=tag_mapping,
+            api_key=zotero_api_key
+        )
+
+        return JSONResponse({
+            "success": True,
+            "tagged_count": result["success_count"],
+            "failed_count": result["failed_count"],
+            "total_items": len(tag_mapping),
+            "errors": result.get("errors", [])[:10]  # Limit error details
+        })
+
+    except Exception as e:
+        logger.exception(f"Failed to apply Zotero tags: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to apply tags: {str(e)}"}
+        )

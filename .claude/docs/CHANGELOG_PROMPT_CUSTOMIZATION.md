@@ -25,6 +25,7 @@ Permettre la personnalisation facile du prompt de génération de fiches de lect
 - `{ABSTRACT}` - Résumé
 - `{TEXT}` - Texte complet OCR (limité à 8000 caractères)
 - `{LANGUAGE}` - Langue cible (français, English, español, etc.)
+- `{PROBLEMATIQUE}` - Problématique de recherche
 
 ### 2. Système de Chargement Dynamique
 
@@ -41,7 +42,7 @@ Nouvelles fonctions :
 
 ### 3. Documentation Complète
 
-**Fichier** : `app/utils/README_ZOTERO_PROMPT.md` (130+ lignes)
+**Fichier** : `README_ZOTERO_PROMPT.md` (130+ lignes)
 
 Contient :
 - Vue d'ensemble du système
@@ -61,7 +62,7 @@ Contient :
 5 tests automatisés :
 1. ✅ Existence du fichier
 2. ✅ Lisibilité (encodage UTF-8)
-3. ✅ Présence des 8 placeholders requis
+3. ✅ Présence des 9 placeholders requis
 4. ✅ Structure valide (markdown, HTML, instructions)
 5. ✅ Remplacement fonctionnel des placeholders
 
@@ -183,7 +184,7 @@ ZOTERO PROMPT FILE VALIDATION TESTS
 
 ✅ Prompt file exists
 ✅ Prompt file readable, length: 1136 characters
-✅ All 8 placeholders found
+✅ All 9 placeholders found
 ✅ 4/4 structure checks passed
 ✅ All placeholders replaced successfully
 
@@ -273,10 +274,10 @@ EOF
 
 ## 📚 Références
 
-- [app/utils/zotero_prompt.md](app/utils/zotero_prompt.md) - Template actuel
-- [app/utils/README_ZOTERO_PROMPT.md](app/utils/README_ZOTERO_PROMPT.md) - Guide complet
-- [app/utils/llm_note_generator.py](app/utils/llm_note_generator.py) - Code de chargement
-- [tests/test_prompt_file.py](tests/test_prompt_file.py) - Tests de validation
+- [app/utils/zotero_prompt.md](../../app/utils/zotero_prompt.md) - Template actuel
+- [README_ZOTERO_PROMPT.md](README_ZOTERO_PROMPT.md) - Guide complet
+- [app/utils/llm_note_generator.py](../../app/utils/llm_note_generator.py) - Code de chargement
+- [tests/test_prompt_file.py](../../tests/test_prompt_file.py) - Tests de validation
 
 ---
 

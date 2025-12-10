@@ -1,7 +1,33 @@
 # RAGpy - Guide d'utilisation et architecture
 
 **Date de création** : 2025-10-21
-**Dernière mise à jour** : 2025-11-27 (Phase 3: Architecture Celery pour production)
+**Dernière mise à jour** : 2025-12-10 (Documentation complémentaire)
+
+---
+
+## 📚 Documentation complémentaire
+
+### Lecture obligatoire
+
+En complément de ce fichier, **tu dois absolument lire** :
+- **[pipeline_current_architecture.md](.claude/pipeline_current_architecture.md)** — Architecture technique détaillée du pipeline, modèle de sécurité credentials, analyse qualité code et roadmap
+
+### Lecture optionnelle (`.claude/docs/`)
+
+Selon le contexte de ta tâche, consulte les fichiers suivants :
+
+| Fichier | Description | Quand le lire |
+|---------|-------------|---------------|
+| **[CSV_INGESTION_GUIDE.md](.claude/docs/CSV_INGESTION_GUIDE.md)** | Guide complet ingestion CSV directe (sans OCR), mapping colonnes, métadonnées dynamiques | Tâches liées à l'import CSV ou au module `csv_ingestion.py` |
+| **[README_ZOTERO_PROMPT.md](.claude/docs/README_ZOTERO_PROMPT.md)** | Personnalisation du template de prompt Zotero, placeholders disponibles, exemples | Modification du prompt de génération de fiches Zotero |
+| **[PROMPT_ANALYSIS_EXHAUSTIVE.md](.claude/docs/PROMPT_ANALYSIS_EXHAUSTIVE.md)** | Structure détaillée des analyses académiques exhaustives (6 sections, format HTML) | Développement de l'analyse LLM des articles scientifiques |
+| **[CHANGELOG_PROMPT_CUSTOMIZATION.md](.claude/docs/CHANGELOG_PROMPT_CUSTOMIZATION.md)** | Historique des changements système de personnalisation prompt | Comprendre l'évolution du système de templates |
+| **[SSE_DEBUGGING.md](.claude/docs/SSE_DEBUGGING.md)** | Diagnostic et corrections des problèmes Server-Sent Events (barres de progression) | Bugs liés au streaming temps réel, `tqdm`, ou endpoints SSE |
+| **[performance_baseline.md](.claude/docs/performance_baseline.md)** | Métriques de performance, configuration système, résultats tests de charge | Optimisation performance, tuning workers, dimensionnement |
+| **[ui_tech.md](.claude/docs/ui_tech.md)** | Architecture frontend (HTML/CSS/JS vanilla), templates Jinja2, composants UI | Développement interface utilisateur ou modifications CSS/JS |
+| **[clustersfeature.md](.claude/docs/clustersfeature.md)** | Clustering UMAP+HDBSCAN, tags Zotero automatiques, endpoints API | Développement ou maintenance du clustering (Step 4.b) |
+
+---
 
 Ce document constitue le guide de référence pour le projet **RAGpy**, un pipeline sophistiqué de Retrieval-Augmented Generation conçu pour traiter des documents académiques. Il couvre l'utilisation des agents CLI, l'architecture du système et les bonnes pratiques d'implémentation.
 
@@ -53,6 +79,7 @@ Décommentez la section `qdrant` dans `docker-compose.yml` pour une base vectori
 | Agent | Localisation | Rôle principal | Commande de base |
 | --- | --- | --- | --- |
 | `ragpy_cli.sh` | `ragpy/ragpy_cli.sh` | Gestion du serveur FastAPI (UI) | `./ragpy_cli.sh <start|close|kill>` |
+| `rad_clustering.py` | `ragpy/scripts/rad_clustering.py` | Clustering documents + tags Zotero (Step 4.b) | `python scripts/rad_clustering.py --input ... --output ... --session-name ...` |
 | `rad_dataframe.py` | `ragpy/scripts/rad_dataframe.py` | Extraction Zotero + OCR PDF → CSV | `python scripts/rad_dataframe.py --json ... --dir ... --output ...` |
 | `rad_chunk.py` | `ragpy/scripts/rad_chunk.py` | Chunking, recodage GPT, embeddings denses & sparses | `python scripts/rad_chunk.py --input ... --output ... --phase ...` |
 | `rad_vectordb.py` | `ragpy/scripts/rad_vectordb.py` | Insertion dans Pinecone / Weaviate / Qdrant | `python - <<'PY' ...` (appel fonctionnel) |
