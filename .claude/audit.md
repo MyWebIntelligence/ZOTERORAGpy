@@ -58,27 +58,76 @@ Les fichiers de routes, notamment `app/routes/processing.py` (1700+ lignes) et `
 *   **Injection de Commandes:** Bien que `subprocess.run` avec une liste d'arguments soit sûr, la construction dynamique des chemins et arguments doit être rigoureusement validée.
 *   **Environnement Subprocess:** Passer des secrets via les variables d'environnement des sous-processus est une pratique acceptable mais nécessite une vigilance constante pour ne pas les leaker dans les logs (ce qui semble être géré, mais reste un risque).
 
-## 5. Plan de Refactoring Recommandé
+## 5. Plan de Refactoring Complet et Optimisation
 
-Pour transformer RAGpy en une application robuste, voici les étapes recommandées :
+Ce plan détaille les étapes concrètes pour transformer RAGpy en une application de production robuste, performante et maintenable.
 
-### Phase 1 : Consolidation (Court Terme)
-1.  **Déplacer `ingestion/`** dans `app/ingestion` ou `app/services/ingestion`.
-2.  **Unifier la config** dans `app/core/config.py` avec `pydantic-settings`.
-3.  **Nettoyer les imports** circulaires ou inutiles détectés lors du déplacement.
+### Phase 1 : Assainissement des Fondations (Semaine 1)
 
-### Phase 2 : Service Layer (Moyen Terme)
-1.  **Transformer les Scripts en Services:**
-    *   Refactoriser `scripts/rad_dataframe.py` -> `app/services/dataframe_service.py`.
-    *   Refactoriser `scripts/rad_chunk.py` -> `app/services/chunking_service.py`.
-    *   Ces services doivent exposer des méthodes Python (`process_dataframe(...)`) au lieu d'être appelés via CLI.
-2.  **Supprimer `subprocess`:** Remplacer les appels `run_tracked_subprocess` par des appels de fonctions asynchrones (via `asyncio` ou `Celery` pour les tâches longues).
+**Objectif :** Stabiliser la base de code et unifier la configuration sans changer la logique métier.
 
-### Phase 3 : Nettoyage des Routes (Long Terme)
-1.  **Alléger les contrôleurs:** `app/routes/processing.py` ne doit contenir que la logique HTTP.
-2.  **Injection de Dépendances:** Utiliser le système de DI de FastAPI pour injecter les services dans les routes.
-3.  **Tests:** Écrire des tests unitaires pour les nouveaux services (maintenant testables sans subprocess).
+1.  **Unification de la Configuration**
+    *   **Action :** Fusionner `app/config.py` et `app/core/config.py`.
+    *   **Implémentation :** Utiliser `pydantic-settings` pour valider toutes les variables d'environnement au démarrage.
+    *   **Bénéfice :** Fail-fast en cas de configuration manquante, typage fort des settings.
+
+2.  **Restructuration des Dossiers**
+    *   **Action :** Déplacer le module `ingestion/` vers `app/services/ingestion/`.
+    *   **Action :** Créer un package `app/services/` clair avec des sous-modules : `dataframe`, `chunking`, `embedding`, `vectordb`.
+    *   **Bénéfice :** Structure standardisée, fin des imports relatifs douteux.
+
+3.  **Typage et Linting**
+    *   **Action :** Ajouter `mypy` et `ruff` au pipeline CI.
+    *   **Action :** Typer strictement les modèles de données (Pydantic schemas pour toutes les entrées/sorties API).
+
+### Phase 2 : Migration vers une Architecture de Services (Semaine 2-3)
+
+**Objectif :** Supprimer la dépendance à `subprocess` pour le cœur du métier.
+
+1.  **Extraction de la Logique des Scripts**
+    *   **Action :** Refactoriser `scripts/rad_dataframe.py` en une classe `DataframeService`.
+    *   **Action :** Refactoriser `scripts/rad_chunk.py` en une classe `ChunkingService`.
+    *   **Action :** Refactoriser `scripts/rad_vectordb.py` en une classe `VectorDBService`.
+    *   **Détail :** Ces services doivent être appelables directement en Python (plus de CLI args parsing à l'intérieur).
+
+2.  **Suppression de `subprocess`**
+    *   **Action :** Remplacer les appels `run_tracked_subprocess` dans les routes par des appels directs aux méthodes des services (ex: `await dataframe_service.process(...)`).
+    *   **Gestion Async :** Pour les tâches longues, exécuter ces méthodes dans un threadpool (`run_in_executor`) ou via Celery (voir Phase 4).
+
+### Phase 3 : Refactoring API et Injection de Dépendances (Semaine 4)
+
+**Objectif :** Nettoyer les contrôleurs (routes) et améliorer la testabilité.
+
+1.  **Injection de Dépendances (DI)**
+    *   **Action :** Utiliser `Depends` de FastAPI pour injecter les services dans les routes.
+    *   **Exemple :** `def process_dataframe(service: DataframeService = Depends(get_dataframe_service))`
+    *   **Bénéfice :** Facilite le mock des services pour les tests.
+
+2.  **Nettoyage des Routes ("Slim Controllers")**
+    *   **Action :** Déplacer toute la logique de validation, de gestion de fichiers et de formatage de réponse des routes vers les services.
+    *   **Cible :** Les fonctions de route ne doivent pas dépasser 20-30 lignes.
+
+### Phase 4 : Performance et Asynchronisme (Semaine 5)
+
+**Objectif :** Optimiser la réactivité et la scalabilité.
+
+1.  **Intégration Celery Complète**
+    *   **Action :** Utiliser Celery pour *toutes* les tâches de traitement (OCR, Chunking, Embedding).
+    *   **Architecture :** Le endpoint HTTP renvoie immédiatement un `task_id`. Le client polle le statut ou utilise SSE pour les mises à jour.
+    *   **Bénéfice :** Non-blocage du serveur web, gestion de file d'attente, retries automatiques.
+
+2.  **Mise en Cache**
+    *   **Action :** Implémenter un cache Redis pour les embeddings coûteux (éviter de re-calculer l'embedding d'un texte déjà traité).
+
+### Phase 5 : Tests et Qualité (Continu)
+
+1.  **Tests d'Intégration**
+    *   **Action :** Créer une suite de tests utilisant `TestClient` de FastAPI et une base de données de test (SQLite in-memory).
+    *   **Couverture :** Tester le flux complet : Upload -> Processing -> Result.
+
+2.  **Tests Unitaires**
+    *   **Action :** Tester chaque méthode de service isolément avec des mocks pour les appels externes (OpenAI, Pinecone).
 
 ## 6. Conclusion
 
-RAGpy a une base solide en termes de fonctionnalités et de modèle de données. L'effort principal doit porter sur la suppression de la couche "scripting" au profit d'une architecture orientée services. Cela améliorera drastiquement la performance, la testabilité et la maintenabilité du projet.
+Ce plan transforme RAGpy d'un prototype fonctionnel en une solution industrielle. L'investissement prioritaire est la **Phase 2 (Suppression de subprocess)**, qui éliminera la majorité de la fragilité actuelle et débloquera la capacité à tester correctement l'application.
