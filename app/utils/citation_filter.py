@@ -35,7 +35,7 @@ import json
 import re
 import asyncio
 import logging
-from typing import Dict, Union, List, Optional, Tuple
+from typing import Dict, Union, List, Optional, Tuple, Any
 from pathlib import Path
 from pydantic import BaseModel, field_validator
 from openai import OpenAI
@@ -70,6 +70,176 @@ ITEMTYPE_MAPPINGS = {
     "phdthesis": "thesis",
     "mastersthesis": "thesis"
 }
+
+# Valid fields for each Zotero itemType (based on Zotero schema)
+# Used to sanitize items before sending to Zotero API
+ITEMTYPE_VALID_FIELDS = {
+    "journalArticle": {
+        "title", "creators", "date", "publicationTitle", "DOI", "url",
+        "abstractNote", "volume", "issue", "pages", "ISSN", "language",
+        "tags", "extra", "journalAbbreviation", "series", "seriesTitle",
+        "seriesText", "accessDate", "archive", "archiveLocation", "libraryCatalog",
+        "callNumber", "rights", "shortTitle"
+    },
+    "conferencePaper": {
+        "title", "creators", "date", "conferenceName", "DOI", "url",
+        "abstractNote", "pages", "publisher", "place", "language", "tags",
+        "extra", "proceedingsTitle", "volume", "series", "ISBN", "accessDate",
+        "archive", "archiveLocation", "libraryCatalog", "callNumber", "rights",
+        "shortTitle"
+    },
+    "preprint": {
+        "title", "creators", "date", "repository", "DOI", "url",
+        "abstractNote", "archiveID", "language", "tags", "extra",
+        "accessDate", "libraryCatalog", "rights", "shortTitle"
+    },  # Note: publicationTitle is NOT valid for preprint - use repository instead
+    "book": {
+        "title", "creators", "date", "publisher", "place", "ISBN", "url",
+        "abstractNote", "numPages", "edition", "language", "tags", "extra",
+        "series", "seriesNumber", "volume", "numberOfVolumes", "accessDate",
+        "archive", "archiveLocation", "libraryCatalog", "callNumber", "rights",
+        "shortTitle"
+    },  # Note: DOI and ISSN are NOT valid for book
+    "bookSection": {
+        "title", "creators", "date", "bookTitle", "publisher", "place",
+        "ISBN", "url", "abstractNote", "pages", "edition", "language",
+        "tags", "extra", "series", "seriesNumber", "volume", "numberOfVolumes",
+        "accessDate", "archive", "archiveLocation", "libraryCatalog",
+        "callNumber", "rights", "shortTitle"
+    },  # Note: DOI is NOT valid for bookSection
+    "thesis": {
+        "title", "creators", "date", "university", "thesisType", "url",
+        "abstractNote", "numPages", "place", "language", "tags", "extra",
+        "accessDate", "archive", "archiveLocation", "libraryCatalog",
+        "callNumber", "rights", "shortTitle"
+    },
+    "report": {
+        "title", "creators", "date", "institution", "reportNumber", "reportType",
+        "url", "abstractNote", "pages", "place", "language", "tags", "extra",
+        "seriesTitle", "accessDate", "archive", "archiveLocation",
+        "libraryCatalog", "callNumber", "rights", "shortTitle"
+    },
+    "webpage": {
+        "title", "creators", "date", "websiteTitle", "websiteType", "url",
+        "abstractNote", "accessDate", "language", "tags", "extra",
+        "rights", "shortTitle"
+    },  # Note: DOI, ISSN, volume, issue, pages are NOT valid for webpage
+    "manuscript": {
+        "title", "creators", "date", "manuscriptType", "place", "url",
+        "abstractNote", "numPages", "language", "tags", "extra",
+        "accessDate", "archive", "archiveLocation", "libraryCatalog",
+        "callNumber", "rights", "shortTitle"
+    },  # Note: DOI is NOT valid for manuscript
+    "document": {
+        "title", "creators", "date", "publisher", "url", "abstractNote",
+        "language", "tags", "extra", "accessDate", "archive",
+        "archiveLocation", "libraryCatalog", "callNumber", "rights", "shortTitle"
+    },
+    "presentation": {
+        "title", "creators", "date", "meetingName", "place", "url",
+        "abstractNote", "type", "language", "tags", "extra",
+        "accessDate", "rights", "shortTitle"
+    },  # Note: DOI is NOT valid for presentation
+    "patent": {
+        "title", "creators", "date", "place", "country", "assignee",
+        "issuingAuthority", "patentNumber", "applicationNumber", "priorityNumbers",
+        "issueDate", "references", "legalStatus", "url", "abstractNote",
+        "language", "tags", "extra", "accessDate", "rights", "shortTitle"
+    },
+    "magazineArticle": {
+        "title", "creators", "date", "publicationTitle", "url", "abstractNote",
+        "volume", "issue", "pages", "ISSN", "language", "tags", "extra",
+        "accessDate", "archive", "archiveLocation", "libraryCatalog",
+        "callNumber", "rights", "shortTitle"
+    },
+    "newspaperArticle": {
+        "title", "creators", "date", "publicationTitle", "url", "abstractNote",
+        "place", "edition", "section", "pages", "ISSN", "language", "tags",
+        "extra", "accessDate", "archive", "archiveLocation", "libraryCatalog",
+        "callNumber", "rights", "shortTitle"
+    },
+}
+
+# Universal fields valid for ALL item types
+UNIVERSAL_FIELDS = {
+    "title", "creators", "date", "url", "abstractNote", "language",
+    "tags", "extra", "itemType", "accessDate", "rights", "shortTitle"
+}
+
+
+def sanitize_zotero_item(item_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Remove invalid fields for the given itemType before sending to Zotero API.
+
+    This function ensures that only valid fields for the specific itemType are
+    included in the item data, preventing Zotero API validation errors like:
+    - "'DOI' is not a valid field for type 'bookSection'"
+    - "'publicationTitle' is not a valid field for type 'preprint'"
+
+    Args:
+        item_data: Zotero item dictionary with itemType field
+
+    Returns:
+        Sanitized item dictionary with only valid fields for the itemType
+
+    Examples:
+        >>> item = {"itemType": "bookSection", "title": "Test", "DOI": "10.1234/test"}
+        >>> sanitize_zotero_item(item)
+        {"itemType": "bookSection", "title": "Test"}  # DOI removed
+
+        >>> item = {"itemType": "preprint", "title": "Test", "publicationTitle": "arXiv"}
+        >>> sanitize_zotero_item(item)
+        {"itemType": "preprint", "title": "Test", "repository": "arXiv"}  # Converted
+    """
+    item_type = item_data.get("itemType", "document")
+
+    # Get valid fields for this item type, fallback to universal fields
+    valid_fields = ITEMTYPE_VALID_FIELDS.get(item_type, UNIVERSAL_FIELDS)
+    all_valid = valid_fields | UNIVERSAL_FIELDS
+
+    sanitized = {}
+    removed_fields = []
+
+    for key, value in item_data.items():
+        if key in all_valid:
+            sanitized[key] = value
+        elif value is not None and value != "" and value != []:
+            # Only track removal of non-empty fields
+            removed_fields.append(key)
+
+    if removed_fields:
+        logger.info(f"Sanitized {item_type}: removed invalid fields {removed_fields}")
+
+    # Special conversions for specific item types
+    # 1. Convert publicationTitle -> repository for preprints
+    if item_type == "preprint" and "publicationTitle" in item_data:
+        pub_title = item_data.get("publicationTitle")
+        if pub_title and "repository" not in sanitized:
+            sanitized["repository"] = pub_title
+            logger.info(f"Converted publicationTitle -> repository for preprint: {pub_title}")
+
+    # 2. Convert publicationTitle -> bookTitle for bookSection
+    if item_type == "bookSection" and "publicationTitle" in item_data:
+        pub_title = item_data.get("publicationTitle")
+        if pub_title and "bookTitle" not in sanitized:
+            sanitized["bookTitle"] = pub_title
+            logger.info(f"Converted publicationTitle -> bookTitle for bookSection: {pub_title}")
+
+    # 3. Convert publicationTitle -> websiteTitle for webpage
+    if item_type == "webpage" and "publicationTitle" in item_data:
+        pub_title = item_data.get("publicationTitle")
+        if pub_title and "websiteTitle" not in sanitized:
+            sanitized["websiteTitle"] = pub_title
+            logger.info(f"Converted publicationTitle -> websiteTitle for webpage: {pub_title}")
+
+    # 4. Convert publicationTitle -> conferenceName for conferencePaper
+    if item_type == "conferencePaper" and "publicationTitle" in item_data:
+        pub_title = item_data.get("publicationTitle")
+        if pub_title and "conferenceName" not in sanitized and "proceedingsTitle" not in sanitized:
+            sanitized["conferenceName"] = pub_title
+            logger.info(f"Converted publicationTitle -> conferenceName for conferencePaper: {pub_title}")
+
+    return sanitized
 
 
 class ZoteroCreator(BaseModel):
@@ -594,6 +764,10 @@ async def filter_citation_with_llm(
                     if field in zotero_item and zotero_item[field] in na_patterns:
                         logger.debug(f"Cleaning N/A value from field {field}")
                         zotero_item[field] = ""
+
+                # Sanitize item: remove invalid fields for this itemType
+                # This prevents errors like "'DOI' is not a valid field for type 'bookSection'"
+                zotero_item = sanitize_zotero_item(zotero_item)
 
                 result["zotero_item"] = zotero_item
                 return result

@@ -126,9 +126,12 @@ async def upload_pop_json(
             detail="You don't have permission to import citations for this project"
         )
 
-    # Generate unique session folder
+    # Generate unique session folder using uploaded filename as suffix
     unique_id = str(uuid.uuid4().hex)[:8]
-    session_folder_name = f"pop_{unique_id}_{project.name[:20]}"
+    original_filename = os.path.splitext(json_file.filename)[0] if json_file.filename else "import"
+    # Sanitize filename: remove special characters, limit length
+    safe_filename = "".join(c for c in original_filename if c.isalnum() or c in "_-")[:30]
+    session_folder_name = f"pop_{unique_id}_{safe_filename}"
     session_folder = os.path.join(UPLOAD_DIR, session_folder_name)
     os.makedirs(session_folder, exist_ok=True)
     logger.info(f"Created session folder: {session_folder}")
@@ -713,25 +716,46 @@ async def import_citations_sse(
                                 )
 
                                 if pdf_result.success and pdf_result.pdf_bytes:
-                                    # Upload to Zotero
-                                    attach_result = upload_file_attachment(
-                                        library_type=library_type,
-                                        library_id=library_id,
-                                        parent_item_key=result["item_key"],
-                                        pdf_bytes=pdf_result.pdf_bytes,
-                                        filename=pdf_result.filename,
-                                        md5_hash=pdf_result.md5_hash,
-                                        mtime=pdf_result.mtime,
-                                        api_key=zotero_api_key,
-                                        original_url=str(fulltext_url)
-                                    )
+                                    # Get all keys to attach to (support "Update All" strategy)
+                                    # Fallback to single item_key for backwards compatibility or new items
+                                    target_keys = result.get("synced_keys", [result["item_key"]])
+                                    
+                                    logger.info(f"Attaching PDF to {len(target_keys)} items: {target_keys}")
 
-                                    if attach_result["success"]:
-                                        logger.info(f"PDF attached to item {result['item_key']}: {attach_result['attachment_key']}")
-                                        yield f'data: {{"type": "attachment", "item_key": "{result["item_key"]}", "status": "success", "source": "{pdf_result.source}"}}\n\n'
+                                    # Upload to Zotero (iterating over all synced items)
+                                    attach_success_count = 0
+                                    last_attach_result = None
+
+                                    for parent_key in target_keys:
+                                        try:
+                                            attach_result = upload_file_attachment(
+                                                library_type=library_type,
+                                                library_id=library_id,
+                                                parent_item_key=parent_key,
+                                                pdf_bytes=pdf_result.pdf_bytes,
+                                                filename=pdf_result.filename,
+                                                md5_hash=pdf_result.md5_hash,
+                                                mtime=pdf_result.mtime,
+                                                api_key=zotero_api_key,
+                                                original_url=str(fulltext_url)
+                                            )
+                                            if attach_result["success"]:
+                                                attach_success_count += 1
+                                                last_attach_result = attach_result
+                                                logger.info(f"PDF attached to item {parent_key}: {attach_result['attachment_key']}")
+                                            else:
+                                                 logger.warning(f"Failed to attach PDF to {parent_key}: {attach_result['message']}")
+                                        except Exception as att_err:
+                                            logger.error(f"Exception attaching to {parent_key}: {att_err}")
+
+                                    if attach_success_count > 0:
+                                        # Use the last successful result for the event (frontend just needs one confirmation)
+                                        # Or we could send a special event. For now, standard success is fine.
+                                        yield f'data: {{"type": "attachment", "item_key": "{result["item_key"]}", "status": "success", "source": "{pdf_result.source}", "count": {attach_success_count}}}\n\n'
                                     else:
-                                        logger.warning(f"Failed to attach PDF: {attach_result['message']}")
-                                        yield f'data: {{"type": "attachment", "item_key": "{result["item_key"]}", "status": "failed", "message": "{attach_result["message"][:100]}"}}\n\n'
+                                        msg = last_attach_result['message'] if last_attach_result else "Attachment failed for all items"
+                                        logger.warning(f"Failed to attach PDF: {msg}")
+                                        yield f'data: {{"type": "attachment", "item_key": "{result["item_key"]}", "status": "failed", "message": "{msg[:100]}"}}\n\n'
                                 else:
                                     logger.warning(f"PDF download failed: {pdf_result.error}")
                                     # Don't send error event for download failures (graceful degradation)
