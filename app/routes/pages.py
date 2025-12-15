@@ -22,6 +22,9 @@ from app.models.user import User
 from app.models.project import Project
 from app.middleware.auth import get_optional_user
 
+# Default LLM model for citation import (from .env)
+DEFAULT_LLM_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
+
 # Templates directory
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES_DIR = os.path.join(APP_DIR, "templates")
@@ -262,7 +265,8 @@ async def project_detail_page(
         current_user,
         project=project,
         owner=owner,
-        user_role=user_role or "admin"
+        user_role=user_role or "admin",
+        default_llm_model=DEFAULT_LLM_MODEL
     )
     return templates.TemplateResponse("user/project_detail.html", context)
 

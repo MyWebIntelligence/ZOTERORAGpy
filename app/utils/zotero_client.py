@@ -12,6 +12,7 @@ Key Features:
 - Robustness: Implements retries with exponential backoff for rate limits and errors.
 """
 
+import json
 import time
 import uuid
 import logging
@@ -606,14 +607,19 @@ PUBLICATION_TITLE_FIELD_MAP = {
     "map": "seriesTitle",
 }
 
-# Item types that don't have any "publication title" type field
+# Mapping for item types that use an alternative field instead of publicationTitle
+# These types have a specific field where we should put the publication source
+ALTERNATIVE_PUBLICATION_FIELD_MAP = {
+    "preprint": "repository",      # e.g., "arXiv", "bioRxiv", "SSRN", "medRxiv"
+    "report": "institution",       # e.g., "RAND Corporation", "World Bank"
+    "thesis": "university",        # e.g., "MIT", "Stanford University"
+    "patent": "issuingAuthority",  # e.g., "US Patent Office", "EPO"
+    "statute": "code",             # e.g., "US Code", "CFR"
+    "case": "reporter",            # e.g., "Supreme Court Reporter"
+}
+
+# Item types that truly don't have any "publication title" type field
 ITEM_TYPES_WITHOUT_PUBLICATION_TITLE = {
-    "preprint",  # Has 'repository' instead
-    "report",    # Has 'institution' instead
-    "thesis",    # Has 'university' instead
-    "patent",    # Has 'issuingAuthority' instead
-    "statute",   # Has 'code' instead
-    "case",      # Has 'reporter' instead
     "bill",      # No publication title
     "hearing",   # No publication title
     "letter",    # No publication title
@@ -652,8 +658,9 @@ def _clean_item_data_for_type(item_data: Dict) -> Dict:
 
     This function:
     1. Maps generic 'publicationTitle' to the correct field for the item type
-    2. Removes invalid fields that would cause Zotero API errors
-    3. Preserves all other valid fields
+    2. For special item types (preprint, thesis, report), maps to alternative fields
+    3. Removes invalid fields that would cause Zotero API errors
+    4. Preserves all other valid fields
 
     Args:
         item_data: Raw item data dictionary (may contain invalid fields)
@@ -668,7 +675,11 @@ def _clean_item_data_for_type(item_data: Dict) -> Dict:
 
         >>> data = {"itemType": "preprint", "publicationTitle": "arXiv"}
         >>> cleaned = _clean_item_data_for_type(data)
-        >>> # Result: {"itemType": "preprint"} (publicationTitle removed, no equivalent)
+        >>> # Result: {"itemType": "preprint", "repository": "arXiv"}
+
+        >>> data = {"itemType": "thesis", "publicationTitle": "MIT"}
+        >>> cleaned = _clean_item_data_for_type(data)
+        >>> # Result: {"itemType": "thesis", "university": "MIT"}
     """
     cleaned = item_data.copy()
     item_type = cleaned.get("itemType", "")
@@ -680,23 +691,45 @@ def _clean_item_data_for_type(item_data: Dict) -> Dict:
             source_pub_title = cleaned[field]
             break
 
+    # Also check alternative fields that might have been set directly
+    # (in case LLM or other source already set the correct field)
+    alternative_fields_present = {}
+    for alt_field in ALTERNATIVE_PUBLICATION_FIELD_MAP.values():
+        if alt_field in cleaned and cleaned[alt_field]:
+            alternative_fields_present[alt_field] = cleaned[alt_field]
+
     # Remove all publication title fields first
     for field in ALL_PUBLICATION_TITLE_FIELDS:
         cleaned.pop(field, None)
 
-    # If we have a publication title value and this item type supports it, add it back
-    if source_pub_title and item_type not in ITEM_TYPES_WITHOUT_PUBLICATION_TITLE:
+    # Handle item types with alternative fields (preprint, thesis, report, etc.)
+    if item_type in ALTERNATIVE_PUBLICATION_FIELD_MAP:
+        alt_field = ALTERNATIVE_PUBLICATION_FIELD_MAP[item_type]
+
+        # If we have a publication title value, map it to the alternative field
+        if source_pub_title:
+            cleaned[alt_field] = source_pub_title
+            logger.debug(f"Mapped publicationTitle to {alt_field} for {item_type}: '{source_pub_title}'")
+        # If alternative field was already set, keep it
+        elif alt_field in alternative_fields_present:
+            cleaned[alt_field] = alternative_fields_present[alt_field]
+            logger.debug(f"Kept existing {alt_field} for {item_type}")
+
+    # Handle item types without any publication title support
+    elif item_type in ITEM_TYPES_WITHOUT_PUBLICATION_TITLE:
+        if source_pub_title:
+            logger.debug(f"Removed publicationTitle for {item_type} (not supported)")
+
+    # Handle standard item types with publication title variants
+    elif source_pub_title:
         correct_field = PUBLICATION_TITLE_FIELD_MAP.get(item_type)
         if correct_field:
             cleaned[correct_field] = source_pub_title
             logger.debug(f"Mapped publicationTitle to {correct_field} for {item_type}")
         else:
-            # Item type not in our map but also not in "without" list
-            # Default to keeping publicationTitle (for any new/unknown types)
+            # Item type not in our map - default to keeping publicationTitle
             cleaned["publicationTitle"] = source_pub_title
-            logger.debug(f"Keeping publicationTitle for unknown type: {item_type}")
-    elif source_pub_title:
-        logger.debug(f"Removed publicationTitle for {item_type} (not supported)")
+            logger.debug(f"Keeping publicationTitle for type: {item_type}")
 
     return cleaned
 
@@ -855,6 +888,98 @@ def get_or_create_collection(
     raise ZoteroAPIError(500, f"Failed to create collection after {MAX_RETRIES} attempts")
 
 
+def fetch_collection_items(
+    library_type: str,
+    library_id: str,
+    collection_key: str,
+    api_key: str,
+    limit: int = 100
+) -> List[Dict]:
+    """
+    Fetch all items in a Zotero collection for deduplication.
+
+    This function retrieves all items in a collection, handling pagination
+    automatically. Useful for checking existing items before import.
+
+    Args:
+        library_type: "users" or "groups"
+        library_id: The library ID
+        collection_key: Key of the collection to fetch items from
+        api_key: Zotero API key
+        limit: Items per page (max 100)
+
+    Returns:
+        List of item dictionaries with keys: key, DOI, title, itemType
+
+    Raises:
+        ZoteroAPIError: If API request fails
+
+    Examples:
+        >>> items = fetch_collection_items("users", "12345", "ABC123", "...")
+        >>> existing_dois = {item["DOI"] for item in items if item.get("DOI")}
+        >>> print(f"Found {len(existing_dois)} items with DOIs")
+    """
+    prefix = _build_library_prefix(library_type, library_id)
+    url = f"{ZOTERO_API_BASE}/{prefix}/collections/{collection_key}/items"
+    headers = _build_headers(api_key)
+
+    all_items = []
+    start = 0
+
+    while True:
+        params = {
+            "start": start,
+            "limit": min(limit, 100),
+            "itemType": "-attachment"  # Exclude attachments
+        }
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+
+            if response.status_code == 200:
+                items = response.json()
+
+                if not items:
+                    break
+
+                # Extract relevant fields for deduplication
+                for item in items:
+                    data = item.get("data", {})
+                    all_items.append({
+                        "key": item.get("key"),
+                        "DOI": data.get("DOI", ""),
+                        "title": data.get("title", ""),
+                        "itemType": data.get("itemType", "")
+                    })
+
+                # Check if there are more items
+                total_results = int(response.headers.get("Total-Results", 0))
+                start += len(items)
+
+                if start >= total_results:
+                    break
+
+                logger.debug(f"Fetched {start}/{total_results} items from collection {collection_key}")
+
+            elif response.status_code == 404:
+                logger.warning(f"Collection {collection_key} not found")
+                return []
+
+            else:
+                raise ZoteroAPIError(
+                    response.status_code,
+                    f"Failed to fetch collection items: {response.text}",
+                    response
+                )
+
+        except requests.RequestException as e:
+            logger.error(f"Network error fetching collection items: {e}")
+            raise ZoteroAPIError(0, f"Network error: {str(e)}")
+
+    logger.info(f"Fetched {len(all_items)} items from collection {collection_key}")
+    return all_items
+
+
 def search_item_by_doi(
     library_type: str,
     library_id: str,
@@ -1002,24 +1127,32 @@ def search_item_by_title(
     library_type: str,
     library_id: str,
     title: str,
-    api_key: str
+    api_key: str,
+    target_creators: Optional[List[Dict]] = None,
+    target_date: Optional[str] = None
 ) -> Optional[str]:
     """
-    Search for an existing Zotero item by normalized title.
+    Search for an existing Zotero item by normalized title with optional creator/date validation.
 
-    Uses fuzzy matching (lowercase, alphanum only) for better recall.
+    Uses fuzzy matching (lowercase, alphanum only) for better recall,
+    then validates against authors and date to prevent false positives.
 
     Args:
         library_type: "users" or "groups"
         library_id: The library ID
         title: Title to search for
         api_key: Zotero API key
+        target_creators: Optional list of creator dicts (to validate match)
+        target_date: Optional date string (to validate match)
 
     Returns:
-        Item key (str) if found, None if not found
+        Item key (str) if found and validated, None otherwise
 
     Examples:
-        >>> item_key = search_item_by_title("users", "12345", "Machine Learning Review", "...")
+        >>> item_key = search_item_by_title(
+        ...     "users", "12345", "Machine Learning", "...",
+        ...     target_creators=[{"lastName": "Smith", "creatorType": "author"}]
+        ... )
     """
     if not title or len(title) < 5:  # Skip very short titles
         return None
@@ -1040,16 +1173,70 @@ def search_item_by_title(
         if response.status_code == 200:
             items = response.json()
 
-            # Check each result for normalized title match
+            # Check each result for normalized title match AND validation
             for item in items:
-                item_title = item.get("data", {}).get("title", "")
-                if item_title:
-                    normalized_item_title = _normalize_title_for_search(item_title)
-                    if normalized_item_title == normalized_search:
-                        logger.info(f"Found item with matching title: {item['key']}")
-                        return item["key"]
+                item_data = item.get("data", {})
+                item_title = item_data.get("title", "")
+                
+                if not item_title:
+                    continue
 
-            logger.debug(f"No item found with title: {title}")
+                normalized_item_title = _normalize_title_for_search(item_title)
+                
+                if normalized_item_title == normalized_search:
+                    # Title matches! Now strictly validate other fields if provided
+                    
+                    # 1. Author Validation
+                    if target_creators:
+                        item_creators = item_data.get("creators", [])
+                        
+                        # Extract last names from target
+                        target_last_names = {
+                            c.get("lastName", "").lower() 
+                            for c in target_creators 
+                            if c.get("lastName")
+                        }
+                        
+                        # Extract last names from candidate item
+                        item_last_names = {
+                            c.get("lastName", "").lower() 
+                            for c in item_creators 
+                            if c.get("lastName")
+                        }
+                        
+                        # If both have authors, require overlap
+                        if target_last_names and item_last_names:
+                            if not target_last_names.intersection(item_last_names):
+                                logger.info(
+                                    f"Title match '{title}' REJECTED: Author mismatch "
+                                    f"(Target: {target_last_names}, Found: {item_last_names})"
+                                )
+                                continue  # Distinct authors → likely different paper
+                    
+                    # 2. Date/Year Validation
+                    if target_date:
+                        item_date = item_data.get("date", "")
+                        # Simple 4-digit year extraction
+                        import re
+                        target_year_match = re.search(r'\d{4}', str(target_date))
+                        item_year_match = re.search(r'\d{4}', str(item_date))
+                        
+                        if target_year_match and item_year_match:
+                            target_year = int(target_year_match.group(0))
+                            item_year = int(item_year_match.group(0))
+                            
+                            # Allow 1 year variance (prepints vs publication dates)
+                            if abs(target_year - item_year) > 1:
+                                logger.info(
+                                    f"Title match '{title}' REJECTED: Year mismatch "
+                                    f"(Target: {target_year}, Found: {item_year})"
+                                )
+                                continue
+
+                    logger.info(f"Found existing item by title (validated): {item['key']}")
+                    return item["key"]
+
+            logger.debug(f"No valid item found with title: {title}")
             return None
 
         else:
@@ -1206,7 +1393,15 @@ def create_or_update_item(
     if not existing_key:
         title = item_data.get("title")
         if title:
-            existing_key = search_item_by_title(library_type, library_id, title, api_key)
+            # Pass creators and date for stronger validation
+            existing_key = search_item_by_title(
+                library_type, 
+                library_id, 
+                title, 
+                api_key,
+                target_creators=item_data.get("creators"),
+                target_date=item_data.get("date")
+            )
             if existing_key:
                 logger.info(f"Found existing item by title: {existing_key}")
 
@@ -1302,6 +1497,10 @@ def create_or_update_item(
 
             headers = _build_headers(api_key, additional_headers)
 
+            # DEBUG: Log item data being sent
+            logger.info(f"Creating item with itemType={item_data.get('itemType')}, title={item_data.get('title', '')[:50]}")
+            logger.debug(f"Full item_data: {json.dumps(item_data, indent=2, default=str)}")
+
             # Create item
             response = requests.post(
                 url,
@@ -1351,6 +1550,9 @@ def create_or_update_item(
                 continue
 
             else:
+                # Log full error details before raising
+                logger.error(f"Zotero API error {response.status_code}: {response.text}")
+                logger.error(f"Item data that caused error: itemType={item_data.get('itemType')}, creators={item_data.get('creators')}")
                 raise ZoteroAPIError(
                     response.status_code,
                     f"Failed to create item: {response.text}",
@@ -1582,3 +1784,540 @@ def add_tags_to_items(
         "skipped_count": skipped_count,
         "errors": errors
     }
+
+
+# =============================================================================
+# FILE ATTACHMENT UPLOAD API
+# =============================================================================
+
+
+def upload_file_attachment(
+    library_type: str,
+    library_id: str,
+    parent_item_key: str,
+    pdf_bytes: bytes,
+    filename: str,
+    md5_hash: str,
+    mtime: int,
+    api_key: str,
+    original_url: str = "",
+    content_type: str = "application/pdf"
+) -> Dict:
+    """
+    Upload a file as an attachment to a Zotero item.
+
+    Zotero file upload is a 4-step process:
+    1. Create an attachment item (imported_url link mode)
+    2. Request upload authorization from Zotero
+    3. Upload file to Zotero's storage (S3)
+    4. Register upload completion with Zotero
+
+    Args:
+        library_type: "users" or "groups"
+        library_id: Library ID (user ID or group ID)
+        parent_item_key: Key of the parent item to attach file to
+        pdf_bytes: Raw file content as bytes
+        filename: Name for the attachment file
+        md5_hash: MD5 hash of pdf_bytes
+        mtime: Modification time in milliseconds (Unix timestamp * 1000)
+        api_key: Zotero API key
+        original_url: Original URL the file was downloaded from (optional)
+        content_type: MIME type of the file (default: application/pdf)
+
+    Returns:
+        Dictionary with:
+        - success (bool): Whether upload was successful
+        - attachment_key (str): Key of the created attachment item
+        - message (str): Status/error message
+
+    Raises:
+        ZoteroAPIError: If any step of the upload process fails
+
+    Example:
+        >>> result = upload_file_attachment(
+        ...     library_type="users",
+        ...     library_id="12345",
+        ...     parent_item_key="ABC123XY",
+        ...     pdf_bytes=b'%PDF-...',
+        ...     filename="article.pdf",
+        ...     md5_hash="a1b2c3...",
+        ...     mtime=1702300000000,
+        ...     api_key="xxx"
+        ... )
+        >>> print(result)
+        {'success': True, 'attachment_key': 'DEF456GH', 'message': 'File uploaded successfully'}
+    """
+    from urllib.parse import unquote
+
+    # Decode URL-encoded filename and sanitize
+    filename = unquote(filename)
+    # Remove or replace characters that might cause issues
+    filename = filename.replace('"', "'").replace('\n', ' ').replace('\r', '')
+    # Limit filename length (Zotero has issues with very long filenames)
+    if len(filename) > 200:
+        base, ext = filename.rsplit('.', 1) if '.' in filename else (filename, 'pdf')
+        filename = f"{base[:190]}.{ext}"
+
+    logger.info(f"Starting file upload to Zotero: {filename} ({len(pdf_bytes)} bytes)")
+
+    try:
+        # Step 1: Create attachment item
+        attachment_key, library_version = _create_attachment_item(
+            library_type=library_type,
+            library_id=library_id,
+            parent_item_key=parent_item_key,
+            filename=filename,
+            content_type=content_type,
+            original_url=original_url,
+            api_key=api_key
+        )
+        logger.info(f"Created attachment item: {attachment_key}")
+
+        # Step 2: Request upload authorization
+        upload_auth = _request_upload_authorization(
+            library_type=library_type,
+            library_id=library_id,
+            attachment_key=attachment_key,
+            md5_hash=md5_hash,
+            filename=filename,
+            filesize=len(pdf_bytes),
+            mtime=mtime,
+            api_key=api_key
+        )
+
+        # Check if file already exists (Zotero returns 200 with "exists": 1)
+        if upload_auth.get("exists"):
+            logger.info(f"File already exists in Zotero: {attachment_key}")
+            return {
+                "success": True,
+                "attachment_key": attachment_key,
+                "message": "File already exists in Zotero (MD5 match)"
+            }
+
+        logger.info(f"Upload authorized, uploading to storage...")
+
+        # Step 3: Upload to storage
+        # Zotero provides pre-built multipart body components
+        upload_url = upload_auth.get("url")
+        upload_prefix = upload_auth.get("prefix", "")
+        upload_suffix = upload_auth.get("suffix", "")
+        upload_content_type = upload_auth.get("contentType", "")
+        upload_key = upload_auth.get("uploadKey")
+
+        if not upload_url or not upload_key or not upload_prefix:
+            logger.error(f"Invalid upload authorization response: url={bool(upload_url)}, "
+                        f"key={bool(upload_key)}, prefix={bool(upload_prefix)}")
+            raise ZoteroAPIError(500, "Invalid upload authorization response")
+
+        upload_success = _upload_to_storage(
+            upload_url=upload_url,
+            pdf_bytes=pdf_bytes,
+            prefix=upload_prefix,
+            suffix=upload_suffix,
+            content_type_header=upload_content_type
+        )
+
+        if not upload_success:
+            raise ZoteroAPIError(500, "File upload to storage failed")
+
+        logger.info("File uploaded to storage, registering upload...")
+
+        # Step 4: Register upload
+        register_success = _register_upload(
+            library_type=library_type,
+            library_id=library_id,
+            attachment_key=attachment_key,
+            upload_key=upload_key,
+            api_key=api_key
+        )
+
+        if not register_success:
+            raise ZoteroAPIError(500, "Failed to register upload with Zotero")
+
+        logger.info(f"File upload complete: {attachment_key}")
+
+        return {
+            "success": True,
+            "attachment_key": attachment_key,
+            "message": "File uploaded successfully"
+        }
+
+    except ZoteroAPIError as e:
+        logger.error(f"Zotero API error during file upload: {e}")
+        return {
+            "success": False,
+            "attachment_key": "",
+            "message": str(e)
+        }
+
+    except Exception as e:
+        logger.error(f"Unexpected error during file upload: {e}")
+        return {
+            "success": False,
+            "attachment_key": "",
+            "message": f"Unexpected error: {str(e)}"
+        }
+
+
+def _create_attachment_item(
+    library_type: str,
+    library_id: str,
+    parent_item_key: str,
+    filename: str,
+    content_type: str,
+    original_url: str,
+    api_key: str
+) -> tuple:
+    """
+    Step 1: Create an attachment item in Zotero.
+
+    Creates an imported_url attachment item that will hold the uploaded file.
+
+    Args:
+        library_type: "users" or "groups"
+        library_id: Library ID
+        parent_item_key: Parent item to attach to
+        filename: Attachment filename
+        content_type: MIME type
+        original_url: Source URL of the file
+        api_key: Zotero API key
+
+    Returns:
+        Tuple of (attachment_key, library_version)
+
+    Raises:
+        ZoteroAPIError: If creation fails
+    """
+    prefix = _build_library_prefix(library_type, library_id)
+    url = f"{ZOTERO_API_BASE}/{prefix}/items"
+
+    # Sanitize filename for Zotero (remove characters that cause issues)
+    safe_filename = filename.replace('"', "'").replace('\n', ' ').replace('\r', '')
+    # Truncate if too long
+    if len(safe_filename) > 200:
+        base, ext = safe_filename.rsplit('.', 1) if '.' in safe_filename else (safe_filename, 'pdf')
+        safe_filename = f"{base[:190]}.{ext}"
+
+    logger.debug(f"Creating attachment item for parent {parent_item_key}, filename: {safe_filename}")
+
+    # Attachment item data
+    # For file uploads, use "imported_file" linkMode (not "imported_url" which is for links)
+    attachment_data = [{
+        "itemType": "attachment",
+        "parentItem": parent_item_key,
+        "linkMode": "imported_file",
+        "title": safe_filename,
+        "contentType": content_type
+    }]
+
+    # Generate write token for idempotency (Zotero requires 5-32 chars, .hex gives 32)
+    write_token = uuid.uuid4().hex
+
+    headers = _build_headers(api_key, {
+        "Zotero-Write-Token": write_token
+    })
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=attachment_data,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                # Success response format: {"successful": {"0": {...}}, "unchanged": {}, "failed": {}}
+                if "successful" in result and "0" in result["successful"]:
+                    attachment_key = result["successful"]["0"]["key"]
+                    library_version = response.headers.get("Last-Modified-Version", "0")
+                    return (attachment_key, library_version)
+
+                # Check if creation failed
+                if "failed" in result and result["failed"]:
+                    error_msg = str(result["failed"])
+                    raise ZoteroAPIError(response.status_code, f"Failed to create attachment: {error_msg}")
+
+            elif response.status_code == 412:
+                # Version conflict - retry
+                logger.warning(f"Version conflict creating attachment (attempt {attempt + 1})")
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+
+            elif response.status_code == 429:
+                # Rate limit
+                retry_after = int(response.headers.get("Retry-After", RETRY_DELAY * 2))
+                logger.warning(f"Rate limit hit, waiting {retry_after}s")
+                time.sleep(retry_after)
+                continue
+
+            else:
+                # Log detailed error info for debugging
+                logger.error(f"Attachment creation failed: HTTP {response.status_code}")
+                logger.error(f"Request payload: {json.dumps(attachment_data, indent=2)}")
+                logger.error(f"Response: {response.text[:500]}")
+                raise ZoteroAPIError(
+                    response.status_code,
+                    f"Failed to create attachment item: {response.text}",
+                    response
+                )
+
+        except requests.RequestException as e:
+            logger.warning(f"Network error (attempt {attempt + 1}): {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+            raise ZoteroAPIError(0, f"Network error: {str(e)}")
+
+    raise ZoteroAPIError(500, f"Failed to create attachment after {MAX_RETRIES} attempts")
+
+
+def _request_upload_authorization(
+    library_type: str,
+    library_id: str,
+    attachment_key: str,
+    md5_hash: str,
+    filename: str,
+    filesize: int,
+    mtime: int,
+    api_key: str
+) -> Dict:
+    """
+    Step 2: Request authorization to upload a file to Zotero storage.
+
+    This step asks Zotero for permission to upload a file and returns
+    the S3 upload URL and parameters.
+
+    Args:
+        library_type: "users" or "groups"
+        library_id: Library ID
+        attachment_key: Key of the attachment item created in step 1
+        md5_hash: MD5 hash of the file content
+        filename: Name of the file
+        filesize: Size of the file in bytes
+        mtime: Modification time in milliseconds
+        api_key: Zotero API key
+
+    Returns:
+        Dictionary with upload authorization:
+        - url: S3 upload URL
+        - uploadKey: Key to use when registering upload
+        - params: Parameters to include in S3 upload request
+        - exists: 1 if file already exists (no upload needed)
+
+    Raises:
+        ZoteroAPIError: If authorization fails
+    """
+    prefix = _build_library_prefix(library_type, library_id)
+    url = f"{ZOTERO_API_BASE}/{prefix}/items/{attachment_key}/file"
+
+    # Request body (URL-encoded form data)
+    data = {
+        "md5": md5_hash,
+        "filename": filename,
+        "filesize": str(filesize),
+        "mtime": str(mtime)
+    }
+
+    headers = {
+        "Zotero-API-Key": api_key,
+        "Zotero-API-Version": ZOTERO_API_VERSION,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "If-None-Match": "*"  # Indicates new file upload
+    }
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                data=data,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                return response.json()
+
+            elif response.status_code == 412:
+                # File already exists with this MD5
+                logger.info("File with same MD5 already exists")
+                return {"exists": 1}
+
+            elif response.status_code == 413:
+                raise ZoteroAPIError(413, "File too large for Zotero storage")
+
+            elif response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", RETRY_DELAY * 2))
+                logger.warning(f"Rate limit hit, waiting {retry_after}s")
+                time.sleep(retry_after)
+                continue
+
+            else:
+                raise ZoteroAPIError(
+                    response.status_code,
+                    f"Upload authorization failed: {response.text}",
+                    response
+                )
+
+        except requests.RequestException as e:
+            logger.warning(f"Network error (attempt {attempt + 1}): {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+            raise ZoteroAPIError(0, f"Network error: {str(e)}")
+
+    raise ZoteroAPIError(500, f"Upload authorization failed after {MAX_RETRIES} attempts")
+
+
+def _upload_to_storage(
+    upload_url: str,
+    pdf_bytes: bytes,
+    prefix: str,
+    suffix: str,
+    content_type_header: str
+) -> bool:
+    """
+    Step 3: Upload file to Zotero's S3 storage.
+
+    Uses the pre-built multipart body from Zotero's authorization response
+    to upload the file content to S3. Zotero provides the exact multipart
+    format including boundary, form fields, and structure.
+
+    Args:
+        upload_url: S3 upload URL from authorization response
+        pdf_bytes: File content to upload
+        prefix: Pre-built multipart body prefix (includes all form fields)
+        suffix: Pre-built multipart body suffix (closing boundary)
+        content_type_header: Content-Type header with boundary from authorization
+
+    Returns:
+        True if upload successful, False otherwise
+
+    Raises:
+        ZoteroAPIError: If upload fails
+    """
+    # Zotero provides a pre-built multipart body:
+    # - prefix: Contains all form fields (key, policy, signature, etc.)
+    # - We insert the file bytes in between
+    # - suffix: Contains the closing boundary
+    #
+    # The body is: prefix + file_bytes + suffix
+    # Content-Type must match exactly what Zotero provided (with correct boundary)
+
+    # Build the complete multipart body
+    body = prefix.encode('utf-8') + pdf_bytes + suffix.encode('utf-8')
+
+    headers = {
+        "Content-Type": content_type_header,
+        "Content-Length": str(len(body))
+    }
+
+    logger.debug(f"Uploading to S3: {len(body)} bytes, Content-Type: {content_type_header[:60]}...")
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(
+                upload_url,
+                headers=headers,
+                data=body,
+                timeout=120  # Longer timeout for file upload
+            )
+
+            # S3 returns 201 on success (as specified in success_action_status)
+            if response.status_code in (200, 201, 204):
+                logger.info("File uploaded to storage successfully")
+                return True
+
+            # S3 errors
+            logger.warning(f"Storage upload failed: HTTP {response.status_code}")
+            logger.debug(f"Response: {response.text[:500] if response.text else 'empty'}")
+
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+
+        except requests.RequestException as e:
+            logger.warning(f"Network error during storage upload (attempt {attempt + 1}): {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+
+    return False
+
+
+def _register_upload(
+    library_type: str,
+    library_id: str,
+    attachment_key: str,
+    upload_key: str,
+    api_key: str
+) -> bool:
+    """
+    Step 4: Register completed upload with Zotero.
+
+    After uploading to S3, this step notifies Zotero that the upload
+    is complete and associates the file with the attachment item.
+
+    Args:
+        library_type: "users" or "groups"
+        library_id: Library ID
+        attachment_key: Key of the attachment item
+        upload_key: Upload key from authorization response
+        api_key: Zotero API key
+
+    Returns:
+        True if registration successful, False otherwise
+
+    Raises:
+        ZoteroAPIError: If registration fails
+    """
+    prefix = _build_library_prefix(library_type, library_id)
+    url = f"{ZOTERO_API_BASE}/{prefix}/items/{attachment_key}/file"
+
+    data = {"upload": upload_key}
+
+    headers = {
+        "Zotero-API-Key": api_key,
+        "Zotero-API-Version": ZOTERO_API_VERSION,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "If-None-Match": "*"
+    }
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                data=data,
+                timeout=30
+            )
+
+            if response.status_code == 204:
+                logger.info("Upload registered successfully")
+                return True
+
+            elif response.status_code == 412:
+                # Version conflict or file already registered
+                logger.warning("Upload registration conflict (may already be registered)")
+                return True  # Consider success if already registered
+
+            elif response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", RETRY_DELAY * 2))
+                logger.warning(f"Rate limit hit, waiting {retry_after}s")
+                time.sleep(retry_after)
+                continue
+
+            else:
+                logger.error(f"Upload registration failed: {response.status_code} - {response.text}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY * (attempt + 1))
+                    continue
+
+        except requests.RequestException as e:
+            logger.warning(f"Network error (attempt {attempt + 1}): {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+
+    return False
