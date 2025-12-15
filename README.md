@@ -1,8 +1,14 @@
 # RAGpy
 
-**Pipeline intelligent de traitement documentaire pour la recherche académique**
+**Solution de veille scientifique intelligente pour chercheurs et doctorants**
 
-RAGpy transforme vos collections de documents (PDF, exports Zotero, CSV) en données exploitables pour des systèmes RAG (Retrieval-Augmented Generation). Conçu pour les chercheurs, il automatise l'extraction, le chunking, l'embedding et l'organisation de corpus scientifiques.
+RAGpy est un outil avancé de veille scientifique qui optimise et automatise le traitement de votre corpus bibliographique. Conçu pour s'intégrer parfaitement à votre flux de travail académique, il agit à plusieurs niveaux :
+
+- **Optimisation de Publish or Perish** : Import et traitement raffiné des résultats de vos recherches bibliométriques.
+- **Enrichissement Zotero** : Mise à jour dynamique de votre bibliothèque avec génération automatique de notes de lecture enrichies et classement structuré des items par clusters thématiques.
+- **Gestion de Mémoires RAG** : Création et gestion de bases de connaissances vectorielles (Retrieval-Augmented Generation) permettant à vos LLMs d'exploiter la totalité de votre savoir scientifique avec précision.
+
+RAGpy transforme une collection de documents statique en une base de connaissances vivante et exploitable.
 
 ---
 
@@ -19,6 +25,9 @@ RAGpy transforme vos collections de documents (PDF, exports Zotero, CSV) en donn
   Dossier PDFs     ─┘              └─► Clusters thématiques
                                        → Tags automatiques Zotero
 ```
+Voir le Pipeline complet
+
+[![Pipeline complet](https://claude.ai/public/artifacts/1fab4f46-a04a-4e0f-9387-6d7db7fa37ce)](https://claude.ai/public/artifacts/1fab4f46-a04a-4e0f-9387-6d7db7fa37ce)
 
 ### Cas d'usage typiques
 

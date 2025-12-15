@@ -29,7 +29,8 @@ from app.utils.zotero_client import (
     ZoteroAPIError,
     _build_headers,
     _build_library_prefix,
-    get_library_version
+    get_library_version,
+    _clean_item_data_for_type  # For field validation by itemType
 )
 
 logger = logging.getLogger(__name__)
@@ -402,6 +403,7 @@ def _merge_item_data(existing_data: Dict, new_data: Dict) -> Dict:
     Strategy:
     - Keep existing data if more complete (non-empty)
     - Merge tags (union of both sets)
+    - Merge collections (union - add new collection while keeping existing ones)
     - Never overwrite complete existing data with empty new data
 
     Args:
@@ -412,12 +414,12 @@ def _merge_item_data(existing_data: Dict, new_data: Dict) -> Dict:
         Merged item data dictionary
 
     Examples:
-        >>> existing = {"title": "Full Title", "abstractNote": "..."}
-        >>> new = {"title": "Full Title", "DOI": "10.1234/test"}
+        >>> existing = {"title": "Full Title", "abstractNote": "...", "collections": ["ABC123"]}
+        >>> new = {"title": "Full Title", "DOI": "10.1234/test", "collections": ["XYZ789"]}
         >>> merged = _merge_item_data(existing, new)
-        >>> # Result has both abstractNote (kept) and DOI (added)
+        >>> # Result has both abstractNote (kept), DOI (added), and collections ["ABC123", "XYZ789"]
     """
-    merged = existing.copy()
+    merged = existing_data.copy()
 
     # Fields to merge (prefer existing if both non-empty)
     mergeable_fields = [
@@ -426,7 +428,7 @@ def _merge_item_data(existing_data: Dict, new_data: Dict) -> Dict:
     ]
 
     for field in mergeable_fields:
-        existing_value = existing.get(field, "")
+        existing_value = existing_data.get(field, "")
         new_value = new_data.get(field, "")
 
         # Only update if new value is non-empty and (existing is empty OR new is longer)
@@ -434,13 +436,24 @@ def _merge_item_data(existing_data: Dict, new_data: Dict) -> Dict:
             merged[field] = new_value
 
     # Merge tags (union)
-    existing_tags = set(tag.get("tag", "") for tag in existing.get("tags", []))
+    existing_tags = set(tag.get("tag", "") for tag in existing_data.get("tags", []))
     new_tags = set(tag.get("tag", "") for tag in new_data.get("tags", []))
     merged_tags = existing_tags | new_tags
     merged["tags"] = [{"tag": tag} for tag in sorted(merged_tags) if tag]
 
+    # Merge collections (union) - add to new collection while keeping existing ones
+    # This ensures that when an item is updated via Import PoP, it appears in
+    # the target collection while remaining in any existing collections
+    existing_collections = set(existing_data.get("collections", []))
+    new_collections = set(new_data.get("collections", []))
+    merged_collections = existing_collections | new_collections
+    if merged_collections:
+        merged["collections"] = list(merged_collections)
+        if new_collections - existing_collections:
+            logger.info(f"Added item to new collection(s): {new_collections - existing_collections}")
+
     # Merge creators if new list is longer
-    existing_creators = existing.get("creators", [])
+    existing_creators = existing_data.get("creators", [])
     new_creators = new_data.get("creators", [])
     if len(new_creators) > len(existing_creators):
         merged["creators"] = new_creators
@@ -506,6 +519,11 @@ def create_or_update_item(
     """
     prefix = _build_library_prefix(library_type, library_id)
     url = f"{ZOTERO_API_BASE}/{prefix}/items"
+
+    # Step 0: Clean item data (validate fields for item type)
+    # This removes DOI for item types that don't support it (e.g., bookSection)
+    item_data = _clean_item_data_for_type(item_data)
+    logger.debug(f"Cleaned item data for type '{item_data.get('itemType')}': {list(item_data.keys())}")
 
     # Step 1: Triple deduplication search
     existing_key = None
@@ -636,6 +654,21 @@ def create_or_update_item(
                 result = response.json()
                 new_version = response.headers.get("Last-Modified-Version")
 
+                # Check for explicit failures first (Zotero returns 200 but with failed items)
+                # This catches validation errors like "'DOI' is not a valid field for type 'bookSection'"
+                if "failed" in result and "0" in result["failed"]:
+                    failure_info = result["failed"]["0"]
+                    error_code = failure_info.get("code", 400)
+                    error_msg = failure_info.get("message", "Unknown validation error")
+                    logger.error(f"Zotero validation error (code {error_code}): {error_msg}")
+                    logger.error(f"Failed item data: itemType={item_data.get('itemType')}, fields={list(item_data.keys())}")
+                    return {
+                        "success": False,
+                        "message": f"Zotero validation error: {error_msg}",
+                        "error_code": error_code,
+                        "raw_response": result
+                    }
+
                 # Extract created item key
                 if "successful" in result and "0" in result["successful"]:
                     item_key = result["successful"]["0"]
@@ -651,7 +684,7 @@ def create_or_update_item(
                     logger.error(f"Unexpected create response: {result}")
                     return {
                         "success": False,
-                        "message": "Item created but could not extract key",
+                        "message": "Unexpected response format from Zotero API",
                         "raw_response": result
                     }
 

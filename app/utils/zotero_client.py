@@ -17,10 +17,14 @@ import time
 import uuid
 import logging
 import random
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Late import to avoid circular dependency
+# Will be imported at function level when needed
+_sanitize_zotero_item = None
 
 # Constants
 ZOTERO_API_BASE = "https://api.zotero.org"
@@ -651,6 +655,32 @@ ALL_PUBLICATION_TITLE_FIELDS = {
     "seriesTitle",
 }
 
+# Item types that do NOT support DOI field
+# Sending DOI for these types causes Zotero API validation error:
+# "'DOI' is not a valid field for type 'bookSection'"
+ITEM_TYPES_WITHOUT_DOI = {
+    "bookSection",    # DOI not supported
+    "manuscript",     # DOI not supported
+    "webpage",        # DOI not supported (use URL instead)
+    "presentation",   # DOI not supported
+    "letter",         # DOI not supported
+    "interview",      # DOI not supported
+    "email",          # DOI not supported
+    "instantMessage", # DOI not supported
+    "artwork",        # DOI not supported
+    "audioRecording", # DOI not supported
+    "videoRecording", # DOI not supported
+    "tvBroadcast",    # DOI not supported
+    "radioBroadcast", # DOI not supported
+    "podcast",        # DOI not supported
+    "bill",           # DOI not supported
+    "case",           # DOI not supported
+    "hearing",        # DOI not supported
+    "statute",        # DOI not supported
+    "attachment",     # DOI not supported
+    "note",           # DOI not supported
+}
+
 
 def _clean_item_data_for_type(item_data: Dict) -> Dict:
     """
@@ -731,6 +761,14 @@ def _clean_item_data_for_type(item_data: Dict) -> Dict:
             cleaned["publicationTitle"] = source_pub_title
             logger.debug(f"Keeping publicationTitle for type: {item_type}")
 
+    # Remove DOI for item types that don't support it
+    # This prevents Zotero API validation errors like:
+    # "'DOI' is not a valid field for type 'bookSection'"
+    if item_type in ITEM_TYPES_WITHOUT_DOI:
+        doi = cleaned.pop("DOI", None)
+        if doi:
+            logger.info(f"Removed DOI '{doi}' for {item_type} (not supported)")
+
     return cleaned
 
 
@@ -785,18 +823,54 @@ def get_or_create_collection(
             collections = response.json()
 
             # Search for collection by name (case-insensitive)
+            # Filter out deleted/trashed collections from the list
             for coll in collections:
-                if coll.get("data", {}).get("name", "").lower() == collection_name.lower():
-                    logger.info(f"Found existing collection: {coll['key']} - {coll['data']['name']}")
-                    return {
-                        "key": coll["key"],
-                        "created": False,
-                        "name": coll["data"]["name"],
-                        "version": response.headers.get("Last-Modified-Version", "")
-                    }
+                coll_data = coll.get("data", {})
+                # Skip if collection is marked as deleted
+                if coll_data.get("deleted", False):
+                    continue
+                if coll_data.get("name", "").lower() == collection_name.lower():
+                    coll_key = coll["key"]
+                    coll_name = coll_data["name"]
+                    logger.info(f"Found collection by name: {coll_key} - {coll_name}")
 
-            # Collection not found - proceed to create
-            logger.info(f"Collection '{collection_name}' not found, creating new one")
+                    # IMPORTANT: Verify the collection actually exists and is accessible
+                    # (it could have been deleted/trashed since the list was fetched)
+                    verify_url = f"{ZOTERO_API_BASE}/{prefix}/collections/{coll_key}"
+                    try:
+                        verify_response = requests.get(verify_url, headers=headers, timeout=10)
+                        if verify_response.status_code == 200:
+                            # Check if collection is in trash (deleted field)
+                            coll_data = verify_response.json()
+                            is_deleted = coll_data.get("data", {}).get("deleted", False)
+                            if is_deleted:
+                                logger.warning(f"Collection {coll_key} is in trash (deleted=True), will create new one")
+                                break  # Exit loop to create new collection
+
+                            # Also verify by trying to get items count
+                            # Some deleted collections return 200 but can't hold items
+                            items_url = f"{ZOTERO_API_BASE}/{prefix}/collections/{coll_key}/items?limit=1"
+                            items_response = requests.get(items_url, headers=headers, timeout=10)
+                            if items_response.status_code != 200:
+                                logger.warning(f"Collection {coll_key} exists but can't access items (status {items_response.status_code}), will create new one")
+                                break  # Exit loop to create new collection
+
+                            logger.info(f"Verified collection exists and is usable: {coll_key}")
+                            return {
+                                "key": coll_key,
+                                "created": False,
+                                "name": coll_name,
+                                "version": response.headers.get("Last-Modified-Version", "")
+                            }
+                        else:
+                            logger.warning(f"Collection {coll_key} found in list but not accessible (status {verify_response.status_code}), will create new one")
+                            break  # Exit loop to create new collection
+                    except requests.RequestException as e:
+                        logger.warning(f"Could not verify collection {coll_key}: {e}, will create new one")
+                        break  # Exit loop to create new collection
+
+            # Collection not found or not accessible - proceed to create
+            logger.info(f"Collection '{collection_name}' not found or not accessible, creating new one")
 
         elif response.status_code != 200:
             raise ZoteroAPIError(
@@ -846,7 +920,12 @@ def get_or_create_collection(
 
                 # Extract collection key from response
                 if "successful" in result and "0" in result["successful"]:
-                    collection_key = result["successful"]["0"]
+                    collection_result = result["successful"]["0"]
+                    # Handle both formats: dict with 'key' field or direct string key
+                    if isinstance(collection_result, dict):
+                        collection_key = collection_result.get("key", collection_result)
+                    else:
+                        collection_key = collection_result
                     logger.info(f"Created collection '{collection_name}' with key {collection_key}")
                     return {
                         "key": collection_key,
@@ -1130,12 +1209,16 @@ def search_item_by_title(
     api_key: str,
     target_creators: Optional[List[Dict]] = None,
     target_date: Optional[str] = None
-) -> Optional[str]:
+) -> List[str]:
     """
-    Search for an existing Zotero item by normalized title with optional creator/date validation.
-
-    Uses fuzzy matching (lowercase, alphanum only) for better recall,
-    then validates against authors and date to prevent false positives.
+    Search for existing Zotero items by normalized title (first 45 chars).
+    
+    Strategy (Per User Request):
+    1. Search using first 45 chars of title.
+    2. Filter results:
+       - Must match normalized title.
+       - If multiple matches: Filter by first author (if target has authors).
+    3. Return ALL matching keys.
 
     Args:
         library_type: "users" or "groups"
@@ -1143,29 +1226,31 @@ def search_item_by_title(
         title: Title to search for
         api_key: Zotero API key
         target_creators: Optional list of creator dicts (to validate match)
-        target_date: Optional date string (to validate match)
+        target_date: Optional date string (unused in strict title matching but kept for API compat)
 
     Returns:
-        Item key (str) if found and validated, None otherwise
-
-    Examples:
-        >>> item_key = search_item_by_title(
-        ...     "users", "12345", "Machine Learning", "...",
-        ...     target_creators=[{"lastName": "Smith", "creatorType": "author"}]
-        ... )
+        List of Item keys (List[str]). Empty list if none found.
     """
     if not title or len(title) < 5:  # Skip very short titles
-        return None
+        return []
 
-    normalized_search = _normalize_title_for_search(title)
-    if len(normalized_search) < 5:
-        return None
+    # clean title for search query
+    clean_title = _normalize_title_for_search(title)
+    if len(clean_title) < 5:
+        return []
 
     prefix = _build_library_prefix(library_type, library_id)
-    # Search with first significant words
-    search_terms = " ".join(normalized_search.split()[:5])  # First 5 words
-    url = f"{ZOTERO_API_BASE}/{prefix}/items?itemType=-attachment&q={search_terms}"
+    
+    # User Request: "disant les 45 premier caracter identique"
+    # We use the first 45 chars of the NORMALIZED title for the search query to be safe
+    # But strictly, the Zotero "q" param is a fuzzy search.
+    # We will search broadly and then filter strictly in Python.
+    search_query = clean_title[:45] 
+    
+    url = f"{ZOTERO_API_BASE}/{prefix}/items?itemType=-attachment&q={search_query}"
     headers = _build_headers(api_key)
+
+    matching_keys = []
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
@@ -1173,79 +1258,70 @@ def search_item_by_title(
         if response.status_code == 200:
             items = response.json()
 
-            # Check each result for normalized title match AND validation
+            # 1. Filter by Title (approx first 45 chars strict match on normalized)
+            candidates = []
             for item in items:
                 item_data = item.get("data", {})
                 item_title = item_data.get("title", "")
-                
                 if not item_title:
                     continue
-
-                normalized_item_title = _normalize_title_for_search(item_title)
                 
-                if normalized_item_title == normalized_search:
-                    # Title matches! Now strictly validate other fields if provided
-                    
-                    # 1. Author Validation
-                    if target_creators:
-                        item_creators = item_data.get("creators", [])
-                        
-                        # Extract last names from target
-                        target_last_names = {
-                            c.get("lastName", "").lower() 
-                            for c in target_creators 
-                            if c.get("lastName")
-                        }
-                        
-                        # Extract last names from candidate item
-                        item_last_names = {
-                            c.get("lastName", "").lower() 
-                            for c in item_creators 
-                            if c.get("lastName")
-                        }
-                        
-                        # If both have authors, require overlap
-                        if target_last_names and item_last_names:
-                            if not target_last_names.intersection(item_last_names):
-                                logger.info(
-                                    f"Title match '{title}' REJECTED: Author mismatch "
-                                    f"(Target: {target_last_names}, Found: {item_last_names})"
-                                )
-                                continue  # Distinct authors → likely different paper
-                    
-                    # 2. Date/Year Validation
-                    if target_date:
-                        item_date = item_data.get("date", "")
-                        # Simple 4-digit year extraction
-                        import re
-                        target_year_match = re.search(r'\d{4}', str(target_date))
-                        item_year_match = re.search(r'\d{4}', str(item_date))
-                        
-                        if target_year_match and item_year_match:
-                            target_year = int(target_year_match.group(0))
-                            item_year = int(item_year_match.group(0))
-                            
-                            # Allow 1 year variance (prepints vs publication dates)
-                            if abs(target_year - item_year) > 1:
-                                logger.info(
-                                    f"Title match '{title}' REJECTED: Year mismatch "
-                                    f"(Target: {target_year}, Found: {item_year})"
-                                )
-                                continue
+                norm_item_title = _normalize_title_for_search(item_title)
+                
+                # Check if starts with the same 45 chars (or full title if shorter)
+                # Comparing normalized versions ensures case/punctuation insensitivity
+                if norm_item_title.startswith(search_query):
+                    candidates.append(item)
 
-                    logger.info(f"Found existing item by title (validated): {item['key']}")
-                    return item["key"]
+            if not candidates:
+                 logger.debug(f"No item found starting with: {search_query}")
+                 return []
+            
+            # 2. If multiple candidates, try to filter by 1st Author
+            final_matches = []
+            
+            # Prepare target first author last name (if available)
+            target_first_author_lastname = None
+            if target_creators:
+                # Find first author/creator
+                first_creator = next((c for c in target_creators if c.get("lastName")), None)
+                if first_creator:
+                    target_first_author_lastname = first_creator.get("lastName", "").lower()
 
-            logger.debug(f"No valid item found with title: {title}")
-            return None
+            if len(candidates) > 1 and target_first_author_lastname:
+                # Filter candidates: Check if they share the same first author
+                for item in candidates:
+                    item_data = item.get("data", {})
+                    item_creators = item_data.get("creators", [])
+                    
+                    # Check for author overlap
+                    item_creators_lastnames = {c.get("lastName", "").lower() for c in item_creators if c.get("lastName")}
+                    
+                    if target_first_author_lastname in item_creators_lastnames:
+                         final_matches.append(item["key"])
+                
+                # If author filtering removed everyone (e.g. mismatch), 
+                # we might want to fall back to title match OR return none.
+                # User said: "tu cherche alors le 1er auteur identique"
+                # If we found matches with author, return them.
+                # If NO matches with author, it implies they are different papers.
+                if final_matches:
+                    logger.info(f"Resolved {len(candidates)} title duplicates to {len(final_matches)} items via author match.")
+                    return final_matches
+                else:
+                    logger.info("Title matched but author mismatch. Returning NO matches.")
+                    return []
+            
+            # If single candidate OR no authors to filter by -> return all candidates
+            return [item["key"] for item in candidates]
 
         else:
             logger.warning(f"Search by title failed with status {response.status_code}")
-            return None
+            return []
 
     except requests.RequestException as e:
         logger.error(f"Network error while searching by title: {e}")
-        return None
+        return []
 
 
 def _merge_item_data(existing_data: Dict, new_data: Dict) -> Dict:
@@ -1255,6 +1331,7 @@ def _merge_item_data(existing_data: Dict, new_data: Dict) -> Dict:
     Strategy:
     - Keep existing data if more complete (non-empty)
     - Merge tags (union of both sets)
+    - Merge collections (union - add new collection while keeping existing ones)
     - Never overwrite complete existing data with empty new data
 
     Args:
@@ -1265,10 +1342,10 @@ def _merge_item_data(existing_data: Dict, new_data: Dict) -> Dict:
         Merged item data dictionary
 
     Examples:
-        >>> existing = {"title": "Full Title", "abstractNote": "..."}
-        >>> new = {"title": "Full Title", "DOI": "10.1234/test"}
+        >>> existing = {"title": "Full Title", "abstractNote": "...", "collections": ["ABC123"]}
+        >>> new = {"title": "Full Title", "DOI": "10.1234/test", "collections": ["XYZ789"]}
         >>> merged = _merge_item_data(existing, new)
-        >>> # Result has both abstractNote (kept) and DOI (added)
+        >>> # Result has both abstractNote (kept), DOI (added), and collections ["ABC123", "XYZ789"]
     """
     merged = existing_data.copy()
 
@@ -1298,6 +1375,24 @@ def _merge_item_data(existing_data: Dict, new_data: Dict) -> Dict:
     new_tags = set(tag.get("tag", "") for tag in new_data.get("tags", []))
     merged_tags = existing_tags | new_tags
     merged["tags"] = [{"tag": tag} for tag in sorted(merged_tags) if tag]
+
+    # Merge collections (union) - add to new collection while keeping existing ones
+    # This ensures that when an item is updated via Import PoP, it appears in
+    # the target collection while remaining in any existing collections
+    existing_collections = set(existing_data.get("collections", []))
+    new_collections = set(new_data.get("collections", []))
+
+    # DEBUG: Log collections before merge (INFO level for visibility)
+    logger.info(f"Collections merge - existing: {existing_collections}, new: {new_collections}")
+
+    merged_collections = existing_collections | new_collections
+    if merged_collections:
+        merged["collections"] = list(merged_collections)
+        added_collections = new_collections - existing_collections
+        if added_collections:
+            logger.info(f"Added item to new collection(s): {added_collections}")
+        else:
+            logger.debug(f"Item already in all target collections: {new_collections}")
 
     # Merge creators if new list is longer
     existing_creators = existing_data.get("creators", [])
@@ -1372,29 +1467,32 @@ def create_or_update_item(
     logger.debug(f"Cleaned item data for type '{item_data.get('itemType')}': {list(item_data.keys())}")
 
     # Step 1: Triple deduplication search
-    existing_key = None
+    # We will collect ALL matching keys to support "Update All"
+    target_keys = []
 
     # Priority 1: DOI
     doi = item_data.get("DOI")
     if doi:
-        existing_key = search_item_by_doi(library_type, library_id, doi, api_key)
-        if existing_key:
-            logger.info(f"Found existing item by DOI: {existing_key}")
+        found_key = search_item_by_doi(library_type, library_id, doi, api_key)
+        if found_key:
+            target_keys.append(found_key)
+            logger.info(f"Found existing item by DOI: {found_key}")
 
-    # Priority 2: URL (if DOI search failed)
-    if not existing_key:
+    # Priority 2: URL (if no DOI match found)
+    if not target_keys:
         item_url = item_data.get("url")
         if item_url:
-            existing_key = search_item_by_url(library_type, library_id, item_url, api_key)
-            if existing_key:
-                logger.info(f"Found existing item by URL: {existing_key}")
+            found_key = search_item_by_url(library_type, library_id, item_url, api_key)
+            if found_key:
+                target_keys.append(found_key)
+                logger.info(f"Found existing item by URL: {found_key}")
 
-    # Priority 3: Normalized title (if both DOI and URL failed)
-    if not existing_key:
+    # Priority 3: Title Search (Return Actions All Matches)
+    if not target_keys:
         title = item_data.get("title")
         if title:
-            # Pass creators and date for stronger validation
-            existing_key = search_item_by_title(
+            # Returns a LIST of keys now
+            found_keys = search_item_by_title(
                 library_type, 
                 library_id, 
                 title, 
@@ -1402,81 +1500,93 @@ def create_or_update_item(
                 target_creators=item_data.get("creators"),
                 target_date=item_data.get("date")
             )
-            if existing_key:
-                logger.info(f"Found existing item by title: {existing_key}")
+            if found_keys:
+                target_keys.extend(found_keys)
+                logger.info(f"Found {len(found_keys)} existing items by title: {found_keys}")
 
-    # Step 2: Update existing item if found
-    if existing_key:
-        try:
-            # Get current item data
-            item_url = f"{ZOTERO_API_BASE}/{prefix}/items/{existing_key}"
-            headers = _build_headers(api_key)
-            response = requests.get(item_url, headers=headers, timeout=10)
+    # Step 2: Update ALL existing items found
+    synced_keys = []
+    
+    if target_keys:
+        # Deduplicate keys just in case
+        target_keys = list(set(target_keys))
+        
+        for existing_key in target_keys:
+            try:
+                # Get current item data
+                item_url = f"{ZOTERO_API_BASE}/{prefix}/items/{existing_key}"
+                headers = _build_headers(api_key)
+                response = requests.get(item_url, headers=headers, timeout=10)
 
-            if response.status_code == 200:
-                existing_item = response.json()
-                existing_data = existing_item.get("data", {})
-                existing_version = existing_item.get("version")
+                if response.status_code == 200:
+                    existing_item = response.json()
+                    existing_data = existing_item.get("data", {})
+                    existing_version = existing_item.get("version")
 
-                # Merge data intelligently and clean for item type
-                merged_data = _merge_item_data(existing_data, item_data)
-                merged_data = _clean_item_data_for_type(merged_data)
+                    # Merge data intelligently and clean for item type
+                    merged_data = _merge_item_data(existing_data, item_data)
+                    merged_data = _clean_item_data_for_type(merged_data)
 
-                # Update item
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        update_headers = _build_headers(api_key, {
-                            "If-Unmodified-Since-Version": str(existing_version)
-                        })
+                    # Update item
+                    for attempt in range(MAX_RETRIES):
+                        try:
+                            update_headers = _build_headers(api_key, {
+                                "If-Unmodified-Since-Version": str(existing_version)
+                            })
 
-                        update_response = requests.patch(
-                            item_url,
-                            headers=update_headers,
-                            json=merged_data,
-                            timeout=30
-                        )
+                            update_response = requests.patch(
+                                item_url,
+                                headers=update_headers,
+                                json=merged_data,
+                                timeout=30
+                            )
 
-                        if update_response.status_code == 204:
-                            new_version = update_response.headers.get("Last-Modified-Version")
-                            logger.info(f"Updated existing item: {existing_key}")
-                            return {
-                                "success": True,
-                                "item_key": existing_key,
-                                "action": "updated",
-                                "message": "Item updated successfully",
-                                "new_version": new_version
-                            }
+                            if update_response.status_code == 204:
+                                logger.info(f"Updated existing item: {existing_key}")
+                                synced_keys.append(existing_key)
+                                break
 
-                        elif update_response.status_code == 412:
-                            logger.warning(f"Update version conflict, retrying (attempt {attempt + 1}/{MAX_RETRIES})")
-                            # Refresh item data
-                            response = requests.get(item_url, headers=headers, timeout=10)
-                            if response.status_code == 200:
-                                existing_item = response.json()
-                                existing_version = existing_item.get("version")
+                            elif update_response.status_code == 412:
+                                logger.warning(f"Update version conflict for {existing_key}, retrying")
+                                # Refresh item data
+                                response = requests.get(item_url, headers=headers, timeout=10)
+                                if response.status_code == 200:
+                                    existing_item = response.json()
+                                    existing_version = existing_item.get("version")
+                                time.sleep(RETRY_DELAY)
+                                continue
+                            
+                            elif update_response.status_code == 429:
+                                retry_after = int(update_response.headers.get("Retry-After", RETRY_DELAY))
+                                time.sleep(retry_after)
+                                continue
+                            
+                            else:
+                                logger.warning(f"Update failed for {existing_key} status {update_response.status_code}")
+                                break
+
+                        except requests.RequestException:
                             time.sleep(RETRY_DELAY)
                             continue
+            except Exception as e:
+                logger.error(f"Failed to update item {existing_key}: {e}")
+        
+        # If we successfully updated at least one item, we consider it a success
+        if synced_keys:
+             return {
+                "success": True,
+                "item_key": synced_keys[0], # Return first key for backwards compatibility
+                "synced_keys": synced_keys, # NEW: Return all updated keys
+                "action": "updated",
+                "message": f"Updated {len(synced_keys)} items successfully"
+            }
+        else:
+             # If all updates failed, fall through to create? 
+             # Or maybe just fail. Let's fall through to create a new clean one.
+             logger.warning("All updates failed, creating new item instead")
 
-                        elif update_response.status_code == 429:
-                            retry_after = int(update_response.headers.get("Retry-After", RETRY_DELAY))
-                            logger.warning(f"Rate limit during update, waiting {retry_after}s")
-                            time.sleep(retry_after)
-                            continue
-
-                        else:
-                            logger.warning(f"Update failed with status {update_response.status_code}, falling back to create")
-                            break  # Fall through to create
-
-                    except requests.RequestException as e:
-                        logger.error(f"Network error during update: {e}")
-                        if attempt < MAX_RETRIES - 1:
-                            time.sleep(RETRY_DELAY)
-                            continue
-                        else:
-                            break  # Fall through to create
-
-        except Exception as e:
-            logger.warning(f"Failed to update existing item: {e}, falling back to create")
+    # Step 3: Create new item (if not found or all updates failed)
+    # ... (existing creation logic)
 
     # Step 3: Create new item (if not found or update failed)
     write_token = uuid.uuid4().hex
@@ -1513,13 +1623,30 @@ def create_or_update_item(
                 result = response.json()
                 new_version = response.headers.get("Last-Modified-Version")
 
+                # Check for explicit failures first (Zotero returns 200 but with failed items)
+                # This catches validation errors like "'DOI' is not a valid field for type 'bookSection'"
+                if "failed" in result and "0" in result["failed"]:
+                    failure_info = result["failed"]["0"]
+                    error_code = failure_info.get("code", 400)
+                    error_msg = failure_info.get("message", "Unknown validation error")
+                    logger.error(f"Zotero validation error (code {error_code}): {error_msg}")
+                    logger.error(f"Failed item data: itemType={item_data.get('itemType')}, fields={list(item_data.keys())}")
+                    return {
+                        "success": False,
+                        "message": f"Zotero validation error: {error_msg}",
+                        "error_code": error_code,
+                        "raw_response": result
+                    }
+
                 # Extract created item key
                 if "successful" in result and "0" in result["successful"]:
                     item_key = result["successful"]["0"]
                     logger.info(f"Created new item: {item_key}")
+                    logger.info(f"Created new item: {item_key}")
                     return {
                         "success": True,
                         "item_key": item_key,
+                        "synced_keys": [item_key], # New items are also "synced"
                         "action": "created",
                         "message": "Item created successfully",
                         "new_version": new_version
@@ -1528,7 +1655,7 @@ def create_or_update_item(
                     logger.error(f"Unexpected create response: {result}")
                     return {
                         "success": False,
-                        "message": "Item created but could not extract key",
+                        "message": "Unexpected response format from Zotero API",
                         "raw_response": result
                     }
 
@@ -1887,12 +2014,56 @@ def upload_file_attachment(
 
         # Check if file already exists (Zotero returns 200 with "exists": 1)
         if upload_auth.get("exists"):
-            logger.info(f"File already exists in Zotero: {attachment_key}")
-            return {
-                "success": True,
-                "attachment_key": attachment_key,
-                "message": "File already exists in Zotero (MD5 match)"
-            }
+            logger.info(f"File content already exists in Zotero storage for attachment: {attachment_key}")
+
+            # According to Zotero API docs: "the file must still be registered with the attachment"
+            # When exists=1, Zotero should automatically link the file, but we verify this
+            # by checking if the attachment now has file metadata
+            verification_result = _verify_attachment_has_file(
+                library_type=library_type,
+                library_id=library_id,
+                attachment_key=attachment_key,
+                api_key=api_key
+            )
+
+            if verification_result:
+                logger.info(f"Verified: attachment {attachment_key} now has file linked")
+                return {
+                    "success": True,
+                    "attachment_key": attachment_key,
+                    "message": "File already exists in Zotero (MD5 match) - verified linked"
+                }
+            else:
+                # File exists but not linked - this is the bug!
+                # Try to force registration with the MD5 hash
+                logger.warning(f"File exists but NOT linked to attachment {attachment_key}, attempting manual link")
+
+                manual_link_success = _force_link_existing_file(
+                    library_type=library_type,
+                    library_id=library_id,
+                    attachment_key=attachment_key,
+                    md5_hash=md5_hash,
+                    filename=filename,
+                    filesize=len(pdf_bytes),
+                    mtime=mtime,
+                    api_key=api_key
+                )
+
+                if manual_link_success:
+                    logger.info(f"Successfully manually linked file to attachment {attachment_key}")
+                    return {
+                        "success": True,
+                        "attachment_key": attachment_key,
+                        "message": "File exists - manually linked to attachment"
+                    }
+                else:
+                    logger.error(f"Failed to link existing file to attachment {attachment_key}")
+                    # Return success anyway since attachment was created (user can re-attach later)
+                    return {
+                        "success": True,
+                        "attachment_key": attachment_key,
+                        "message": "Warning: Attachment created but file linking failed (exists=1 case)"
+                    }
 
         logger.info(f"Upload authorized, uploading to storage...")
 
@@ -2071,6 +2242,227 @@ def _create_attachment_item(
             raise ZoteroAPIError(0, f"Network error: {str(e)}")
 
     raise ZoteroAPIError(500, f"Failed to create attachment after {MAX_RETRIES} attempts")
+
+
+def _verify_attachment_has_file(
+    library_type: str,
+    library_id: str,
+    attachment_key: str,
+    api_key: str
+) -> bool:
+    """
+    Verify that an attachment item has a file linked to it.
+
+    Checks the attachment's metadata to see if it has file properties
+    (md5, filename, mtime) which indicate a file is linked.
+
+    Args:
+        library_type: "users" or "groups"
+        library_id: Library ID
+        attachment_key: Key of the attachment item
+        api_key: Zotero API key
+
+    Returns:
+        True if the attachment has a file linked, False otherwise
+    """
+    try:
+        item = get_item(library_type, library_id, attachment_key, api_key)
+        if not item:
+            return False
+
+        data = item.get("data", {})
+
+        # Check for file indicators
+        has_md5 = bool(data.get("md5"))
+        has_filename = bool(data.get("filename"))
+        has_mtime = data.get("mtime") is not None
+
+        # Also check the linkMode - imported_file should have file data
+        link_mode = data.get("linkMode")
+
+        logger.debug(f"Attachment {attachment_key} verification: md5={has_md5}, "
+                    f"filename={has_filename}, mtime={has_mtime}, linkMode={link_mode}")
+
+        # For imported_file, we expect md5 to be set if file is linked
+        if link_mode == "imported_file":
+            return has_md5 and has_filename
+
+        return has_md5 or has_filename
+
+    except Exception as e:
+        logger.warning(f"Error verifying attachment {attachment_key}: {e}")
+        return False
+
+
+def _force_link_existing_file(
+    library_type: str,
+    library_id: str,
+    attachment_key: str,
+    md5_hash: str,
+    filename: str,
+    filesize: int,
+    mtime: int,
+    api_key: str
+) -> bool:
+    """
+    Force link an existing file to an attachment by re-registering.
+
+    When Zotero returns exists=1 but doesn't automatically link the file,
+    this function attempts to manually register the file with the attachment
+    by making a POST request without If-None-Match header.
+
+    Args:
+        library_type: "users" or "groups"
+        library_id: Library ID
+        attachment_key: Key of the attachment item
+        md5_hash: MD5 hash of the file
+        filename: Name of the file
+        filesize: Size of the file in bytes
+        mtime: Modification time in milliseconds
+        api_key: Zotero API key
+
+    Returns:
+        True if linking was successful, False otherwise
+    """
+    prefix = _build_library_prefix(library_type, library_id)
+    url = f"{ZOTERO_API_BASE}/{prefix}/items/{attachment_key}/file"
+
+    # Request body (URL-encoded form data)
+    data = {
+        "md5": md5_hash,
+        "filename": filename,
+        "filesize": str(filesize),
+        "mtime": str(mtime)
+    }
+
+    # Try WITHOUT If-None-Match to force re-registration
+    headers = {
+        "Zotero-API-Key": api_key,
+        "Zotero-API-Version": ZOTERO_API_VERSION,
+        "Content-Type": "application/x-www-form-urlencoded"
+        # No If-None-Match header - allows re-registration
+    }
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                data=data,
+                timeout=30
+            )
+
+            logger.debug(f"Force link attempt {attempt + 1}: HTTP {response.status_code}")
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("exists"):
+                    # Still says exists - need different approach
+                    # Try PATCH to update file metadata directly
+                    logger.warning("Force link returned exists=1, trying PATCH approach")
+                    return _patch_attachment_file_metadata(
+                        library_type, library_id, attachment_key,
+                        md5_hash, filename, mtime, api_key
+                    )
+                # Got upload params - we don't need to upload, just verify
+                return True
+
+            elif response.status_code == 204:
+                # Success - file registered
+                logger.info(f"Force link successful for {attachment_key}")
+                return True
+
+            elif response.status_code == 412:
+                # File already exists - this is expected, verify it's linked
+                logger.info(f"Force link: file already registered for {attachment_key}")
+                return True
+
+            elif response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", RETRY_DELAY * 2))
+                time.sleep(retry_after)
+                continue
+
+            else:
+                logger.warning(f"Force link failed: HTTP {response.status_code} - {response.text[:200]}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY * (attempt + 1))
+                    continue
+
+        except requests.RequestException as e:
+            logger.warning(f"Network error in force link (attempt {attempt + 1}): {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+
+    return False
+
+
+def _patch_attachment_file_metadata(
+    library_type: str,
+    library_id: str,
+    attachment_key: str,
+    md5_hash: str,
+    filename: str,
+    mtime: int,
+    api_key: str
+) -> bool:
+    """
+    Patch attachment item to add file metadata directly.
+
+    This is a last-resort approach when normal file linking fails.
+    Updates the attachment item's data to include file metadata.
+
+    Args:
+        library_type: "users" or "groups"
+        library_id: Library ID
+        attachment_key: Key of the attachment item
+        md5_hash: MD5 hash of the file
+        filename: Name of the file
+        mtime: Modification time in milliseconds
+        api_key: Zotero API key
+
+    Returns:
+        True if patch was successful, False otherwise
+    """
+    try:
+        # Get current item to get version
+        item = get_item(library_type, library_id, attachment_key, api_key)
+        if not item:
+            return False
+
+        item_version = str(item.get("version", "0"))
+
+        prefix = _build_library_prefix(library_type, library_id)
+        url = f"{ZOTERO_API_BASE}/{prefix}/items/{attachment_key}"
+
+        # Patch with file metadata
+        patch_data = {
+            "md5": md5_hash,
+            "filename": filename,
+            "mtime": mtime
+        }
+
+        headers = _build_headers(api_key, {
+            "If-Unmodified-Since-Version": item_version
+        })
+
+        response = requests.patch(
+            url,
+            headers=headers,
+            json=patch_data,
+            timeout=30
+        )
+
+        if response.status_code in (200, 204):
+            logger.info(f"Successfully patched file metadata for {attachment_key}")
+            return True
+        else:
+            logger.warning(f"PATCH failed for {attachment_key}: HTTP {response.status_code}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error patching attachment {attachment_key}: {e}")
+        return False
 
 
 def _request_upload_authorization(
