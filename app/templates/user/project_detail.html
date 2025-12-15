@@ -46,7 +46,8 @@
                     </div>
                     <div class="info-item">
                         <span class="info-label">Cree le</span>
-                        <span class="info-value">{{ project.created_at.strftime('%d/%m/%Y') if project.created_at else '-' }}</span>
+                        <span class="info-value">{{ project.created_at.strftime('%d/%m/%Y') if project.created_at else
+                            '-' }}</span>
                     </div>
                     <div class="info-item">
                         <span class="info-label">Dossier de session</span>
@@ -155,7 +156,8 @@
                 </div>
                 <div class="form-group">
                     <label for="editProjectDescription" class="form-label">Description</label>
-                    <textarea class="form-textarea" id="editProjectDescription" rows="3">{{ project.description or '' }}</textarea>
+                    <textarea class="form-textarea" id="editProjectDescription"
+                        rows="3">{{ project.description or '' }}</textarea>
                 </div>
             </form>
         </div>
@@ -179,7 +181,8 @@
             <form id="addMemberForm">
                 <div class="form-group">
                     <label for="memberEmail" class="form-label">Email de l'utilisateur</label>
-                    <input type="email" class="form-input" id="memberEmail" required placeholder="utilisateur@email.com">
+                    <input type="email" class="form-input" id="memberEmail" required
+                        placeholder="utilisateur@email.com">
                 </div>
                 <div class="form-group">
                     <label for="memberRole" class="form-label">Role</label>
@@ -250,7 +253,7 @@
                         <span class="form-required">*</span>
                     </label>
                     <input type="text" class="form-input" id="collectionName" required
-                           placeholder="Ex: LLM Annotation Studies">
+                        placeholder="Ex: LLM Annotation Studies">
                     <small class="form-help">Si existe, ajout dans collection. Sinon, création.</small>
                 </div>
 
@@ -259,26 +262,28 @@
                         Description de la bibliographie
                     </label>
                     <textarea class="form-textarea" id="collectionDescription" rows="3"
-                              placeholder="Contexte et critères de sélection..."></textarea>
+                        placeholder="Contexte et critères de sélection..."></textarea>
                 </div>
 
                 <div class="form-group">
-                    <label for="llmModel" class="form-label">Modèle LLM</label>
-                    <select class="form-select" id="llmModel">
-                        <option value="gpt-4o-mini">GPT-4o Mini (rapide, économique)</option>
-                        <option value="google/gemini-2.5-flash">Gemini 2.5 Flash (via OpenRouter)</option>
-                        <option value="gpt-4o">GPT-4o (plus précis, coûteux)</option>
-                    </select>
+                    <label for="llmModel" class="form-label">Modèle LLM (optionnel)</label>
+                    <input type="text" class="form-input" id="llmModel" placeholder="{{ default_llm_model }}" value="">
+                    <small class="form-help">
+                        Laissez vide pour le défaut (<code>{{ default_llm_model }}</code>).
+                        Format: <code>provider/model</code> → OpenRouter, <code>model</code> → OpenAI
+                    </small>
                 </div>
 
                 <div class="alert alert-info">
                     <i class="bi bi-info-circle"></i>
-                    <strong>Processus :</strong> Le LLM analysera chaque citation pour déterminer sa pertinence au projet. Vous pourrez valider la sélection avant import.
+                    <strong>Processus :</strong> Le LLM analysera chaque citation pour déterminer sa pertinence au
+                    projet. Vous pourrez valider la sélection avant import.
                 </div>
             </form>
         </div>
         <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" onclick="closeModal('importCitationsModal')">Annuler</button>
+            <button type="button" class="btn btn-secondary"
+                onclick="closeModal('importCitationsModal')">Annuler</button>
             <button type="button" class="btn btn-primary" onclick="uploadPopJson()">Continuer</button>
         </div>
     </div>
@@ -302,7 +307,8 @@
             <p>Voulez-vous continuer ?</p>
         </div>
         <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" onclick="closeModal('confirmLargeBatchModal')">Annuler</button>
+            <button type="button" class="btn btn-secondary"
+                onclick="closeModal('confirmLargeBatchModal')">Annuler</button>
             <button type="button" class="btn btn-primary" onclick="startFiltering()">Continuer</button>
         </div>
     </div>
@@ -372,7 +378,8 @@
             </div>
         </div>
         <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" onclick="closeModal('previewCitationsModal')">Annuler</button>
+            <button type="button" class="btn btn-secondary"
+                onclick="closeModal('previewCitationsModal')">Annuler</button>
             <button type="button" class="btn btn-primary" onclick="importSelected()">
                 Importer la sélection (<span id="selectedCount">0</span>)
             </button>
@@ -430,7 +437,89 @@
             </div>
         </div>
         <div class="modal-footer">
-            <button type="button" class="btn btn-primary" onclick="closeModal('importResultsModal'); loadSessions();">Fermer</button>
+            <button type="button" class="btn btn-primary"
+                onclick="closeModal('importResultsModal'); loadSessions();">Fermer</button>
+        </div>
+    </div>
+</div>
+
+<!-- Modal 7: Resume Session (PoP) -->
+<div class="modal" id="resumeSessionModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Session en cours</h3>
+            <button class="modal-close" onclick="closeModal('resumeSessionModal')">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <!-- Session Info -->
+            <div class="session-info-card">
+                <div class="info-item">
+                    <span class="info-label">Collection Zotero</span>
+                    <span class="info-value" id="resumeCollectionName">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Modèle LLM</span>
+                    <span class="info-value" id="resumeModel">-</span>
+                </div>
+            </div>
+
+            <!-- Filtering Progress -->
+            <div class="resume-section" id="resumeFilteringSection">
+                <h4><i class="bi bi-funnel"></i> Filtrage LLM</h4>
+                <div class="progress-stats">
+                    <div class="stat-mini">
+                        <span class="stat-value" id="resumeFilteringProgress">0</span>
+                        <span class="stat-label">/ <span id="resumeFilteringTotal">0</span></span>
+                    </div>
+                    <div class="stat-mini stat-success">
+                        <span class="stat-value" id="resumeFilteringRelevant">0</span>
+                        <span class="stat-label">pertinentes</span>
+                    </div>
+                    <div class="stat-mini stat-secondary">
+                        <span class="stat-value" id="resumeFilteringSkipped">0</span>
+                        <span class="stat-label">ignorées</span>
+                    </div>
+                </div>
+                <div class="progress-container progress-sm">
+                    <div class="progress-bar" id="resumeFilteringBar" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Import Progress -->
+            <div class="resume-section" id="resumeImportSection" style="display: none;">
+                <h4><i class="bi bi-cloud-upload"></i> Import Zotero</h4>
+                <div class="progress-stats">
+                    <div class="stat-mini">
+                        <span class="stat-value" id="resumeImportProgress">0</span>
+                        <span class="stat-label">/ <span id="resumeImportTotal">0</span></span>
+                    </div>
+                    <div class="stat-mini stat-success">
+                        <span class="stat-value" id="resumeImportCreated">0</span>
+                        <span class="stat-label">créées</span>
+                    </div>
+                    <div class="stat-mini stat-info">
+                        <span class="stat-value" id="resumeImportUpdated">0</span>
+                        <span class="stat-label">màj</span>
+                    </div>
+                </div>
+                <div class="progress-container progress-sm">
+                    <div class="progress-bar" id="resumeImportBar" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Action Message -->
+            <div class="alert alert-info" id="resumeActionMessage">
+                <i class="bi bi-info-circle"></i>
+                <span id="resumeActionText">Chargement...</span>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('resumeSessionModal')">Annuler</button>
+            <button type="button" class="btn btn-primary" id="resumeActionBtn" onclick="executeResumeAction()">
+                <i class="bi bi-play-fill"></i> Reprendre
+            </button>
         </div>
     </div>
 </div>
@@ -637,45 +726,126 @@
         color: var(--color-text-muted);
         margin-bottom: var(--space-3);
     }
+
+    /* Resume Session Modal Styles */
+    .session-info-card {
+        background: var(--color-surface-hover);
+        border-radius: var(--radius-md);
+        padding: var(--space-4);
+        margin-bottom: var(--space-4);
+    }
+
+    .session-info-card .info-item {
+        display: flex;
+        justify-content: space-between;
+        padding: var(--space-2) 0;
+        border-bottom: none;
+    }
+
+    .resume-section {
+        background: var(--color-surface);
+        border: 1px solid var(--color-border-light);
+        border-radius: var(--radius-md);
+        padding: var(--space-4);
+        margin-bottom: var(--space-4);
+    }
+
+    .resume-section h4 {
+        margin: 0 0 var(--space-3) 0;
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+    }
+
+    .progress-stats {
+        display: flex;
+        gap: var(--space-4);
+        margin-bottom: var(--space-3);
+    }
+
+    .stat-mini {
+        display: flex;
+        align-items: baseline;
+        gap: var(--space-1);
+    }
+
+    .stat-mini .stat-value {
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-bold);
+        color: var(--color-text-primary);
+    }
+
+    .stat-mini .stat-label {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+    }
+
+    .stat-mini.stat-success .stat-value {
+        color: var(--color-success);
+    }
+
+    .stat-mini.stat-info .stat-value {
+        color: var(--color-info);
+    }
+
+    .stat-mini.stat-secondary .stat-value {
+        color: var(--color-text-secondary);
+    }
+
+    .progress-container.progress-sm {
+        height: 6px;
+    }
+
+    .resume-section.completed {
+        border-color: var(--color-success);
+        background: var(--color-success-bg);
+    }
+
+    .resume-section.in-progress {
+        border-color: var(--color-info);
+    }
 </style>
 {% endblock %}
 
 {% block extra_js %}
 <script src="{{ url_for('static', path='js/pagination.js') }}"></script>
 <script>
-const projectId = {{ project.id }};
+    const projectId = {{ project.id }};
 
-async function loadMembers() {
-    try {
-        const response = await fetch(`/projects/${projectId}/members`, {
-            headers: {
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+    async function loadMembers() {
+        try {
+            const response = await fetch(`/projects/${projectId}/members`, {
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (response.ok) {
+                const members = await response.json();
+                renderMembers(members);
             }
-        });
-
-        if (response.ok) {
-            const members = await response.json();
-            renderMembers(members);
+        } catch (error) {
+            console.error('Error loading members:', error);
         }
-    } catch (error) {
-        console.error('Error loading members:', error);
     }
-}
 
-function renderMembers(members) {
-    const container = document.getElementById('membersList');
+    function renderMembers(members) {
+        const container = document.getElementById('membersList');
 
-    if (!members || members.length === 0) {
-        container.innerHTML = `
+        if (!members || members.length === 0) {
+            container.innerHTML = `
             <div class="empty-state-small">
                 <div class="empty-state-small-icon"><i class="bi bi-people"></i></div>
                 <p class="text-muted">Aucun membre</p>
             </div>
         `;
-        return;
-    }
+            return;
+        }
 
-    container.innerHTML = `
+        container.innerHTML = `
         <div class="table-container">
             <table class="table">
                 <thead>
@@ -705,175 +875,179 @@ function renderMembers(members) {
             </table>
         </div>
     `;
-}
-
-async function updateProject() {
-    const name = document.getElementById('editProjectName').value;
-    const description = document.getElementById('editProjectDescription').value;
-
-    try {
-        const response = await fetch(`/projects/${projectId}`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
-            },
-            body: JSON.stringify({ name, description })
-        });
-
-        if (response.ok) {
-            location.reload();
-        } else {
-            const data = await response.json();
-            showToast(data.detail || 'Erreur', 'error');
-        }
-    } catch (error) {
-        console.error('Error:', error);
-        showToast('Erreur lors de la mise a jour', 'error');
     }
-}
 
-async function addMember() {
-    const email = document.getElementById('memberEmail').value;
-    const role = document.getElementById('memberRole').value;
+    async function updateProject() {
+        const name = document.getElementById('editProjectName').value;
+        const description = document.getElementById('editProjectDescription').value;
 
-    try {
-        const response = await fetch(`/projects/${projectId}/members`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
-            },
-            body: JSON.stringify({ email, role })
-        });
+        try {
+            const response = await fetch(`/projects/${projectId}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                },
+                body: JSON.stringify({ name, description })
+            });
 
-        if (response.ok) {
-            closeModal('addMemberModal');
-            document.getElementById('addMemberForm').reset();
-            loadMembers();
-            showToast('Membre ajoute', 'success');
-        } else {
-            const data = await response.json();
-            showToast(data.detail || 'Erreur', 'error');
-        }
-    } catch (error) {
-        console.error('Error:', error);
-        showToast('Erreur lors de l\'ajout', 'error');
-    }
-}
-
-async function removeMember(userId) {
-    if (!confirm('Retirer ce membre du projet?')) return;
-
-    try {
-        const response = await fetch(`/projects/${projectId}/members/${userId}`, {
-            method: 'DELETE',
-            headers: {
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            if (response.ok) {
+                location.reload();
+            } else {
+                const data = await response.json();
+                showToast(data.detail || 'Erreur', 'error');
             }
-        });
-
-        if (response.ok) {
-            loadMembers();
-            showToast('Membre retire', 'success');
-        } else {
-            const data = await response.json();
-            showToast(data.detail || 'Erreur', 'error');
+        } catch (error) {
+            console.error('Error:', error);
+            showToast('Erreur lors de la mise a jour', 'error');
         }
-    } catch (error) {
-        console.error('Error:', error);
-        showToast('Erreur lors de la suppression', 'error');
     }
-}
 
-async function confirmDelete() {
-    try {
-        const response = await fetch(`/projects/${projectId}`, {
-            method: 'DELETE',
-            headers: {
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+    async function addMember() {
+        const email = document.getElementById('memberEmail').value;
+        const role = document.getElementById('memberRole').value;
+
+        try {
+            const response = await fetch(`/projects/${projectId}/members`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                },
+                body: JSON.stringify({ email, role })
+            });
+
+            if (response.ok) {
+                closeModal('addMemberModal');
+                document.getElementById('addMemberForm').reset();
+                loadMembers();
+                showToast('Membre ajoute', 'success');
+            } else {
+                const data = await response.json();
+                showToast(data.detail || 'Erreur', 'error');
             }
-        });
-
-        if (response.ok) {
-            window.location.href = '/projects';
-        } else {
-            const data = await response.json();
-            showToast(data.detail || 'Erreur', 'error');
+        } catch (error) {
+            console.error('Error:', error);
+            showToast('Erreur lors de l\'ajout', 'error');
         }
-    } catch (error) {
-        console.error('Error:', error);
-        showToast('Erreur lors de la suppression', 'error');
     }
-}
 
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
+    async function removeMember(userId) {
+        if (!confirm('Retirer ce membre du projet?')) return;
 
-// Sessions Management
-let currentSessionPage = 1;
-const sessionsPerPage = 10;
-
-async function loadSessions(page = 1) {
-    currentSessionPage = page;
-
-    try {
-        const response = await fetch(
-            `/api/pipeline/projects/${projectId}/sessions?page=${page}&per_page=${sessionsPerPage}`,
-            {
+        try {
+            const response = await fetch(`/projects/${projectId}/members/${userId}`, {
+                method: 'DELETE',
                 headers: {
                     'Authorization': 'Bearer ' + localStorage.getItem('access_token')
                 }
-            }
-        );
+            });
 
-        if (response.ok) {
-            const data = await response.json();
-            renderSessions(data);
-        } else {
-            document.getElementById('sessionsList').innerHTML = `
+            if (response.ok) {
+                loadMembers();
+                showToast('Membre retire', 'success');
+            } else {
+                const data = await response.json();
+                showToast(data.detail || 'Erreur', 'error');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            showToast('Erreur lors de la suppression', 'error');
+        }
+    }
+
+    async function confirmDelete() {
+        try {
+            const response = await fetch(`/projects/${projectId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (response.ok) {
+                window.location.href = '/projects';
+            } else {
+                const data = await response.json();
+                showToast(data.detail || 'Erreur', 'error');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            showToast('Erreur lors de la suppression', 'error');
+        }
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Sessions Management
+    let currentSessionPage = 1;
+    const sessionsPerPage = 10;
+
+    async function loadSessions(page = 1) {
+        currentSessionPage = page;
+
+        try {
+            const response = await fetch(
+                `/api/pipeline/projects/${projectId}/sessions?page=${page}&per_page=${sessionsPerPage}`,
+                {
+                    headers: {
+                        'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                    }
+                }
+            );
+
+            if (response.ok) {
+                const data = await response.json();
+                renderSessions(data);
+            } else {
+                document.getElementById('sessionsList').innerHTML = `
                 <div class="empty-state-small">
                     <p class="text-muted">Impossible de charger les sessions</p>
                 </div>
             `;
+            }
+        } catch (error) {
+            console.error('Error loading sessions:', error);
         }
-    } catch (error) {
-        console.error('Error loading sessions:', error);
     }
-}
 
-function changePage(page) {
-    loadSessions(page);
-}
+    function changePage(page) {
+        loadSessions(page);
+    }
 
-function getStatusBadge(status) {
-    const statusMap = {
-        'created': { class: 'badge-secondary', label: 'Cree' },
-        'extracting': { class: 'badge-info', label: 'Extraction...' },
-        'extracted': { class: 'badge-primary', label: 'Extrait' },
-        'chunking': { class: 'badge-info', label: 'Chunking...' },
-        'chunked': { class: 'badge-primary', label: 'Chunke' },
-        'embedding': { class: 'badge-info', label: 'Embeddings...' },
-        'embedded': { class: 'badge-primary', label: 'Embeddings OK' },
-        'uploading': { class: 'badge-info', label: 'Upload...' },
-        'completed': { class: 'badge-success', label: 'Termine' },
-        'error': { class: 'badge-danger', label: 'Erreur' },
-        'filtering_citations': { class: 'badge-info', label: 'Filtrage LLM...' },
-        'importing_citations': { class: 'badge-info', label: 'Import Zotero...' }
-    };
-    const info = statusMap[status] || { class: 'badge-secondary', label: status };
-    return `<span class="badge ${info.class}">${info.label}</span>`;
-}
+    function getStatusBadge(status) {
+        const statusMap = {
+            'created': { class: 'badge-secondary', label: 'Cree' },
+            'extracting': { class: 'badge-info', label: 'Extraction...' },
+            'extracted': { class: 'badge-primary', label: 'Extrait' },
+            'chunking': { class: 'badge-info', label: 'Chunking...' },
+            'chunked': { class: 'badge-primary', label: 'Chunke' },
+            'embedding': { class: 'badge-info', label: 'Embeddings...' },
+            'embedded': { class: 'badge-primary', label: 'Embeddings OK' },
+            'uploading': { class: 'badge-info', label: 'Upload...' },
+            'completed': { class: 'badge-success', label: 'Termine' },
+            'error': { class: 'badge-danger', label: 'Erreur' },
+            'filtering_citations': { class: 'badge-info', label: 'Filtrage LLM...' },
+            'importing_citations': { class: 'badge-info', label: 'Import Zotero...' },
+            // Resumable statuses
+            'filtered': { class: 'badge-primary', label: 'Filtre (pret import)' },
+            'filtering_paused': { class: 'badge-warning', label: 'Filtrage en pause' },
+            'importing_paused': { class: 'badge-warning', label: 'Import en pause' }
+        };
+        const info = statusMap[status] || { class: 'badge-secondary', label: status };
+        return `<span class="badge ${info.class}">${info.label}</span>`;
+    }
 
-function renderSessions(data) {
-    const container = document.getElementById('sessionsList');
-    const { sessions, total, page, per_page, pages } = data;
+    function renderSessions(data) {
+        const container = document.getElementById('sessionsList');
+        const { sessions, total, page, per_page, pages } = data;
 
-    if (!sessions || sessions.length === 0) {
-        container.innerHTML = `
+        if (!sessions || sessions.length === 0) {
+            container.innerHTML = `
             <div class="empty-state-small">
                 <div class="empty-state-small-icon"><i class="bi bi-inbox"></i></div>
                 <p class="text-muted">Aucune session de pipeline</p>
@@ -883,10 +1057,10 @@ function renderSessions(data) {
                 </a>
             </div>
         `;
-        return;
-    }
+            return;
+        }
 
-    container.innerHTML = `
+        container.innerHTML = `
         <div class="table-container">
             <table class="table">
                 <thead>
@@ -900,7 +1074,13 @@ function renderSessions(data) {
                     </tr>
                 </thead>
                 <tbody>
-                    ${sessions.map(s => `
+                    ${sessions.map(s => {
+            // Detect PoP sessions: explicit source_type OR session folder starts with 'pop_' OR original filename is .json
+            const isPopSession = s.source_type === 'pop_json'
+                || (s.session_folder && s.session_folder.startsWith('pop_'))
+                || (s.original_filename && s.original_filename.toLowerCase().endsWith('.json'));
+
+            return `
                         <tr>
                             <td>
                                 <code class="text-sm">${escapeHtml(s.session_folder)}</code>
@@ -909,6 +1089,7 @@ function renderSessions(data) {
                             <td>
                                 ${s.source_type === 'zip' ? '<i class="bi bi-file-zip text-warning"></i> ZIP' : ''}
                                 ${s.source_type === 'csv' ? '<i class="bi bi-filetype-csv text-success"></i> CSV' : ''}
+                                ${isPopSession ? '<i class="bi bi-journal-text text-info"></i> PoP' : ''}
                             </td>
                             <td>${getStatusBadge(s.status)}</td>
                             <td>
@@ -917,16 +1098,23 @@ function renderSessions(data) {
                             </td>
                             <td><small>${formatDate(s.created_at)}</small></td>
                             <td class="text-right">
-                                <a href="/pipeline?project=${projectId}&session=${encodeURIComponent(s.session_folder)}"
-                                   class="btn btn-ghost btn-sm" title="Voir / Reprendre">
-                                    <i class="bi bi-box-arrow-up-right"></i>
-                                </a>
+                                ${isPopSession ? `
+                                    <button class="btn btn-ghost btn-sm" onclick="handlePopSessionClick(${s.id}, '${escapeHtml(s.status)}')" title="Ouvrir / Reprendre">
+                                        <i class="bi bi-box-arrow-up-right"></i>
+                                    </button>
+                                ` : `
+                                    <a href="/pipeline?project=${projectId}&session=${encodeURIComponent(s.session_folder)}"
+                                       class="btn btn-ghost btn-sm" title="Voir / Reprendre">
+                                        <i class="bi bi-box-arrow-up-right"></i>
+                                    </a>
+                                `}
                                 <button class="btn btn-ghost btn-sm" onclick="deleteSession(${s.id})" title="Supprimer">
                                     <i class="bi bi-trash"></i>
                                 </button>
                             </td>
                         </tr>
-                    `).join('')}
+                    `;
+        }).join('')}
                 </tbody>
             </table>
         </div>
@@ -938,255 +1126,258 @@ function renderSessions(data) {
             onPageChange: 'changePage'
         })}
     `;
-}
+    }
 
-function formatDate(dateStr) {
-    if (!dateStr) return '-';
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('fr-FR', {
-        day: '2-digit', month: '2-digit', year: 'numeric',
-        hour: '2-digit', minute: '2-digit'
-    });
-}
-
-async function deleteSession(sessionId) {
-    if (!confirm('Supprimer cette session et tous ses fichiers?')) return;
-
-    try {
-        const response = await fetch(`/api/pipeline/sessions/${sessionId}`, {
-            method: 'DELETE',
-            headers: {
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
-            }
+    function formatDate(dateStr) {
+        if (!dateStr) return '-';
+        const date = new Date(dateStr);
+        return date.toLocaleDateString('fr-FR', {
+            day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit'
         });
+    }
 
-        if (response.ok) {
-            loadSessions();
-            showToast('Session supprimee', 'success');
-        } else {
+    async function deleteSession(sessionId) {
+        if (!confirm('Supprimer cette session et tous ses fichiers?')) return;
+
+        try {
+            const response = await fetch(`/api/pipeline/sessions/${sessionId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (response.ok) {
+                loadSessions();
+                showToast('Session supprimee', 'success');
+            } else {
+                const data = await response.json();
+                showToast(data.detail || 'Erreur', 'error');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            showToast('Erreur lors de la suppression', 'error');
+        }
+    }
+
+    // ===== Citation Import Handlers =====
+
+    // Global state for citation import workflow
+    let currentSessionId = null;
+    let previewData = null;
+
+    // Step 1: Upload JSON and create session
+    async function uploadPopJson() {
+        const fileInput = document.getElementById('popJsonFile');
+        const collectionName = document.getElementById('collectionName').value.trim();
+        const collectionDescription = document.getElementById('collectionDescription').value.trim();
+        const model = document.getElementById('llmModel').value;
+
+        // Validation
+        if (!fileInput.files[0]) {
+            showToast('Veuillez sélectionner un fichier JSON', 'error');
+            return;
+        }
+        if (!collectionName) {
+            showToast('Le nom de la collection est requis', 'error');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('json_file', fileInput.files[0]);
+        formData.append('collection_name', collectionName);
+        formData.append('collection_description', collectionDescription);
+        // N'envoyer le modèle que s'il est spécifié (sinon le backend utilise le défaut .env)
+        if (model.trim()) {
+            formData.append('model', model.trim());
+        }
+
+        try {
+            const response = await fetch(`/api/projects/${projectId}/upload_pop_json`, {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Upload failed');
+            }
+
             const data = await response.json();
-            showToast(data.detail || 'Erreur', 'error');
-        }
-    } catch (error) {
-        console.error('Error:', error);
-        showToast('Erreur lors de la suppression', 'error');
-    }
-}
+            currentSessionId = data.session_id;
 
-// ===== Citation Import Handlers =====
+            closeModal('importCitationsModal');
 
-// Global state for citation import workflow
-let currentSessionId = null;
-let previewData = null;
-
-// Step 1: Upload JSON and create session
-async function uploadPopJson() {
-    const fileInput = document.getElementById('popJsonFile');
-    const collectionName = document.getElementById('collectionName').value.trim();
-    const collectionDescription = document.getElementById('collectionDescription').value.trim();
-    const model = document.getElementById('llmModel').value;
-
-    // Validation
-    if (!fileInput.files[0]) {
-        showToast('Veuillez sélectionner un fichier JSON', 'error');
-        return;
-    }
-    if (!collectionName) {
-        showToast('Le nom de la collection est requis', 'error');
-        return;
-    }
-
-    const formData = new FormData();
-    formData.append('json_file', fileInput.files[0]);
-    formData.append('collection_name', collectionName);
-    formData.append('collection_description', collectionDescription);
-    formData.append('model', model);
-
-    try {
-        const response = await fetch(`/api/projects/${projectId}/upload_pop_json`, {
-            method: 'POST',
-            body: formData,
-            headers: {
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            // Check if confirmation required (> 100 citations)
+            if (data.requires_confirmation) {
+                document.getElementById('citationCount').textContent = data.total_citations;
+                openModal('confirmLargeBatchModal');
+            } else {
+                startFiltering();
             }
-        });
 
-        if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.detail || 'Upload failed');
+        } catch (error) {
+            console.error('Upload error:', error);
+            showToast(error.message || 'Erreur lors de l\'upload', 'error');
         }
-
-        const data = await response.json();
-        currentSessionId = data.session_id;
-
-        closeModal('importCitationsModal');
-
-        // Check if confirmation required (> 100 citations)
-        if (data.requires_confirmation) {
-            document.getElementById('citationCount').textContent = data.total_citations;
-            openModal('confirmLargeBatchModal');
-        } else {
-            startFiltering();
-        }
-
-    } catch (error) {
-        console.error('Upload error:', error);
-        showToast(error.message || 'Erreur lors de l\'upload', 'error');
     }
-}
 
-// Step 2: Start filtering with SSE
-async function startFiltering() {
-    closeModal('confirmLargeBatchModal');
-    openModal('filteringProgressModal');
+    // Step 2: Start filtering with SSE
+    async function startFiltering() {
+        closeModal('confirmLargeBatchModal');
+        openModal('filteringProgressModal');
 
-    // Reset progress UI
-    document.getElementById('filteringProgressBar').style.width = '0%';
-    document.getElementById('filteringProgressText').textContent = '0 / 0 citations traitées';
-    document.getElementById('filteringLiveLog').innerHTML = '';
+        // Reset progress UI
+        document.getElementById('filteringProgressBar').style.width = '0%';
+        document.getElementById('filteringProgressText').textContent = '0 / 0 citations traitées';
+        document.getElementById('filteringLiveLog').innerHTML = '';
 
-    const formData = new FormData();
-    formData.append('session_id', currentSessionId);
+        const formData = new FormData();
+        formData.append('session_id', currentSessionId);
 
-    try {
-        const response = await fetch(`/api/projects/${projectId}/filter_citations_sse`, {
-            method: 'POST',
-            body: formData,
-            headers: {
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+        try {
+            const response = await fetch(`/api/projects/${projectId}/filter_citations_sse`, {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to start filtering');
             }
-        });
 
-        if (!response.ok) {
-            throw new Error('Failed to start filtering');
-        }
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let totalCitations = 0;
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let totalCitations = 0;
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
+                // Process complete lines, keep incomplete line in buffer
+                buffer = lines.pop() || '';
 
-            // Process complete lines, keep incomplete line in buffer
-            buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (line.startsWith('data:')) {
+                        try {
+                            const data = JSON.parse(line.slice(5).trim());
+                            handleFilteringSSE(data, totalCitations);
 
-            for (const line of lines) {
-                if (line.startsWith('data:')) {
-                    try {
-                        const data = JSON.parse(line.slice(5).trim());
-                        handleFilteringSSE(data, totalCitations);
-
-                        if (data.type === 'init') {
-                            totalCitations = data.total;
+                            if (data.type === 'init') {
+                                totalCitations = data.total;
+                            }
+                        } catch (e) {
+                            console.error('Error parsing SSE data:', e, line);
                         }
-                    } catch (e) {
-                        console.error('Error parsing SSE data:', e, line);
                     }
                 }
             }
-        }
-    } catch (error) {
-        console.error('Filtering error:', error);
-        closeModal('filteringProgressModal');
-        showToast('Erreur lors du filtrage', 'error');
-    }
-}
-
-// Handle filtering SSE events
-function handleFilteringSSE(data, total) {
-    switch(data.type) {
-        case 'init':
-            document.getElementById('filteringProgressText').textContent = `0 / ${data.total} citations traitées`;
-            break;
-
-        case 'progress':
-            const percent = total > 0 ? Math.round((data.current / total) * 100) : 0;
-            document.getElementById('filteringProgressBar').style.width = `${percent}%`;
-            document.getElementById('filteringProgressText').textContent = `${data.current} / ${total} citations traitées`;
-
-            const badgeClass = data.status === 'relevant' ? 'badge-success' : 'badge-secondary';
-            const log = document.getElementById('filteringLiveLog');
-            const logEntry = document.createElement('div');
-            logEntry.className = 'log-entry';
-            logEntry.innerHTML = `<span class="badge ${badgeClass}">${data.status}</span> ${escapeHtml(data.title)}`;
-            log.appendChild(logEntry);
-            log.scrollTop = log.scrollHeight;
-            break;
-
-        case 'complete':
+        } catch (error) {
+            console.error('Filtering error:', error);
             closeModal('filteringProgressModal');
-            loadPreviewAndShow(data.relevant, data.skipped);
-            break;
-
-        case 'error':
-            const errorLog = document.getElementById('filteringLiveLog');
-            const errorEntry = document.createElement('div');
-            errorEntry.className = 'log-entry error';
-            errorEntry.innerHTML = `<span class="badge badge-danger">error</span> ${escapeHtml(data.message || 'Unknown error')}`;
-            errorLog.appendChild(errorEntry);
-            break;
-    }
-}
-
-// Step 3: Load preview and show selection modal
-async function loadPreviewAndShow(relevantCount, skippedCount) {
-    try {
-        const response = await fetch(`/api/sessions/${currentSessionId}/preview`, {
-            headers: {
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
-            }
-        });
-
-        if (!response.ok) {
-            throw new Error('Failed to load preview');
+            showToast('Erreur lors du filtrage', 'error');
         }
-
-        previewData = await response.json();
-
-        // Update counts
-        document.getElementById('relevantCount').textContent = relevantCount;
-        document.getElementById('skippedCount').textContent = skippedCount;
-
-        // Populate lists
-        populateRelevantList(previewData.relevant || []);
-        populateSkippedList(previewData.skipped || []);
-
-        // Reset to relevant tab
-        showTab('relevant');
-
-        openModal('previewCitationsModal');
-    } catch (error) {
-        console.error('Error loading preview:', error);
-        showToast('Erreur lors du chargement du preview', 'error');
     }
-}
 
-// Populate relevant citations list with checkboxes
-function populateRelevantList(items) {
-    const container = document.getElementById('relevantList');
+    // Handle filtering SSE events
+    function handleFilteringSSE(data, total) {
+        switch (data.type) {
+            case 'init':
+                document.getElementById('filteringProgressText').textContent = `0 / ${data.total} citations traitées`;
+                break;
 
-    if (!items || items.length === 0) {
-        container.innerHTML = `
+            case 'progress':
+                const percent = total > 0 ? Math.round((data.current / total) * 100) : 0;
+                document.getElementById('filteringProgressBar').style.width = `${percent}%`;
+                document.getElementById('filteringProgressText').textContent = `${data.current} / ${total} citations traitées`;
+
+                const badgeClass = data.status === 'relevant' ? 'badge-success' : 'badge-secondary';
+                const log = document.getElementById('filteringLiveLog');
+                const logEntry = document.createElement('div');
+                logEntry.className = 'log-entry';
+                logEntry.innerHTML = `<span class="badge ${badgeClass}">${data.status}</span> ${escapeHtml(data.title)}`;
+                log.appendChild(logEntry);
+                log.scrollTop = log.scrollHeight;
+                break;
+
+            case 'complete':
+                closeModal('filteringProgressModal');
+                loadPreviewAndShow(data.relevant, data.skipped);
+                break;
+
+            case 'error':
+                const errorLog = document.getElementById('filteringLiveLog');
+                const errorEntry = document.createElement('div');
+                errorEntry.className = 'log-entry error';
+                errorEntry.innerHTML = `<span class="badge badge-danger">error</span> ${escapeHtml(data.message || 'Unknown error')}`;
+                errorLog.appendChild(errorEntry);
+                break;
+        }
+    }
+
+    // Step 3: Load preview and show selection modal
+    async function loadPreviewAndShow(relevantCount, skippedCount) {
+        try {
+            const response = await fetch(`/api/sessions/${currentSessionId}/preview`, {
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to load preview');
+            }
+
+            previewData = await response.json();
+
+            // Update counts
+            document.getElementById('relevantCount').textContent = relevantCount;
+            document.getElementById('skippedCount').textContent = skippedCount;
+
+            // Populate lists
+            populateRelevantList(previewData.relevant || []);
+            populateSkippedList(previewData.skipped || []);
+
+            // Reset to relevant tab
+            showTab('relevant');
+
+            openModal('previewCitationsModal');
+        } catch (error) {
+            console.error('Error loading preview:', error);
+            showToast('Erreur lors du chargement du preview', 'error');
+        }
+    }
+
+    // Populate relevant citations list with checkboxes
+    function populateRelevantList(items) {
+        const container = document.getElementById('relevantList');
+
+        if (!items || items.length === 0) {
+            container.innerHTML = `
             <div class="empty-state-small">
                 <p class="text-muted">Aucune citation pertinente trouvée</p>
             </div>
         `;
-        return;
-    }
+            return;
+        }
 
-    container.innerHTML = items.map((item, idx) => {
-        const citation = item.citation || {};
-        const authors = Array.isArray(citation.authors) ? citation.authors.join(', ') : (citation.authors || 'N/A');
-        const year = citation.year || 'N/A';
-        const source = citation.source || citation.publisher || 'N/A';
+        container.innerHTML = items.map((item, idx) => {
+            const citation = item.citation || {};
+            const authors = Array.isArray(citation.authors) ? citation.authors.join(', ') : (citation.authors || 'N/A');
+            const year = citation.year || 'N/A';
+            const source = citation.source || citation.publisher || 'N/A';
 
-        return `
+            return `
             <div class="citation-card">
                 <label class="citation-checkbox">
                     <input type="checkbox" class="relevant-checkbox" data-index="${idx}" onchange="updateSelectedCount()" checked>
@@ -1201,30 +1392,30 @@ function populateRelevantList(items) {
                 </label>
             </div>
         `;
-    }).join('');
+        }).join('');
 
-    updateSelectedCount();
-}
+        updateSelectedCount();
+    }
 
-// Populate skipped citations list (read-only)
-function populateSkippedList(items) {
-    const container = document.getElementById('skippedList');
+    // Populate skipped citations list (read-only)
+    function populateSkippedList(items) {
+        const container = document.getElementById('skippedList');
 
-    if (!items || items.length === 0) {
-        container.innerHTML = `
+        if (!items || items.length === 0) {
+            container.innerHTML = `
             <div class="empty-state-small">
                 <p class="text-muted">Aucune citation ignorée</p>
             </div>
         `;
-        return;
-    }
+            return;
+        }
 
-    container.innerHTML = items.map(item => {
-        const citation = item.citation || {};
-        const authors = Array.isArray(citation.authors) ? citation.authors.join(', ') : (citation.authors || 'N/A');
-        const year = citation.year || 'N/A';
+        container.innerHTML = items.map(item => {
+            const citation = item.citation || {};
+            const authors = Array.isArray(citation.authors) ? citation.authors.join(', ') : (citation.authors || 'N/A');
+            const year = citation.year || 'N/A';
 
-        return `
+            return `
             <div class="citation-card skipped">
                 <div class="citation-content">
                     <h4>${escapeHtml(citation.title || 'Sans titre')}</h4>
@@ -1235,177 +1426,387 @@ function populateSkippedList(items) {
                 </div>
             </div>
         `;
-    }).join('');
-}
+        }).join('');
+    }
 
-// Update selected count display
-function updateSelectedCount() {
-    const checked = document.querySelectorAll('.relevant-checkbox:checked').length;
-    document.getElementById('selectedCount').textContent = checked;
-}
+    // Update selected count display
+    function updateSelectedCount() {
+        const checked = document.querySelectorAll('.relevant-checkbox:checked').length;
+        document.getElementById('selectedCount').textContent = checked;
+    }
 
-// Toggle select all checkboxes
-function toggleSelectAll(type) {
-    if (type === 'relevant') {
-        const selectAllCheckbox = document.getElementById('selectAllRelevant');
-        const checked = selectAllCheckbox.checked;
-        document.querySelectorAll('.relevant-checkbox').forEach(cb => {
-            cb.checked = checked;
+    // Toggle select all checkboxes
+    function toggleSelectAll(type) {
+        if (type === 'relevant') {
+            const selectAllCheckbox = document.getElementById('selectAllRelevant');
+            const checked = selectAllCheckbox.checked;
+            document.querySelectorAll('.relevant-checkbox').forEach(cb => {
+                cb.checked = checked;
+            });
+            updateSelectedCount();
+        }
+    }
+
+    // Switch between relevant/skipped tabs
+    function showTab(tabName) {
+        // Remove active class from all tabs
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.classList.remove('active');
         });
-        updateSelectedCount();
-    }
-}
-
-// Switch between relevant/skipped tabs
-function showTab(tabName) {
-    // Remove active class from all tabs
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.classList.remove('active');
-    });
-    document.querySelectorAll('.tab-content').forEach(content => {
-        content.classList.remove('active');
-    });
-
-    // Add active class to selected tab
-    const tabButton = event ? event.target : document.querySelector(`.tab-btn[onclick*="${tabName}"]`);
-    if (tabButton) {
-        tabButton.classList.add('active');
-    }
-    document.getElementById(`${tabName}Tab`).classList.add('active');
-}
-
-// Step 4: Import selected citations with SSE
-async function importSelected() {
-    const selectedCheckboxes = document.querySelectorAll('.relevant-checkbox:checked');
-    const selectedIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
-
-    if (selectedIndices.length === 0) {
-        showToast('Veuillez sélectionner au moins une citation', 'warning');
-        return;
-    }
-
-    closeModal('previewCitationsModal');
-    openModal('importingProgressModal');
-
-    // Reset progress UI
-    document.getElementById('importingProgressBar').style.width = '0%';
-    document.getElementById('importingProgressText').textContent = '0 / 0 importées';
-    document.getElementById('importingLiveLog').innerHTML = '';
-
-    const formData = new FormData();
-    formData.append('session_id', currentSessionId);
-    formData.append('selected_indices', JSON.stringify(selectedIndices));
-
-    try {
-        const response = await fetch(`/api/projects/${projectId}/import_citations_sse`, {
-            method: 'POST',
-            body: formData,
-            headers: {
-                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
-            }
+        document.querySelectorAll('.tab-content').forEach(content => {
+            content.classList.remove('active');
         });
 
-        if (!response.ok) {
-            throw new Error('Failed to start import');
+        // Add active class to selected tab
+        const tabButton = event ? event.target : document.querySelector(`.tab-btn[onclick*="${tabName}"]`);
+        if (tabButton) {
+            tabButton.classList.add('active');
+        }
+        document.getElementById(`${tabName}Tab`).classList.add('active');
+    }
+
+    // Step 4: Import selected citations with SSE
+    async function importSelected() {
+        const selectedCheckboxes = document.querySelectorAll('.relevant-checkbox:checked');
+        const selectedIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
+
+        if (selectedIndices.length === 0) {
+            showToast('Veuillez sélectionner au moins une citation', 'warning');
+            return;
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let totalToImport = selectedIndices.length;
+        closeModal('previewCitationsModal');
+        openModal('importingProgressModal');
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        // Reset progress UI
+        document.getElementById('importingProgressBar').style.width = '0%';
+        document.getElementById('importingProgressText').textContent = '0 / 0 importées';
+        document.getElementById('importingLiveLog').innerHTML = '';
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
+        const formData = new FormData();
+        formData.append('session_id', currentSessionId);
+        formData.append('selected_indices', JSON.stringify(selectedIndices));
 
-            buffer = lines.pop() || '';
+        try {
+            const response = await fetch(`/api/projects/${projectId}/import_citations_sse`, {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
 
-            for (const line of lines) {
-                if (line.startsWith('data:')) {
-                    try {
-                        const data = JSON.parse(line.slice(5).trim());
-                        handleImportingSSE(data, totalToImport);
-                    } catch (e) {
-                        console.error('Error parsing SSE data:', e, line);
+            if (!response.ok) {
+                throw new Error('Failed to start import');
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let totalToImport = selectedIndices.length;
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (line.startsWith('data:')) {
+                        try {
+                            const data = JSON.parse(line.slice(5).trim());
+                            handleImportingSSE(data, totalToImport);
+                        } catch (e) {
+                            console.error('Error parsing SSE data:', e, line);
+                        }
                     }
                 }
             }
-        }
-    } catch (error) {
-        console.error('Import error:', error);
-        closeModal('importingProgressModal');
-        showToast('Erreur lors de l\'import', 'error');
-    }
-}
-
-// Handle importing SSE events
-function handleImportingSSE(data, total) {
-    switch(data.type) {
-        case 'init':
-            document.getElementById('importingProgressText').textContent = `0 / ${data.total} importées`;
-            break;
-
-        case 'progress':
-            const percent = total > 0 ? Math.round((data.current / total) * 100) : 0;
-            document.getElementById('importingProgressBar').style.width = `${percent}%`;
-            document.getElementById('importingProgressText').textContent = `${data.current} / ${total} importées`;
-
-            const badgeClass = data.action === 'created' ? 'badge-success' : 'badge-info';
-            const log = document.getElementById('importingLiveLog');
-            const logEntry = document.createElement('div');
-            logEntry.className = 'log-entry';
-            logEntry.innerHTML = `<span class="badge ${badgeClass}">${data.action}</span> ${escapeHtml(data.title)}`;
-            log.appendChild(logEntry);
-            log.scrollTop = log.scrollHeight;
-            break;
-
-        case 'error':
-            const errorLog = document.getElementById('importingLiveLog');
-            const errorEntry = document.createElement('div');
-            errorEntry.className = 'log-entry error';
-            errorEntry.innerHTML = `<span class="badge badge-danger">error</span> ${escapeHtml(data.message || 'Unknown error')}`;
-            errorLog.appendChild(errorEntry);
-            break;
-
-        case 'complete':
+        } catch (error) {
+            console.error('Import error:', error);
             closeModal('importingProgressModal');
-            showResults(data.created, data.updated, data.errors);
-            break;
-    }
-}
-
-// Step 5: Show final results
-function showResults(created, updated, errors) {
-    document.getElementById('createdCount').textContent = created || 0;
-    document.getElementById('updatedCount').textContent = updated || 0;
-    document.getElementById('errorsCount').textContent = errors || 0;
-
-    // Show/hide error section
-    const errorSection = document.getElementById('errorSection');
-    if (errors > 0) {
-        errorSection.style.display = 'block';
-    } else {
-        errorSection.style.display = 'none';
+            showToast('Erreur lors de l\'import', 'error');
+        }
     }
 
-    openModal('importResultsModal');
+    // Handle importing SSE events
+    function handleImportingSSE(data, total) {
+        switch (data.type) {
+            case 'init':
+                document.getElementById('importingProgressText').textContent = `0 / ${data.total} importées`;
+                break;
 
-    // Reload sessions list to show the completed import
+            case 'progress':
+                const percent = total > 0 ? Math.round((data.current / total) * 100) : 0;
+                document.getElementById('importingProgressBar').style.width = `${percent}%`;
+                document.getElementById('importingProgressText').textContent = `${data.current} / ${total} importées`;
+
+                const badgeClass = data.action === 'created' ? 'badge-success' : 'badge-info';
+                const log = document.getElementById('importingLiveLog');
+                const logEntry = document.createElement('div');
+                logEntry.className = 'log-entry';
+                logEntry.innerHTML = `<span class="badge ${badgeClass}">${data.action}</span> ${escapeHtml(data.title)}`;
+                log.appendChild(logEntry);
+                log.scrollTop = log.scrollHeight;
+                break;
+
+            case 'error':
+                const errorLog = document.getElementById('importingLiveLog');
+                const errorEntry = document.createElement('div');
+                errorEntry.className = 'log-entry error';
+                errorEntry.innerHTML = `<span class="badge badge-danger">error</span> ${escapeHtml(data.message || 'Unknown error')}`;
+                errorLog.appendChild(errorEntry);
+                break;
+
+            case 'complete':
+                closeModal('importingProgressModal');
+                showResults(data.created, data.updated, data.errors);
+                break;
+        }
+    }
+
+    // Step 5: Show final results
+    function showResults(created, updated, errors) {
+        document.getElementById('createdCount').textContent = created || 0;
+        document.getElementById('updatedCount').textContent = updated || 0;
+        document.getElementById('errorsCount').textContent = errors || 0;
+
+        // Show/hide error section
+        const errorSection = document.getElementById('errorSection');
+        if (errors > 0) {
+            errorSection.style.display = 'block';
+        } else {
+            errorSection.style.display = 'none';
+        }
+
+        openModal('importResultsModal');
+
+        // Reload sessions list to show the completed import
+        loadSessions();
+
+        // Reset state
+        currentSessionId = null;
+        previewData = null;
+
+        // Reset form
+        document.getElementById('importCitationsForm').reset();
+    }
+
+    // ===== PoP Session Resume Handlers =====
+
+    // State for resume workflow
+    let resumeSessionState = null;
+    let resumeAction = null;  // 'filtering' | 'import' | 'preview'
+
+    /**
+     * Handle click on a PoP session - fetch state and show appropriate modal.
+     * @param {number} sessionId - Session ID from database
+     * @param {string} status - Current session status
+     */
+    async function handlePopSessionClick(sessionId, status) {
+        console.log('[PoP] handlePopSessionClick called:', { sessionId, status });
+        try {
+            // Fetch session state from API
+            console.log('[PoP] Fetching session state from /api/sessions/' + sessionId + '/state');
+            const response = await fetch(`/api/sessions/${sessionId}/state`, {
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (!response.ok) {
+                const data = await response.json();
+                console.error('[PoP] API error:', data);
+                throw new Error(data.detail || 'Failed to load session state');
+            }
+
+            resumeSessionState = await response.json();
+            console.log('[PoP] Session state loaded:', resumeSessionState);
+            currentSessionId = sessionId;
+
+            // Determine action based on state
+            const filtering = resumeSessionState.filtering;
+            const importing = resumeSessionState.import;
+
+            // Update modal with session info
+            document.getElementById('resumeCollectionName').textContent = resumeSessionState.config?.collection_name || '-';
+            document.getElementById('resumeModel').textContent = resumeSessionState.config?.model || 'Défaut';
+
+            // Update filtering section
+            const filteringPercent = filtering.total > 0 ? Math.round((filtering.progress / filtering.total) * 100) : 0;
+            document.getElementById('resumeFilteringProgress').textContent = filtering.progress;
+            document.getElementById('resumeFilteringTotal').textContent = filtering.total;
+            document.getElementById('resumeFilteringRelevant').textContent = filtering.relevant;
+            document.getElementById('resumeFilteringSkipped').textContent = filtering.skipped;
+            document.getElementById('resumeFilteringBar').style.width = `${filteringPercent}%`;
+
+            const filteringSection = document.getElementById('resumeFilteringSection');
+            filteringSection.classList.remove('completed', 'in-progress');
+            if (filtering.progress === filtering.total && filtering.total > 0) {
+                filteringSection.classList.add('completed');
+            } else if (filtering.progress > 0) {
+                filteringSection.classList.add('in-progress');
+            }
+
+            // Update import section
+            const importSection = document.getElementById('resumeImportSection');
+            if (filtering.progress === filtering.total && filtering.relevant > 0) {
+                importSection.style.display = 'block';
+                const importPercent = importing.total > 0 ? Math.round((importing.progress / importing.total) * 100) : 0;
+                document.getElementById('resumeImportProgress').textContent = importing.progress;
+                document.getElementById('resumeImportTotal').textContent = importing.total;
+                document.getElementById('resumeImportCreated').textContent = importing.created;
+                document.getElementById('resumeImportUpdated').textContent = importing.updated;
+                document.getElementById('resumeImportBar').style.width = `${importPercent}%`;
+
+                importSection.classList.remove('completed', 'in-progress');
+                if (importing.progress === importing.total && importing.total > 0) {
+                    importSection.classList.add('completed');
+                } else if (importing.progress > 0) {
+                    importSection.classList.add('in-progress');
+                }
+            } else {
+                importSection.style.display = 'none';
+            }
+
+            // Determine action and update button
+            const actionBtn = document.getElementById('resumeActionBtn');
+            const actionText = document.getElementById('resumeActionText');
+
+            if (filtering.can_resume) {
+                // Filtering incomplete - resume filtering
+                resumeAction = 'filtering';
+                actionText.textContent = `Le filtrage a été interrompu. ${filtering.total - filtering.progress} citations restantes à analyser.`;
+                actionBtn.innerHTML = '<i class="bi bi-play-fill"></i> Reprendre le filtrage';
+                actionBtn.className = 'btn btn-primary';
+            } else if (importing.can_resume) {
+                // Import incomplete - resume import
+                resumeAction = 'import';
+                actionText.textContent = `L'import a été interrompu. ${importing.total - importing.progress} citations restantes à importer.`;
+                actionBtn.innerHTML = '<i class="bi bi-play-fill"></i> Reprendre l\'import';
+                actionBtn.className = 'btn btn-primary';
+            } else if (filtering.progress === filtering.total && filtering.relevant > 0 && importing.progress === 0) {
+                // Filtering done, import not started - show preview
+                resumeAction = 'preview';
+                actionText.textContent = `Filtrage terminé. ${filtering.relevant} citations pertinentes prêtes pour l'import.`;
+                actionBtn.innerHTML = '<i class="bi bi-eye"></i> Voir la sélection';
+                actionBtn.className = 'btn btn-primary';
+            } else if (importing.progress === importing.total && importing.total > 0) {
+                // Everything complete
+                resumeAction = 'complete';
+                actionText.textContent = 'Import terminé. Session complète.';
+                actionBtn.innerHTML = '<i class="bi bi-check-circle"></i> Terminé';
+                actionBtn.className = 'btn btn-success';
+                actionBtn.disabled = true;
+            } else if (filtering.progress === 0) {
+                // Not started - start filtering
+                resumeAction = 'filtering';
+                actionText.textContent = `${filtering.total} citations à analyser.`;
+                actionBtn.innerHTML = '<i class="bi bi-play-fill"></i> Démarrer le filtrage';
+                actionBtn.className = 'btn btn-primary';
+            } else {
+                // Edge case
+                resumeAction = null;
+                actionText.textContent = 'État de la session indéterminé.';
+                actionBtn.innerHTML = 'Fermer';
+                actionBtn.className = 'btn btn-secondary';
+            }
+
+            actionBtn.disabled = (resumeAction === 'complete');
+
+            console.log('[PoP] Opening resumeSessionModal with action:', resumeAction);
+            openModal('resumeSessionModal');
+
+        } catch (error) {
+            console.error('[PoP] Error loading session state:', error);
+            showToast(error.message || 'Erreur lors du chargement de la session', 'error');
+        }
+    }
+
+    /**
+     * Execute the determined resume action.
+     */
+    async function executeResumeAction() {
+        closeModal('resumeSessionModal');
+
+        switch (resumeAction) {
+            case 'filtering':
+                // Start/resume filtering with SSE
+                startFiltering();
+                break;
+
+            case 'import':
+                // Resume import - first load preview then start import
+                await loadPreviewForResume();
+                break;
+
+            case 'preview':
+                // Show preview for selection
+                const filtering = resumeSessionState.filtering;
+                await loadPreviewAndShow(filtering.relevant, filtering.skipped);
+                break;
+
+            case 'complete':
+                // Nothing to do
+                break;
+
+            default:
+                showToast('Action non reconnue', 'error');
+        }
+    }
+
+    /**
+     * Load preview and automatically resume import for remaining items.
+     */
+    async function loadPreviewForResume() {
+        try {
+            const response = await fetch(`/api/sessions/${currentSessionId}/preview`, {
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to load preview');
+            }
+
+            previewData = await response.json();
+            const filtering = resumeSessionState.filtering;
+            const importing = resumeSessionState.import;
+
+            // Show preview modal with info about resume
+            document.getElementById('relevantCount').textContent = filtering.relevant;
+            document.getElementById('skippedCount').textContent = filtering.skipped;
+
+            // Populate lists
+            populateRelevantList(previewData.relevant || []);
+            populateSkippedList(previewData.skipped || []);
+
+            // Pre-check only items not yet imported
+            // The import endpoint will automatically skip already-imported items
+            document.querySelectorAll('.relevant-checkbox').forEach(cb => {
+                cb.checked = true;
+            });
+            updateSelectedCount();
+
+            showTab('relevant');
+
+            // Show info about resume
+            showToast(`Import reprendra depuis la citation ${importing.progress + 1}`, 'info');
+
+            openModal('previewCitationsModal');
+
+        } catch (error) {
+            console.error('Error loading preview for resume:', error);
+            showToast('Erreur lors du chargement', 'error');
+        }
+    }
+
+    // Load data on page load
+    loadMembers();
     loadSessions();
-
-    // Reset state
-    currentSessionId = null;
-    previewData = null;
-
-    // Reset form
-    document.getElementById('importCitationsForm').reset();
-}
-
-// Load data on page load
-loadMembers();
-loadSessions();
 </script>
 {% endblock %}

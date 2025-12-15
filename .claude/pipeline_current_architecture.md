@@ -1,7 +1,7 @@
 # Architecture actuelle du pipeline RAGpy
 
 **Date de création** : 2025-10-21
-**Dernière mise à jour** : 2025-12-07 (Sécurité credentials role-based ADMIN/NON-ADMIN)
+**Dernière mise à jour** : 2025-12-15 (Mise à jour Fonctionnalités Futures suite analyse code)
 **Objectif** : Documenter l'architecture existante complète avec analyse détaillée
 
 ---
@@ -522,17 +522,19 @@ def build_subprocess_env(user, required_keys=None):
 **Améliorations techniques** :
 
 - ~~**Containerisation Docker**~~ ✅ Implémenté (2025-11-24)
-- **Processing distribué** pour gros corpus (Celery/RQ)
-- **Cache intelligent** pour embeddings (Redis)
-- **Monitoring observabilité** (métriques, traces)
+- ~~**Processing distribué**~~ ✅ Implémenté (Celery + Redis)
+- ~~**Monitoring observabilité**~~ ✅ Implémenté (Métriques système + Health checks)
+- **Cache intelligent** pour embeddings (Redis) - *À faire*
+- **Optimisation stockage** : Compression vectorielle et déduplication avancée
 
 **Fonctionnalités utilisateur** :
 
 - ~~**Authentification multi-utilisateurs**~~ ✅ Implémenté (JWT + Resend)
-- **Import Bibliographique Avancé** : Publish or Perish → Filtrage LLM → Zotero (Spécifications validées)
-- **Gestion de projets** avec historique
-- **API REST complète** pour intégrations externes
-- **Tableau de bord** analytics et métriques
+- ~~**Import Bibliographique Avancé**~~ ✅ Implémenté (PoP → LLM Filtering → Zotero)
+- ~~**Gestion de projets**~~ ✅ Implémenté (CRUD + Membres + Rôles)
+- **Favoris et Collaboration avancée** (Partage de citations, Notes collaboratives)
+- **Dashboard analytique avancé** (Visualisation de clusters, stats corpus)
+- **API REST Publique** (Gestion de tokens API personnels)
 
 ---
 

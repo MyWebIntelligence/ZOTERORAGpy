@@ -48,6 +48,11 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Default LLM model (uses OpenRouter format by default)
+# Format "provider/model" → OpenRouter (e.g., google/gemini-2.5-flash)
+# Format "model" → OpenAI direct (e.g., gpt-4o-mini)
+DEFAULT_LLM_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
+
 # Valid Zotero item types
 VALID_ZOTERO_TYPES = {
     "journalArticle", "conferencePaper", "preprint", "book", "bookSection",
@@ -93,6 +98,7 @@ class ZoteroItemData(BaseModel):
     abstractNote: Optional[str] = None
     language: Optional[str] = None
     tags: Optional[List[Dict[str, str]]] = None
+    extra: Optional[str] = None  # For citation count and other metadata
 
     @field_validator('itemType')
     @classmethod
@@ -282,7 +288,7 @@ def _validate_filter_result(data: Dict) -> CitationFilterResult:
 
 def _call_llm_api(
     prompt: str,
-    model: str = "gpt-4o-mini",
+    model: str = DEFAULT_LLM_MODEL,
     temperature: float = 0.2,
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None
@@ -338,6 +344,108 @@ def _call_llm_api(
         raise ValueError(f"LLM API error: {str(e)}")
 
 
+async def pre_filter_citation(
+    citation: Dict,
+    project_name: str,
+    project_description: str,
+    collection_name: str,
+    collection_description: str,
+    model: str = DEFAULT_LLM_MODEL,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
+) -> bool:
+    """
+    Pré-filtrage rapide basé uniquement sur titre/abstract/source.
+
+    Cette fonction fait un test de pertinence AVANT le fetch web coûteux.
+    Elle utilise un prompt léger et retourne simplement True/False.
+
+    Args:
+        citation: Citation dictionary avec title, abstract, source, authors
+        project_name: Nom du projet de recherche
+        project_description: Description du projet
+        collection_name: Nom de la collection cible
+        collection_description: Description de la collection
+        model: Modèle LLM à utiliser
+        openai_api_key: Clé API OpenAI
+        openrouter_api_key: Clé API OpenRouter
+
+    Returns:
+        True si la citation semble pertinente, False sinon
+
+    Example:
+        >>> is_relevant = await pre_filter_citation(
+        ...     {"title": "Deep Learning", "abstract": "..."},
+        ...     "AI Research", "ML papers", "NLP", ""
+        ... )
+        >>> if is_relevant:
+        ...     # Fetch web content et faire filtrage complet
+    """
+    # Construire un prompt léger pour le pré-filtrage
+    title = citation.get("title", "")
+    abstract = citation.get("abstract", "")
+    source = citation.get("source", "")
+    authors = citation.get("authors", [])
+    if isinstance(authors, list):
+        authors_str = ", ".join(authors[:3])
+        if len(authors) > 3:
+            authors_str += " et al."
+    else:
+        authors_str = str(authors)
+
+    prompt = f"""Tu es un assistant de recherche. Détermine rapidement si cet article est pertinent pour le projet.
+
+PROJET: {project_name}
+DESCRIPTION: {project_description}
+COLLECTION: {collection_name} - {collection_description}
+
+ARTICLE:
+- Titre: {title}
+- Auteurs: {authors_str}
+- Source: {source}
+- Résumé: {abstract[:1000] if abstract else "Non disponible"}
+
+INSTRUCTIONS:
+- Réponds UNIQUEMENT par "RELEVANT" ou "NA"
+- RELEVANT = l'article correspond au sujet du projet/collection
+- NA = l'article n'est pas pertinent ou hors sujet
+
+RÉPONSE:"""
+
+    # Acquérir le semaphore global
+    semaphore = get_llm_semaphore()
+
+    async with semaphore:
+        try:
+            loop = asyncio.get_event_loop()
+            response_text = await loop.run_in_executor(
+                None,
+                lambda: _call_llm_api(
+                    prompt,
+                    model=model,
+                    temperature=0.1,  # Très déterministe
+                    openai_api_key=openai_api_key,
+                    openrouter_api_key=openrouter_api_key
+                )
+            )
+
+            # Parser la réponse simple
+            response_upper = response_text.strip().upper()
+            is_relevant = "RELEVANT" in response_upper and "NA" not in response_upper
+
+            logger.debug(
+                f"Pre-filter result for '{title[:40]}...': "
+                f"{'RELEVANT' if is_relevant else 'NA'}"
+            )
+            return is_relevant
+
+        except Exception as e:
+            logger.warning(f"Pre-filter failed for '{title[:30]}': {e}")
+            # En cas d'erreur, considérer comme potentiellement pertinent
+            # pour ne pas manquer d'articles
+            return True
+
+
 async def filter_citation_with_llm(
     citation: Dict,
     web_content: str,
@@ -346,7 +454,7 @@ async def filter_citation_with_llm(
     project_description: str,
     collection_name: str,
     collection_description: str,
-    model: str = "gpt-4o-mini",
+    model: str = DEFAULT_LLM_MODEL,
     max_retries: int = 1,
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None
@@ -466,6 +574,26 @@ async def filter_citation_with_llm(
                 original_title = citation.get("title")
                 if original_title and len(original_title) > len(zotero_item.get("title", "")):
                     zotero_item["title"] = original_title
+
+                # Inject citation count into extra field (citation:n format)
+                cites = citation.get("cites")
+                if cites is not None and isinstance(cites, int) and cites >= 0:
+                    existing_extra = zotero_item.get("extra", "") or ""
+                    citation_entry = f"citation:{cites}"
+                    if existing_extra:
+                        zotero_item["extra"] = f"{existing_extra}\n{citation_entry}"
+                    else:
+                        zotero_item["extra"] = citation_entry
+                    logger.debug(f"Added citation count to extra field: {citation_entry}")
+
+                # Clean up "N/A" values that LLM may generate
+                # Zotero API rejects these as invalid values
+                na_patterns = {"N/A", "n/a", "N.A.", "n.a.", "NA", "na", "None", "null", "undefined", "-"}
+                fields_to_clean = ["DOI", "ISSN", "ISBN", "pages", "volume", "issue", "callNumber"]
+                for field in fields_to_clean:
+                    if field in zotero_item and zotero_item[field] in na_patterns:
+                        logger.debug(f"Cleaning N/A value from field {field}")
+                        zotero_item[field] = ""
 
                 result["zotero_item"] = zotero_item
                 return result

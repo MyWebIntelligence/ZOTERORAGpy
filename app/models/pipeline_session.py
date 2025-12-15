@@ -41,6 +41,11 @@ class SessionStatus(str, Enum):
     FILTERING_CITATIONS = "filtering_citations"  # LLM filtering citations by relevance
     IMPORTING_CITATIONS = "importing_citations"  # Importing filtered citations to Zotero
 
+    # Resumable statuses (for crash recovery)
+    FILTERED = "filtered"                   # Filtering complete, ready for import
+    FILTERING_PAUSED = "filtering_paused"   # Filtering interrupted, can resume
+    IMPORTING_PAUSED = "importing_paused"   # Import interrupted, can resume
+
 
 class PipelineSession(Base):
     """
