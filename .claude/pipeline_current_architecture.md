@@ -109,25 +109,71 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"])
 
 ```mermaid
 graph TD
-    A[Sources multiples] --> B[Extraction normalisée]
-    B --> C[Document unifié]
-    C --> D[Chunking intelligent]
-    D --> E[Embeddings hybrides]
-    E --> F[Stockage vectoriel]
+    %% --- SOURCES ---
+    subgraph Sources
+        direction TB
+        A1[Zotero JSON + PDFs]
+        A2[CSV Direct]
+        A3[Fichiers Manuels]
+        A4[Publish or Perish JSON]
+    end
+
+    %% --- INGESTION & EXTRACTION ---
+    subgraph "Ingestion & Extraction"
+        direction TB
+        B1["<b>OCR Multi-provider & Extraction</b><br/><i>scripts/rad_dataframe.py</i><br/>process_dataframe()"]
+        B2["<b>Ingestion CSV directe</b><br/><i>ingestion/csv_ingestion.py</i><br/>ingest_csv()"]
+        B3["<b>Parsing & Filtering PoP</b><br/><i>app/routes/citations.py</i><br/>upload_pop_json() -> parse_pop_json()"]
+        B4["<b>LLM Filtering & Validation</b><br/><i>app/utils/citation_filter.py</i><br/>filter_citations_sse()"]
+        
+        A1 --> B1
+        A3 --> B1
+        A2 --> B2
+        A4 --> B3 --> B4
+    end
+
+    %% --- UNIFICATION ---
+    subgraph "Unification / Zotero Integration"
+        direction TB
+        C1["<b>Document Unifié (output.csv)</b><br/><i>core/document.py</i><br/>class Document"]
+        C2["<b>Import Zotero</b><br/><i>app/utils/zotero_client.py</i><br/>create_or_update_item()"]
+        C3["<b>PDF Download & Attach</b><br/><i>app/utils/pdf_downloader.py</i><br/>download_pdf() -> upload_file_attachment()"]
+        
+        B1 --> C1
+        B2 --> C1
+        B4 --"Sélection"--> C2 --> C3
+        C3 -.->|"Nouveaux PDFs"| B1
+    end
+
+    %% --- CHUNKING & EMBEDDINGS ---
+    subgraph "Processing Pipeline"
+        direction TB
+        D1["<b>Chunking Intelligent</b><br/><i>scripts/rad_chunk.py</i><br/>run_initial_phase() -> RecursiveTextSplitter"]
+        D2["<b>Recodage GPT (Conditionnel)</b><br/><i>scripts/rad_chunk.py</i><br/>recode_chunk_with_gpt()<br/>(Skip si Mistral/CSV)"]
+        
+        E1["<b>Embeddings Dense (OpenAI)</b><br/><i>scripts/rad_chunk.py</i><br/>run_dense_phase()<br/>text-embedding-3-large (3072D)"]
+        E2["<b>Embeddings Sparse (spaCy)</b><br/><i>scripts/rad_chunk.py</i><br/>run_sparse_phase()<br/>fr_core_news_md (TF-IDF)"]
+        
+        C1 --> D1 --> D2 --> E1 --> E2
+    end
+
+    %% --- STOCKAGE & APP ---
+    subgraph "Stockage & Application"
+        direction TB
+        F1["<b>Vector Databases</b><br/><i>scripts/rad_vectordb.py</i><br/>Pinecone / Weaviate / Qdrant"]
+        F2["<b>Applications RAG</b><br/>Search / Chat / Clustering"]
+        
+        E2 --> F1 --> F2
+    end
+
+    %% Styles
+    classDef source fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
+    classDef process fill:#fff3e0,stroke:#e65100,stroke-width:2px;
+    classDef storage fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px;
     
-    A1[Zotero JSON + PDFs] --> B1[OCR Multi-provider]
-    A2[CSV Direct] --> B2[Mapping colonnes]
-    A3[Fichiers manuels] --> B3[Traitement unifié]
-    
-    B1 --> C1[output.csv]
-    B2 --> C1
-    B3 --> C1
-    
-    C1 --> D1[RecursiveTextSplitter]
-    D1 --> D2[Recodage GPT conditionnel]
-    D2 --> E1[OpenAI dense 3072D]
-    E1 --> E2[spaCy sparse 100kD]
-    E2 --> F1[Pinecone/Weaviate/Qdrant]
+    class A1,A2,A3,A4 source;
+    class B1,B2,B3,B4,C1,C2,C3,D1,D2,E1,E2 process;
+    class F1,F2 storage;
 ```
 
 #### **Transformations de données critiques**
