@@ -599,10 +599,31 @@ async def delete_session(
             detail="Seul le propriétaire peut supprimer une session"
         )
 
-    # Delete files
+    # Delete session folder and associated files
+    session_folder_name = session.session_folder.split("/")[0] if "/" in session.session_folder else session.session_folder
     session_path = os.path.join(UPLOAD_DIR, session.session_folder)
+
+    # Delete the session directory
     if os.path.exists(session_path):
         shutil.rmtree(session_path)
+
+    # Also delete the parent folder if session_folder contained a subdirectory
+    if "/" in session.session_folder:
+        parent_path = os.path.join(UPLOAD_DIR, session_folder_name)
+        if os.path.exists(parent_path) and os.path.isdir(parent_path):
+            # Check if directory is empty or only contains session-related files
+            try:
+                remaining = os.listdir(parent_path)
+                if not remaining:
+                    os.rmdir(parent_path)
+            except OSError:
+                pass
+
+    # Delete the original ZIP file if it exists (uploaded archives)
+    for ext in [".zip", ".ZIP", ".tar.gz", ".tgz"]:
+        zip_file_path = os.path.join(UPLOAD_DIR, f"{session_folder_name}{ext}")
+        if os.path.exists(zip_file_path):
+            os.remove(zip_file_path)
 
     # Update project if this was the active session
     if project.session_folder == session.session_folder:

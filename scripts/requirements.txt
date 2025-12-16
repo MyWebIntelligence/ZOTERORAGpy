@@ -58,3 +58,6 @@ pytest==8.3.3
 httpx<=0.27.2
 chardet==5.2.0
 locust==2.29.1
+
+# Headless Browser (for robust PDF downloading)
+playwright>=1.49.0

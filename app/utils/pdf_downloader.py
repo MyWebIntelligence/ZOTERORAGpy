@@ -21,6 +21,7 @@ import hashlib
 import logging
 import shutil
 import time
+import random
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse, unquote
@@ -48,6 +49,26 @@ except ImportError:
 
 # Configure logger
 logger = logging.getLogger(__name__)
+
+# List of 10 credible, modern User-Agents (Chrome, Firefox, Safari on Windows/Mac/Linux)
+USER_AGENTS = [
+    # Chrome on Windows
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    # Chrome on macOS
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    # Firefox on Windows
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
+    # Firefox on macOS
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:123.0) Gecko/20100101 Firefox/123.0',
+    # Safari on macOS
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+    # Edge on Windows
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0'
+]
 
 
 @dataclass
@@ -118,10 +139,24 @@ async def download_pdf(
 
     for attempt in range(max_retries):
         try:
+            # Select a random user agent for this attempt
+            current_user_agent = random.choice(USER_AGENTS)
+
             async with aiohttp.ClientSession() as session:
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'application/pdf,*/*'
+                    'User-Agent': current_user_agent,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Referer': 'https://www.google.com/',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'cross-site',
+                    'Sec-Fetch-User': '?1',
+                    'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"macOS"'
                 }
 
                 async with session.get(
@@ -133,7 +168,10 @@ async def download_pdf(
 
                     # Check HTTP status
                     if response.status == 403:
-                        logger.warning(f"Access forbidden (403) for: {fulltext_url[:100]}")
+                        logger.warning(f"Access forbidden (403) for: {fulltext_url[:100]} - falling back to browser/conversion")
+                        if convert_html:
+                            return await _convert_html_to_pdf(fulltext_url, timeout)
+                        
                         return PDFDownloadResult(
                             success=False,
                             source="failed",
@@ -353,9 +391,148 @@ def _pdfkit_convert(url: str) -> Optional[bytes]:
         return None
 
 
+# Common cookie consent button selectors (multi-language support)
+COOKIE_ACCEPT_SELECTORS = [
+    # Text-based selectors (English)
+    'button:has-text("Accept")',
+    'button:has-text("Accept all")',
+    'button:has-text("Accept All")',
+    'button:has-text("I agree")',
+    'button:has-text("Agree")',
+    'button:has-text("OK")',
+    'button:has-text("Got it")',
+    'button:has-text("Allow")',
+    'button:has-text("Allow all")',
+    # Text-based selectors (French)
+    'button:has-text("Accepter")',
+    'button:has-text("Tout accepter")',
+    'button:has-text("J\'accepte")',
+    'button:has-text("Autoriser")',
+    # Text-based selectors (German)
+    'button:has-text("Akzeptieren")',
+    'button:has-text("Alle akzeptieren")',
+    # ARIA attributes
+    '[aria-label*="accept" i]',
+    '[aria-label*="Accept" i]',
+    '[aria-label*="consent" i]',
+    '[aria-label*="cookie" i]',
+    # Common class/ID patterns
+    '.cookie-accept',
+    '.accept-cookies',
+    '.cookie-consent-accept',
+    '#accept-cookies',
+    '#cookie-accept',
+    '#onetrust-accept-btn-handler',
+    '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+    '.cc-accept',
+    '.cc-allow',
+    # Data attributes
+    '[data-action="accept"]',
+    '[data-consent="accept"]',
+    '[data-cookieconsent="accept"]',
+    # Generic patterns for cookie/consent containers
+    '[class*="cookie"] button:has-text("Accept")',
+    '[class*="consent"] button:has-text("Accept")',
+    '[class*="cookie"] button:has-text("OK")',
+    '[class*="gdpr"] button:has-text("Accept")',
+]
+
+
+async def _dismiss_popups(page, timeout_ms: int = 3000) -> bool:
+    """
+    Attempt to dismiss cookie consent banners and other popups.
+
+    Uses a layered strategy:
+    1. Try clicking common accept buttons (with short timeout per selector)
+    2. Fallback to hiding overlay elements via CSS injection
+
+    Args:
+        page: Playwright page object
+        timeout_ms: Max time to wait for each selector in milliseconds
+
+    Returns:
+        True if any popup was dismissed, False otherwise
+    """
+    dismissed = False
+
+    # Layer 1: Try clicking common accept buttons
+    for selector in COOKIE_ACCEPT_SELECTORS:
+        try:
+            # Check if element exists and is visible (short timeout)
+            locator = page.locator(selector).first
+            if await locator.is_visible(timeout=500):
+                await locator.click(timeout=timeout_ms)
+                logger.debug(f"Clicked cookie consent button: {selector}")
+                dismissed = True
+                # Wait for popup to disappear
+                await asyncio.sleep(0.3)
+                break
+        except Exception:
+            # Element not found or not clickable, try next selector
+            continue
+
+    # Layer 2: CSS injection to hide remaining overlays
+    try:
+        hidden_count = await page.evaluate("""
+            () => {
+                let hiddenCount = 0;
+                const hideSelectors = [
+                    '[class*="cookie"]',
+                    '[id*="cookie"]',
+                    '[class*="consent"]',
+                    '[id*="consent"]',
+                    '[class*="gdpr"]',
+                    '[id*="gdpr"]',
+                    '[class*="cc-"]',
+                    '[class*="CookieConsent"]',
+                    '[class*="cookie-banner"]',
+                    '[class*="cookie-notice"]',
+                    '[role="dialog"][aria-modal="true"]',
+                ];
+
+                hideSelectors.forEach(sel => {
+                    document.querySelectorAll(sel).forEach(el => {
+                        // Only hide if it's an overlay-like element (large, covering viewport)
+                        const rect = el.getBoundingClientRect();
+                        const isOverlay = (
+                            rect.width > window.innerWidth * 0.3 ||
+                            rect.height > 100 ||
+                            el.style.position === 'fixed' ||
+                            window.getComputedStyle(el).position === 'fixed'
+                        );
+                        if (isOverlay && el.offsetParent !== null) {
+                            el.style.display = 'none';
+                            hiddenCount++;
+                        }
+                    });
+                });
+
+                // Restore body scroll if blocked by overlay
+                document.body.style.overflow = 'auto';
+                document.documentElement.style.overflow = 'auto';
+
+                return hiddenCount;
+            }
+        """)
+
+        if hidden_count > 0:
+            logger.debug(f"Hidden {hidden_count} overlay elements via CSS injection")
+            dismissed = True
+
+    except Exception as e:
+        logger.debug(f"CSS injection for popups failed: {e}")
+
+    return dismissed
+
+
 async def _playwright_convert(url: str, timeout: int = 60) -> Optional[bytes]:
     """
     Convert URL to PDF using Playwright (async).
+
+    Includes automatic handling of:
+    - JavaScript alert/confirm/prompt dialogs
+    - Cookie consent banners and GDPR popups
+    - Modal overlays
 
     Args:
         url: URL to convert
@@ -369,13 +546,28 @@ async def _playwright_convert(url: str, timeout: int = 60) -> Optional[bytes]:
             browser = await p.chromium.launch(headless=True)
 
             try:
-                page = await browser.new_page()
+                # Use a random user agent for the browser context
+                ua = random.choice(USER_AGENTS)
+                logger.info(f"Playwright using User-Agent: {ua[:50]}...")
+
+                context = await browser.new_context(user_agent=ua)
+                page = await context.new_page()
+
+                # Auto-dismiss JavaScript dialogs (alert, confirm, prompt)
+                page.on('dialog', lambda dialog: asyncio.create_task(dialog.dismiss()))
 
                 # Navigate with timeout
                 await page.goto(url, wait_until='networkidle', timeout=timeout * 1000)
 
-                # Wait a bit for any remaining JS
-                await asyncio.sleep(1)
+                # Wait a bit for any remaining JS to settle
+                await asyncio.sleep(0.5)
+
+                # Attempt to dismiss cookie consent banners and other popups
+                popup_dismissed = await _dismiss_popups(page)
+                if popup_dismissed:
+                    logger.debug("Cookie consent or popup was dismissed")
+                    # Wait for DOM to stabilize after dismissing popups
+                    await asyncio.sleep(0.5)
 
                 # Generate PDF
                 pdf_bytes = await page.pdf(
