@@ -300,10 +300,12 @@ def create_child_note(
                 new_version = response.headers.get("Last-Modified-Version")
 
                 # Extract the created note key
-                # According to Zotero API docs, successful["0"] contains the itemKey directly
-                # Response format: {"successful": {"0": "<itemKey>"}, "unchanged": {}, "failed": {}}
+                # Zotero API v3 returns full item object in successful["0"], extract the key
+                # Response format: {"successful": {"0": {"key": "...", "version": ..., ...}}, ...}
                 if "successful" in result and "0" in result["successful"]:
-                    note_key = result["successful"]["0"]
+                    created_item = result["successful"]["0"]
+                    # Handle both dict (full object) and string (legacy/edge case) responses
+                    note_key = created_item["key"] if isinstance(created_item, dict) else created_item
                     logger.info(f"Successfully created note {note_key} for item {item_key}")
                     return {
                         "success": True,
@@ -1639,9 +1641,11 @@ def create_or_update_item(
                     }
 
                 # Extract created item key
+                # Zotero API v3 returns full item object in successful["0"], extract the key
                 if "successful" in result and "0" in result["successful"]:
-                    item_key = result["successful"]["0"]
-                    logger.info(f"Created new item: {item_key}")
+                    created_item = result["successful"]["0"]
+                    # Handle both dict (full object) and string (legacy/edge case) responses
+                    item_key = created_item["key"] if isinstance(created_item, dict) else created_item
                     logger.info(f"Created new item: {item_key}")
                     return {
                         "success": True,

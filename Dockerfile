@@ -27,7 +27,8 @@ COPY scripts/requirements.txt /app/requirements.txt
 
 # Installation des dépendances Python
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    playwright install --with-deps chromium
 
 # Téléchargement du modèle spaCy français
 RUN python -m spacy download fr_core_news_md

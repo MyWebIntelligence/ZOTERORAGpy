@@ -65,30 +65,61 @@ def delete_session_files(session_folder: str) -> Tuple[bool, str]:
     """
     Delete all files associated with a session folder.
 
+    This includes the session directory and any associated archive files
+    (ZIP, tar.gz) that were uploaded.
+
     Args:
-        session_folder: The session folder name (e.g., 'uuid_filename').
+        session_folder: The session folder name (e.g., 'uuid_filename' or 'uuid_filename/subdir').
 
     Returns:
         Tuple of (success: bool, message: str).
     """
     uploads_dir = get_uploads_dir()
+
+    # Handle session folders that contain subdirectories (e.g., 'uuid_name/extracted')
+    session_folder_name = session_folder.split("/")[0] if "/" in session_folder else session_folder
     session_path = os.path.join(uploads_dir, session_folder)
 
-    if not os.path.exists(session_path):
-        return True, f"Session folder already deleted: {session_folder}"
+    total_size = 0
+    file_count = 0
+    deleted_items = []
 
     try:
-        # Get folder size before deletion (for logging)
-        total_size = 0
-        file_count = 0
-        for dirpath, dirnames, filenames in os.walk(session_path):
-            for filename in filenames:
-                filepath = os.path.join(dirpath, filename)
-                total_size += os.path.getsize(filepath)
-                file_count += 1
+        # Delete the session directory if it exists
+        if os.path.exists(session_path):
+            for dirpath, dirnames, filenames in os.walk(session_path):
+                for filename in filenames:
+                    filepath = os.path.join(dirpath, filename)
+                    total_size += os.path.getsize(filepath)
+                    file_count += 1
 
-        # Delete the folder and all contents
-        shutil.rmtree(session_path)
+            shutil.rmtree(session_path)
+            deleted_items.append(f"folder:{session_folder}")
+
+        # Also delete the parent folder if session_folder contained a subdirectory
+        if "/" in session_folder:
+            parent_path = os.path.join(uploads_dir, session_folder_name)
+            if os.path.exists(parent_path) and os.path.isdir(parent_path):
+                try:
+                    remaining = os.listdir(parent_path)
+                    if not remaining:
+                        os.rmdir(parent_path)
+                        deleted_items.append(f"parent:{session_folder_name}")
+                except OSError:
+                    pass
+
+        # Delete the original archive files if they exist (uploaded ZIP/tar.gz)
+        for ext in [".zip", ".ZIP", ".tar.gz", ".tgz"]:
+            archive_path = os.path.join(uploads_dir, f"{session_folder_name}{ext}")
+            if os.path.exists(archive_path):
+                archive_size = os.path.getsize(archive_path)
+                os.remove(archive_path)
+                total_size += archive_size
+                file_count += 1
+                deleted_items.append(f"archive:{session_folder_name}{ext}")
+
+        if not deleted_items:
+            return True, f"Session folder already deleted: {session_folder}"
 
         size_mb = total_size / (1024 * 1024)
         message = f"Deleted {file_count} files ({size_mb:.2f} MB) from {session_folder}"
