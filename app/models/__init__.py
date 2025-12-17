@@ -10,9 +10,19 @@ Models:
 - `Project`: Project management and organization.
 - `ProjectMember`: Many-to-many relationship for project collaboration.
 - `AuditLog`: System audit logging for security and tracking.
+- `BackgroundTask`: Long-running background task tracking.
 """
 from app.models.user import User
 from app.models.project import Project, ProjectMember
 from app.models.audit import AuditLog
+from app.models.background_task import BackgroundTask, TaskStatus, TaskType
 
-__all__ = ["User", "Project", "ProjectMember", "AuditLog"]
+__all__ = [
+    "User",
+    "Project",
+    "ProjectMember",
+    "AuditLog",
+    "BackgroundTask",
+    "TaskStatus",
+    "TaskType"
+]
