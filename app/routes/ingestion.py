@@ -19,6 +19,7 @@ import logging
 import sys
 import json
 import csv
+import unicodedata
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -32,6 +33,115 @@ from app.models.project import Project
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# =============================================================================
+# ZIP Filename Encoding Fix
+# =============================================================================
+# macOS Zotero exports use NFD (decomposed) Unicode for filenames.
+# When extracted on some systems, the encoding gets corrupted.
+# This map fixes common corruption patterns.
+
+FILENAME_CORRUPTION_MAP = {
+    # Combining accent sequences (macOS NFD decomposition artifacts)
+    'e\u0308\u0300': 'è', 'e\u0308': 'é', 'e\u0301': 'é', 'e\u0300': 'è',
+    'e╠ü': 'é', 'e╠Ç': 'è',
+    'a╠Ç': 'à', 'a\u0300': 'à',
+    'i\u0302': 'î', 'o\u0302': 'ô',
+    'u\u0300': 'ù', 'u\u0302': 'û',
+    'c╠º': 'ç', 'c\u0327': 'ç',
+    # Windows CP1252/UTF-8 misinterpretation artifacts
+    'ΓÇÖ': "'", 'ΓÇô': '–', 'ΓÇ£': '"', 'ΓÇ¥': '"',
+    'ΓÇª': '…', 'ΓÇö': '—',
+    '┬½': '«', '┬╗': '»',
+    'Γé¼': '€',
+    # Double-encoded accents
+    'é╠ü': 'é', 'è╠Ç': 'è',
+    # Explicit NFD sequences
+    '\u0065\u0301': 'é', '\u0065\u0300': 'è',
+    '\u0061\u0300': 'à', '\u0063\u0327': 'ç',
+}
+
+
+def fix_zip_filename_encoding(filename: str) -> str:
+    """
+    Fix corrupted filename encoding from ZIP extraction.
+
+    This handles common issues when extracting ZIP files created on macOS
+    with French/accented characters:
+    - NFD (decomposed) Unicode normalization
+    - CP437/UTF-8 encoding mismatches
+    - Windows codepage artifacts
+
+    Args:
+        filename: The potentially corrupted filename
+
+    Returns:
+        The corrected filename with proper Unicode (NFC normalized)
+    """
+    fixed = filename
+
+    # Apply corruption fixes (longer patterns first for correct replacement)
+    for corrupt, correct in sorted(FILENAME_CORRUPTION_MAP.items(), key=lambda x: -len(x[0])):
+        fixed = fixed.replace(corrupt, correct)
+
+    # Normalize to NFC (composed form) - this is the standard for most systems
+    fixed = unicodedata.normalize('NFC', fixed)
+
+    return fixed
+
+
+def extract_zip_with_encoding_fix(zip_path: str, dst_dir: str) -> int:
+    """
+    Extract ZIP file with automatic filename encoding correction.
+
+    This function extracts files from a ZIP archive while fixing common
+    encoding issues with French/accented filenames.
+
+    Args:
+        zip_path: Path to the ZIP file
+        dst_dir: Destination directory for extraction
+
+    Returns:
+        Number of files that had their names corrected
+
+    Raises:
+        zipfile.BadZipFile: If the ZIP file is invalid
+    """
+    corrected_count = 0
+
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        for member in z.namelist():
+            # Fix the filename encoding
+            fixed_name = fix_zip_filename_encoding(member)
+
+            # Track if we made corrections
+            if fixed_name != member:
+                corrected_count += 1
+                logger.debug(f"Fixed filename: {member} -> {fixed_name}")
+
+            # Build the target path
+            target_path = os.path.join(dst_dir, fixed_name)
+
+            # Handle directories
+            if member.endswith('/'):
+                os.makedirs(target_path, exist_ok=True)
+                continue
+
+            # Ensure parent directory exists
+            parent_dir = os.path.dirname(target_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+
+            # Extract the file content and write with corrected name
+            with z.open(member) as src, open(target_path, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+
+    if corrected_count > 0:
+        logger.info(f"Fixed encoding for {corrected_count} filenames during ZIP extraction")
+
+    return corrected_count
+
 
 # --- Configuration for Stage Uploads ---
 BASE_CHUNK_OUTPUT_NAME = "output"
@@ -115,9 +225,11 @@ async def upload_zip(
     os.makedirs(dst_dir, exist_ok=True)
 
     try:
-        with zipfile.ZipFile(zip_path, 'r') as z:
-            z.extractall(dst_dir)
+        # Use custom extraction with filename encoding fix for French/accented characters
+        corrected_count = extract_zip_with_encoding_fix(zip_path, dst_dir)
         logger.info(f"ZIP content extracted to initial directory: {dst_dir}")
+        if corrected_count > 0:
+            logger.info(f"Corrected encoding for {corrected_count} filenames (macOS/French character fix)")
     except zipfile.BadZipFile:
         logger.error(f"Failed to extract ZIP: Bad ZIP file {zip_path}")
         if os.path.exists(dst_dir):
