@@ -32,6 +32,42 @@ logger = logging.getLogger(__name__)
 SENTINEL_PREFIX = "ragpy-note-id:"
 
 # =============================================================================
+# Note Mode Configuration
+# =============================================================================
+
+# Mapping of note modes to template files
+TEMPLATE_MAP = {
+    "extended": "zotero_prompt.md",
+    "short": "zotero_prompt_short.md",
+    "pedagogique": "zotero_prompt_pedagogique.md",
+    "evaluation": "zotero_prompt_evaluation.md"
+}
+
+# Mapping of note modes to display prefixes (for Zotero note identification)
+NOTE_MODE_PREFIX = {
+    "extended": "[FICHE]",
+    "pedagogique": "[CLAIR]",
+    "evaluation": "[EVAL]",
+    "short": ""  # No prefix for short summaries
+}
+
+# Mapping of note modes to max_tokens
+NOTE_MODE_MAX_TOKENS = {
+    "extended": 16000,
+    "short": 2000,
+    "pedagogique": 10000,
+    "evaluation": 10000
+}
+
+# Display names for UI
+NOTE_MODE_DISPLAY = {
+    "extended": "Fiche de lecture [FICHE]",
+    "pedagogique": "Fiche pédagogique [CLAIR]",
+    "evaluation": "Grille d'évaluation [EVAL]",
+    "short": "Résumé court"
+}
+
+# =============================================================================
 # Global LLM Semaphore for Concurrency Control
 # =============================================================================
 _llm_semaphore: Optional[asyncio.Semaphore] = None
@@ -134,38 +170,81 @@ def _detect_language(metadata: Dict) -> str:
     return "fr"
 
 
-def _load_prompt_template(extended_analysis: bool = True) -> str:
+def _load_prompt_template(mode: str = "extended") -> str:
     """
-    Load the prompt template from zotero_prompt.md or zotero_prompt_short.md file.
+    Load the prompt template based on the specified mode.
 
     Args:
-        extended_analysis: If True, load exhaustive analysis template (zotero_prompt.md)
-                          If False, load short summary template (zotero_prompt_short.md)
+        mode: Note generation mode. One of:
+              - "extended": Full analysis template (zotero_prompt.md)
+              - "short": Quick summary template (zotero_prompt_short.md)
+              - "pedagogique": Pedagogical template for L3 students (zotero_prompt_pedagogique.md)
+              - "evaluation": Peer review evaluation grid (zotero_prompt_evaluation.md)
 
     Returns:
         Prompt template string with placeholders
 
     Raises:
         FileNotFoundError: If the prompt file is not found
+        ValueError: If the mode is not recognized
     """
+    # Validate mode
+    if mode not in TEMPLATE_MAP:
+        logger.warning(f"Unknown mode '{mode}', falling back to 'extended'")
+        mode = "extended"
+
     # Get the directory of this file
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # Choose template based on analysis mode
-    template_filename = "zotero_prompt.md" if extended_analysis else "zotero_prompt_short.md"
+    # Choose template based on mode
+    template_filename = TEMPLATE_MAP[mode]
     prompt_file = os.path.join(current_dir, template_filename)
 
     try:
         with open(prompt_file, "r", encoding="utf-8") as f:
             template = f.read()
-        logger.info(f"Loaded prompt template from {prompt_file} (extended: {extended_analysis})")
+        logger.info(f"Loaded prompt template from {prompt_file} (mode: {mode})")
         return template
     except FileNotFoundError:
         logger.error(f"Prompt template not found at {prompt_file}")
         raise
 
 
-def _build_prompt(metadata: Dict, text_content: str, language: str, extended_analysis: bool = True) -> str:
+def _add_note_prefix(html_content: str, mode: str) -> str:
+    """
+    Add a mode prefix to the first h2 heading for Zotero note identification.
+
+    This allows users to quickly identify the type of note in Zotero:
+    - [FICHE] for extended analysis
+    - [CLAIR] for pedagogical notes
+    - [EVAL] for evaluation grids
+    - (no prefix for short summaries)
+
+    Args:
+        html_content: The HTML content of the generated note
+        mode: The note generation mode
+
+    Returns:
+        HTML content with the prefix injected in the first h2 heading
+
+    Example:
+        >>> html = "<h2>Smith (2024). Title...</h2><p>Content...</p>"
+        >>> _add_note_prefix(html, "pedagogique")
+        '<h2>[CLAIR] Smith (2024). Title...</h2><p>Content...</p>'
+    """
+    import re
+
+    prefix = NOTE_MODE_PREFIX.get(mode, "")
+    if not prefix:
+        return html_content
+
+    # Find the first <h2> and inject the prefix
+    pattern = r'(<h2>)(.*?)(</h2>)'
+    replacement = rf'\1{prefix} \2\3'
+    return re.sub(pattern, replacement, html_content, count=1)
+
+
+def _build_prompt(metadata: Dict, text_content: str, language: str, mode: str = "extended") -> str:
     """
     Build the LLM prompt by loading template and replacing placeholders.
 
@@ -173,7 +252,11 @@ def _build_prompt(metadata: Dict, text_content: str, language: str, extended_ana
         metadata: Dictionary with item metadata
         text_content: Full text content (texteocr)
         language: Target language code
-        extended_analysis: If True, use full text and exhaustive template. If False, limit text and use short template.
+        mode: Note generation mode. One of:
+              - "extended": Full analysis (no text limit)
+              - "short": Quick summary (8000 char limit)
+              - "pedagogique": Pedagogical note for L3 students (no text limit)
+              - "evaluation": Peer review evaluation grid (no text limit)
 
     Returns:
         Formatted prompt string
@@ -209,19 +292,19 @@ def _build_prompt(metadata: Dict, text_content: str, language: str, extended_ana
     }
     target_lang = lang_instructions.get(language, "français")
 
-    # Limit text based on analysis mode
-    if extended_analysis:
-        # Use full text for exhaustive analysis
-        text_limited = safe_str(text_content if text_content else None, "Non disponible")
-    else:
+    # Limit text based on mode (only 'short' mode has text limit)
+    if mode == "short":
         # Limit to 8000 characters for quick summary
         text_limited = safe_str(text_content[:8000] if text_content else None, "Non disponible")
+    else:
+        # Use full text for all other modes (extended, pedagogique, evaluation)
+        text_limited = safe_str(text_content if text_content else None, "Non disponible")
 
     abstract_text = abstract if abstract else "Non disponible"
 
     try:
-        # Load template from file
-        template = _load_prompt_template(extended_analysis=extended_analysis)
+        # Load template from file based on mode
+        template = _load_prompt_template(mode=mode)
 
         # Replace placeholders
         prompt = template.replace("{TITLE}", title)
@@ -234,7 +317,7 @@ def _build_prompt(metadata: Dict, text_content: str, language: str, extended_ana
         prompt = prompt.replace("{TEXT}", text_limited)
         prompt = prompt.replace("{LANGUAGE}", target_lang)
 
-        logger.debug(f"Built prompt from template for: {title}")
+        logger.debug(f"Built prompt from template for: {title} (mode: {mode})")
         return prompt
 
     except FileNotFoundError:
@@ -280,7 +363,7 @@ def _generate_with_llm(
     prompt: str,
     model: Optional[str] = None,
     temperature: float = 0.2,
-    extended_analysis: bool = True,
+    mode: str = "extended",
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None
 ) -> str:
@@ -292,7 +375,11 @@ def _generate_with_llm(
         model: Model name (e.g., "gpt-4o-mini" or "google/gemini-2.5-flash").
                If None, uses OPENROUTER_DEFAULT_MODEL from .env
         temperature: Sampling temperature (0.0 to 1.0)
-        extended_analysis: If True, use max_tokens=16000. If False, use max_tokens=2000.
+        mode: Note generation mode. Determines max_tokens:
+              - "extended": 16000 tokens
+              - "short": 2000 tokens
+              - "pedagogique": 10000 tokens
+              - "evaluation": 10000 tokens
         openai_api_key: Optional OpenAI API key. If None, uses environment.
         openrouter_api_key: Optional OpenRouter API key. If None, uses environment.
 
@@ -333,8 +420,8 @@ def _generate_with_llm(
         active_client = openai_client
         logger.info(f"Using OpenAI with model: {model}")
 
-    # Set max_tokens based on analysis mode
-    max_tokens = 16000 if extended_analysis else 2000
+    # Set max_tokens based on mode
+    max_tokens = NOTE_MODE_MAX_TOKENS.get(mode, 16000)
 
     # Retry configuration: 1 retry with 2 second delay
     max_attempts = 2
@@ -469,7 +556,7 @@ def build_note_html(
     text_content: Optional[str] = None,
     model: Optional[str] = None,
     use_llm: bool = True,
-    extended_analysis: bool = True,
+    mode: str = "extended",
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None
 ) -> Tuple[str, str]:
@@ -484,8 +571,11 @@ def build_note_html(
         model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
                Examples: "gpt-4o-mini", "google/gemini-2.5-flash"
         use_llm: Whether to use LLM or fallback to template (default: True)
-        extended_analysis: If True, generate exhaustive analysis (8000-12000 words).
-                          If False, generate quick summary (200-300 words).
+        mode: Note generation mode. One of:
+              - "extended": Full analysis [FICHE] (2500-3000 words)
+              - "short": Quick summary (400-600 words, no prefix)
+              - "pedagogique": Pedagogical note [CLAIR] for L3 students (2400-2800 words)
+              - "evaluation": Peer review evaluation grid [EVAL] (2200-2750 words)
         openai_api_key: Optional OpenAI API key for secure credential passing.
                         If None, falls back to environment variable.
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
@@ -494,7 +584,7 @@ def build_note_html(
     Returns:
         Tuple of (sentinel, note_html):
         - sentinel: Unique identifier (e.g., "ragpy-note-id:uuid")
-        - note_html: Complete HTML with sentinel comment
+        - note_html: Complete HTML with sentinel comment and mode prefix
 
     Example:
         >>> metadata = {
@@ -504,10 +594,17 @@ def build_note_html(
         ...     "abstract": "This paper presents...",
         ...     "language": "en"
         ... }
-        >>> sentinel, html = build_note_html(metadata, text_content="Full text...", extended_analysis=True)
+        >>> sentinel, html = build_note_html(metadata, text_content="Full text...", mode="pedagogique")
         >>> print(sentinel)
         ragpy-note-id:abc123...
+        >>> "[CLAIR]" in html
+        True
     """
+    # Validate mode
+    if mode not in TEMPLATE_MAP:
+        logger.warning(f"Unknown mode '{mode}', falling back to 'extended'")
+        mode = "extended"
+
     # Get clients with provided credentials or from environment
     openai_client, openrouter_client, default_model = _get_llm_clients(
         openai_api_key=openai_api_key,
@@ -521,7 +618,7 @@ def build_note_html(
 
     # Detect target language
     language = _detect_language(metadata)
-    logger.info(f"Generating note in language: {language}")
+    logger.info(f"Generating note in language: {language} (mode: {mode})")
 
     # Generate the note body
     if use_llm and (openai_client or openrouter_client):
@@ -534,14 +631,16 @@ def build_note_html(
                 body_html = _fallback_template(metadata, language)
             else:
                 # Build prompt and generate with LLM
-                prompt = _build_prompt(metadata, content, language, extended_analysis=extended_analysis)
+                prompt = _build_prompt(metadata, content, language, mode=mode)
                 body_html = _generate_with_llm(
                     prompt,
                     model=model,
-                    extended_analysis=extended_analysis,
+                    mode=mode,
                     openai_api_key=openai_api_key,
                     openrouter_api_key=openrouter_api_key
                 )
+                # Add mode prefix to first h2 heading
+                body_html = _add_note_prefix(body_html, mode)
         except Exception as e:
             logger.error(f"LLM generation failed, using template fallback: {e}")
             body_html = _fallback_template(metadata, language)
@@ -624,14 +723,14 @@ def build_abstract_text(
         raise ValueError("No text content available to generate summary")
 
     try:
-        # Build prompt using the short template (extended_analysis=False)
-        prompt = _build_prompt(metadata, content, language, extended_analysis=False)
+        # Build prompt using the short template (mode="short")
+        prompt = _build_prompt(metadata, content, language, mode="short")
 
         # Generate with LLM (use smaller max_tokens for plain text summary)
         summary = _generate_with_llm(
             prompt,
             model=model,
-            extended_analysis=False,
+            mode="short",
             openai_api_key=openai_api_key,
             openrouter_api_key=openrouter_api_key
         )
@@ -695,7 +794,7 @@ async def build_note_html_async(
     text_content: Optional[str] = None,
     model: Optional[str] = None,
     use_llm: bool = True,
-    extended_analysis: bool = True,
+    mode: str = "extended",
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None
 ) -> Tuple[str, str]:
@@ -706,6 +805,15 @@ async def build_note_html_async(
     See build_note_html for full documentation.
 
     Args:
+        metadata: Dictionary with item metadata (title, authors, abstract, etc.)
+        text_content: Full text content (texteocr). If None, will use abstract only.
+        model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
+        use_llm: Whether to use LLM or fallback to template (default: True)
+        mode: Note generation mode. One of:
+              - "extended": Full analysis [FICHE]
+              - "short": Quick summary (no prefix)
+              - "pedagogique": Pedagogical note [CLAIR]
+              - "evaluation": Peer review evaluation grid [EVAL]
         openai_api_key: Optional OpenAI API key for secure credential passing.
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
     """
@@ -724,7 +832,7 @@ async def build_note_html_async(
                     text_content=text_content,
                     model=model,
                     use_llm=use_llm,
-                    extended_analysis=extended_analysis,
+                    mode=mode,
                     openai_api_key=openai_api_key,
                     openrouter_api_key=openrouter_api_key
                 )

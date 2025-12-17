@@ -39,6 +39,8 @@ from app.core.credentials import (
     get_credential_error_message,
     CredentialMissingError
 )
+from app.database.session import get_db
+from app.models.project import Project
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -890,7 +892,7 @@ async def upload_db(
 @router.post("/generate_zotero_notes_sse")
 async def generate_zotero_notes_sse(
     session: str = Form(...),
-    extended_analysis: str = Form("false"),
+    note_mode: str = Form("extended"),
     model: str = Form(None),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -903,12 +905,22 @@ async def generate_zotero_notes_sse(
     3. Creates notes in Zotero via API (if credentials available)
     4. Streams real-time progress via SSE
 
+    Args:
+        session: Session folder name
+        note_mode: Note generation mode. One of:
+            - "extended": Full analysis [FICHE] (default)
+            - "short": Quick summary for abstractNote field
+            - "pedagogique": Pedagogical note [CLAIR] for L3 students
+            - "evaluation": Peer review evaluation grid [EVAL]
+        model: LLM model to use (e.g., "gpt-4o-mini", "google/gemini-2.5-flash")
+
     Requires:
     - OpenAI API key (or OpenRouter for alternative models)
     - Zotero credentials (optional - for sync to Zotero library)
     """
     from app.utils.llm_note_generator import (
-        build_note_html_async, build_abstract_text_async, sentinel_in_html
+        build_note_html_async, build_abstract_text_async, sentinel_in_html,
+        TEMPLATE_MAP, NOTE_MODE_DISPLAY
     )
     from app.utils.zotero_client import (
         verify_api_key, create_child_note, check_note_exists,
@@ -916,10 +928,20 @@ async def generate_zotero_notes_sse(
     )
 
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, session))
-    logger.info(f"Zotero notes generation for session: '{session}', extended: {extended_analysis}, model: {model}, user: {current_user.email}")
+    logger.info(f"Zotero notes generation for session: '{session}', mode: {note_mode}, model: {model}, user: {current_user.email}")
 
-    # Parse extended_analysis flag
-    use_extended = extended_analysis.lower() in ("true", "1", "yes")
+    # Validate and normalize note_mode
+    # Support backward compatibility: "true"/"false" for extended_analysis
+    if note_mode.lower() in ("true", "1", "yes"):
+        note_mode = "extended"
+    elif note_mode.lower() in ("false", "0", "no"):
+        note_mode = "short"
+    elif note_mode not in TEMPLATE_MAP:
+        logger.warning(f"Unknown note_mode '{note_mode}', falling back to 'extended'")
+        note_mode = "extended"
+
+    # Determine if this is a "short" mode (updates abstractNote) vs HTML note modes
+    use_short_mode = note_mode == "short"
 
     async def event_generator():
         try:
@@ -988,6 +1010,26 @@ async def generate_zotero_notes_sse(
             mode_msg = "with Zotero sync" if zotero_mode == "api" else "local only (no Zotero credentials)"
             yield f"data: {{\"type\": \"init\", \"total\": {total_items}, \"message\": \"Starting note generation ({mode_msg})...\"}}\n\n"
 
+            # Load project description for {PROBLEMATIQUE} placeholder
+            # The problematique combines project name and description
+            problematique = "Non spécifiée"
+            try:
+                db = next(get_db())
+                project = db.query(Project).filter(Project.session_folder == session).first()
+                if project:
+                    parts = []
+                    if project.name:
+                        parts.append(project.name)
+                    if project.description:
+                        parts.append(project.description)
+                    if parts:
+                        problematique = " — ".join(parts)
+                    logger.info(f"Loaded project problematique: {problematique[:100]}...")
+                else:
+                    logger.warning(f"No project found for session '{session}', using default problematique")
+            except Exception as e:
+                logger.warning(f"Could not load project for problematique: {e}")
+
             # Counters for summary
             created = 0
             exists = 0
@@ -1024,21 +1066,22 @@ async def generate_zotero_notes_sse(
                         "doi": row.get('doi', ''),
                         "url": row.get('url', ''),
                         "language": row.get('language', 'fr'),
+                        "problematique": problematique,  # From project name + description
                     }
 
                     # Branch based on analysis mode
                     loop = asyncio.get_event_loop()
                     status = "created"
 
-                    if use_extended:
-                        # EXTENDED MODE: Generate HTML note and create child note
+                    if not use_short_mode:
+                        # HTML NOTE MODE (extended, pedagogique, evaluation)
                         # Uses global semaphore for concurrency control
                         sentinel, note_html = await build_note_html_async(
                             metadata=metadata,
                             text_content=texteocr,
                             model=model,
                             use_llm=True,
-                            extended_analysis=True,
+                            mode=note_mode,
                             openai_api_key=openai_key,
                             openrouter_api_key=openrouter_key
                         )
@@ -1049,7 +1092,7 @@ async def generate_zotero_notes_sse(
                             "title": title,
                             "sentinel": sentinel,
                             "note_html": note_html,
-                            "mode": "extended"
+                            "mode": note_mode
                         })
 
                         # If Zotero API mode, create child note

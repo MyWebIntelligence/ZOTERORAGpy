@@ -166,27 +166,33 @@ Le système utilise les placeholders suivants dans le template `app/utils/zotero
 | `{DATE}` | `metadata.date` | Date de publication | "2024" |
 | `{DOI}` | `metadata.doi` | Digital Object Identifier | "10.1234/example.2024" |
 | `{URL}` | `metadata.url` | URL de l'article | "https://example.com/article" |
-| `{PROBLEMATIQUE}` | `metadata.problematique` | **Problématique de recherche personnalisée** | "Comment les algorithmes de NLP peuvent-ils améliorer l'analyse de corpus sociologiques ?" |
+| `{PROBLEMATIQUE}` | `Project.name` + `Project.description` | **Problématique de recherche** (Titre + Description du projet) | "Mon Projet — Comment les algorithmes de NLP peuvent-ils améliorer l'analyse de corpus sociologiques ?" |
 | `{ABSTRACT}` | `metadata.abstract` | Résumé de l'article | "This paper presents..." |
 | `{TEXT}` | `text_content` (OCR) | **Texte intégral** (pas de limite) | Tout le contenu OCR |
 | `{LANGUAGE}` | Auto-détecté | Langue cible de l'analyse | "français", "English", etc. |
 
-### Placeholder PROBLEMATIQUE (Nouveau)
+### Placeholder PROBLEMATIQUE
 
 **Objectif** : Permettre de contextualiser l'analyse par rapport à une problématique de recherche spécifique.
 
-**Utilisation** :
+**Source des données** :
 
-1. **Via CSV** : Ajouter une colonne `problematique` dans votre fichier CSV de métadonnées Zotero
+Le placeholder `{PROBLEMATIQUE}` est automatiquement rempli à partir des informations du **Projet** dans la base de données :
 
-   ```csv
-   title,authors,date,problematique
-   "Article Title","Smith, J.",2024,"Comment mesurer l'impact des réseaux sociaux sur l'opinion publique ?"
-   ```
+1. **Titre du projet** (`Project.name`) : Le nom du projet de recherche
+2. **Description du projet** (`Project.description`) : La description détaillée du projet
 
-2. **Valeur par défaut** : Si non spécifiée, le système utilise `"Non spécifiée"`
+Ces deux éléments sont concaténés avec un tiret : `"Titre — Description"`
 
-3. **Dans le prompt** : Le LLM reçoit cette problématique dans le contexte et oriente son analyse en conséquence
+**Configuration** :
+
+Pour personnaliser la problématique, modifiez les champs du projet via l'interface :
+- Accédez aux paramètres du projet
+- Renseignez le **Nom** et la **Description** du projet
+
+**Valeur par défaut** : Si aucun projet n'est associé à la session, le système utilise `"Non spécifiée"`
+
+**Dans le prompt** : Le LLM reçoit cette problématique dans le contexte et oriente son analyse en conséquence
 
 **Avantages** :
 - Analyse orientée vers vos questions de recherche

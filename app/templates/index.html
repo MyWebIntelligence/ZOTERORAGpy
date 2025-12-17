@@ -773,10 +773,7 @@ do{% extends "base.html" %}
     margin-bottom: var(--space-4);
   }
 
-  .zotero-checkbox-group {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-2);
+  .note-mode-group {
     padding: var(--space-3);
     background: var(--color-surface);
     border-radius: var(--radius-md);
@@ -784,25 +781,34 @@ do{% extends "base.html" %}
     margin-bottom: var(--space-3);
   }
 
-  .zotero-checkbox-group input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    margin-top: 2px;
-  }
-
-  .zotero-checkbox-label {
-    flex: 1;
-  }
-
-  .zotero-checkbox-label strong {
+  .note-mode-group label {
     display: block;
-    margin-bottom: var(--space-1);
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-2);
   }
 
-  .zotero-checkbox-label small {
+  .note-mode-group select {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+    background: var(--color-bg);
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .note-mode-group select:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.1);
+  }
+
+  .note-mode-hint {
+    margin-top: var(--space-2);
     font-size: var(--text-xs);
     color: var(--color-text-tertiary);
-    line-height: 1.4;
+    line-height: 1.5;
   }
 
   /* Animations */
@@ -1381,15 +1387,19 @@ do{% extends "base.html" %}
             </p>
 
             <div class="zotero-options">
-              <div class="zotero-checkbox-group">
-                <input type="checkbox" id="extendedAnalysisCheckbox" checked>
-                <div class="zotero-checkbox-label">
-                  <strong>Extended Analysis</strong>
-                  <small>
-                    <strong>Checked:</strong> Creates detailed child note (8000-12000 words) with methodology and bibliography.<br>
-                    <strong>Unchecked:</strong> Enriches Abstract field with a summary (200-350 words).
-                  </small>
-                </div>
+              <div class="note-mode-group">
+                <label for="noteModeSelect"><strong>Type de fiche</strong></label>
+                <select id="noteModeSelect" class="form-select">
+                  <option value="extended" selected>📚 Fiche de lecture [FICHE] — Analyse complète (2500-3000 mots)</option>
+                  <option value="pedagogique">🎓 Fiche pédagogique [CLAIR] — Pour étudiants L3 (2400-2800 mots)</option>
+                  <option value="evaluation">📊 Grille d'évaluation [EVAL] — Peer review SHS (2200-2750 mots)</option>
+                  <option value="short">📝 Résumé court — Enrichit le champ Abstract (400-600 mots)</option>
+                </select>
+                <p class="note-mode-hint">
+                  <strong>[FICHE]</strong> : Méta-analyse méthodologique &nbsp;|&nbsp;
+                  <strong>[CLAIR]</strong> : Tutoriel reproductibilité &nbsp;|&nbsp;
+                  <strong>[EVAL]</strong> : Notation /50 peer review
+                </p>
               </div>
 
               <div class="model-input-group">
@@ -2651,12 +2661,12 @@ do{% extends "base.html" %}
     multiProgressContainer.innerHTML = '';
 
     const model = document.getElementById('zoteroModelInput').value.trim();
-    const extendedAnalysis = document.getElementById('extendedAnalysisCheckbox').checked;
+    const noteMode = document.getElementById('noteModeSelect').value;
 
     const formData = new FormData();
     formData.append('session', currentPath);
     formData.append('model', model);
-    formData.append('extended_analysis', extendedAnalysis ? 'true' : 'false');
+    formData.append('note_mode', noteMode);
 
     const processedItems = [];
     const itemElements = new Map(); // Track mini-bar elements by item name
