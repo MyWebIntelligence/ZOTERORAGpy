@@ -1,7 +1,7 @@
 # RAGpy - Guide d'utilisation et architecture
 
 **Date de création** : 2025-10-21
-**Dernière mise à jour** : 2025-12-10 (Documentation complémentaire)
+**Dernière mise à jour** : 2025-12-16 (Corrections bug Zotero + Cookie consent Playwright)
 
 ---
 
@@ -800,3 +800,38 @@ celery==5.3.4
 redis==5.0.1
 flower==2.0.1
 ```
+
+---
+
+## Corrections récentes (2025-12-16)
+
+### Bug fix Zotero API 500 - Extraction clé item
+
+**Problème** : Après création d'un item Zotero, les attachments PDF échouaient avec erreur HTTP 500.
+
+**Cause** : L'API Zotero v3 retourne un objet complet dans `result["successful"]["0"]`, pas directement la clé.
+
+**Fix** dans `app/utils/zotero_client.py` (lignes ~306 et ~1643) :
+
+```python
+# Avant (bugué)
+item_key = result["successful"]["0"]
+
+# Après (corrigé)
+created_item = result["successful"]["0"]
+item_key = created_item["key"] if isinstance(created_item, dict) else created_item
+```
+
+### Cookie consent popup dismissal - Playwright PDF
+
+**Problème** : Les conversions HTML→PDF via Playwright incluaient les bannières cookies.
+
+**Solution** dans `app/utils/pdf_downloader.py` :
+
+1. **Dialog handlers** : Dismiss automatique des alert/confirm/prompt JS
+2. **Clic boutons consentement** : 40+ sélecteurs multi-langues (EN/FR/DE)
+3. **Injection CSS fallback** : Masquage des overlays résiduels
+
+**Nouvelle fonction** : `_dismiss_popups(page, timeout_ms=3000) -> bool`
+
+**Sites testés** : Taylor & Francis, MDPI

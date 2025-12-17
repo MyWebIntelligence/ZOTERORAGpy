@@ -66,6 +66,12 @@ class Project(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="desc(PipelineSession.created_at)"
     )
+    background_tasks = relationship(
+        "BackgroundTask",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="desc(BackgroundTask.created_at)"
+    )
 
     def __repr__(self):
         return f"<Project {self.name}>"

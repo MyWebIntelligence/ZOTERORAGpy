@@ -80,6 +80,12 @@ class User(Base, TimestampMixin):
         back_populates="user",
         cascade="all, delete-orphan"
     )
+    background_tasks = relationship(
+        "BackgroundTask",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        order_by="desc(BackgroundTask.created_at)"
+    )
 
     def __repr__(self):
         return f"<User {self.email}>"

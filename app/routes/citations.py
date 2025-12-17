@@ -67,6 +67,8 @@ from app.utils.state_persistence import (
     read_filtering_state,
     read_import_state
 )
+from app.models.background_task import TaskType
+from app.services.background_task_manager import background_task_manager
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -1364,3 +1366,588 @@ async def get_preview_results(
     except Exception as e:
         logger.error(f"Failed to load preview results: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load preview results: {str(e)}")
+
+
+# ============================================================================
+# BACKGROUND MODE ENDPOINTS
+# ============================================================================
+# These endpoints create background tasks that persist even if the browser
+# is closed. Progress is stored in the database and can be monitored via
+# /api/tasks/{task_id} or /api/tasks/{task_id}/stream
+
+@router.post("/{project_id}/filter_citations_bg")
+async def filter_citations_background(
+    project_id: int,
+    session_id: int = Form(...),
+    batch_size: int = Form(DEFAULT_BATCH_SIZE),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Start citation filtering as a background task.
+
+    This endpoint creates a persistent background task that continues running
+    even if the browser is closed. Progress is stored in the database and can
+    be monitored via /api/tasks/{task_id}/stream or polled via /api/tasks/{task_id}.
+
+    Args:
+        project_id: ID of the project
+        session_id: Pipeline session ID
+        batch_size: Number of citations to process in parallel (1-50, default: 10)
+        db: Database session
+        current_user: Authenticated user
+
+    Returns:
+        JSONResponse with:
+            - task_id: Background task ID for monitoring
+            - message: Status message
+
+    Raises:
+        HTTPException 404: Session or project not found
+        HTTPException 403: User doesn't have access
+        HTTPException 400: Missing required credentials
+    """
+    # Validate session and project access
+    pipeline_session = db.query(PipelineSession).filter(
+        PipelineSession.id == session_id,
+        PipelineSession.project_id == project_id
+    ).first()
+
+    if not pipeline_session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Build paths
+    session_folder = os.path.join(UPLOAD_DIR, pipeline_session.session_folder)
+    json_path = os.path.join(session_folder, "publishorperish.json")
+    config_path = os.path.join(session_folder, "config.json")
+
+    if not os.path.exists(json_path) or not os.path.exists(config_path):
+        raise HTTPException(status_code=400, detail="Required files not found")
+
+    # Load citations to get total count
+    try:
+        citations = parse_pop_json(json_path)
+        total_citations = len(citations)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse citations: {str(e)}")
+
+    # Load config
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to load config: {str(e)}")
+
+    # Get credentials (validate before creating task)
+    openai_api_key = get_credential_or_env(current_user, "openai_api_key")
+    openrouter_api_key = get_credential_or_env(current_user, "openrouter_api_key")
+
+    model_name = config.get("model", DEFAULT_LLM_MODEL)
+    if "/" in model_name and not openrouter_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=get_credential_error_message("openrouter_api_key")
+        )
+    elif "/" not in model_name and not openai_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=get_credential_error_message("openai_api_key")
+        )
+
+    # Check for already processed citations (resume support)
+    processed_indices = get_processed_indices(session_folder)
+    remaining_count = total_citations - len(processed_indices)
+
+    # Create background task
+    bg_task = await background_task_manager.create_task(
+        db=db,
+        task_type=TaskType.FILTER_CITATIONS,
+        user_id=current_user.id,
+        session_folder=session_folder,
+        project_id=project_id,
+        total=total_citations,
+        message=f"Initializing... ({len(processed_indices)} already processed)"
+    )
+
+    # Define the background coroutine
+    async def run_filtering():
+        """Execute citation filtering in background."""
+        try:
+            # Reload citations and config (fresh for background execution)
+            bg_citations = parse_pop_json(json_path)
+            with open(config_path, "r", encoding="utf-8") as f:
+                bg_config = json.load(f)
+
+            # Resume support
+            bg_processed_indices = get_processed_indices(session_folder)
+            preview_results = rebuild_preview_from_state(session_folder, bg_citations) if bg_processed_indices else {"relevant": [], "skipped": []}
+
+            remaining_citations = [
+                (idx, c) for idx, c in enumerate(bg_citations)
+                if idx not in bg_processed_indices
+            ]
+
+            if not remaining_citations:
+                await background_task_manager.update_progress(
+                    bg_task.id,
+                    current=total_citations,
+                    total=total_citations,
+                    message="All citations already processed",
+                    log_line="Filtering complete (resumed)"
+                )
+                return
+
+            # Update pipeline session status
+            from app.database.session import SessionLocal
+            session_db = SessionLocal()
+            try:
+                ps = session_db.query(PipelineSession).filter_by(id=session_id).first()
+                if ps:
+                    ps.status = SessionStatus.FILTERING_CITATIONS
+                    session_db.commit()
+            finally:
+                session_db.close()
+
+            # Validate batch size
+            effective_batch_size = min(max(batch_size, 1), 50)
+
+            await background_task_manager.update_progress(
+                bg_task.id,
+                current=len(bg_processed_indices),
+                total=total_citations,
+                message=f"Starting filtering ({len(remaining_citations)} remaining)",
+                log_line=f"Batch size: {effective_batch_size}"
+            )
+
+            citations_to_process = [c for _, c in remaining_citations]
+            index_mapping = {i: orig_idx for i, (orig_idx, _) in enumerate(remaining_citations)}
+
+            # Process citations
+            async for event_type, event_data in process_citations_parallel(
+                citations=citations_to_process,
+                config={
+                    "project_name": bg_config["project_name"],
+                    "project_description": bg_config.get("project_description", ""),
+                    "collection_name": bg_config["collection_name"],
+                    "collection_description": bg_config.get("collection_description", ""),
+                    "model": bg_config.get("model", DEFAULT_LLM_MODEL)
+                },
+                openai_api_key=openai_api_key,
+                openrouter_api_key=openrouter_api_key,
+                batch_size=effective_batch_size
+            ):
+                if event_type == "progress":
+                    processor_idx = event_data["current"] - 1
+                    original_idx = index_mapping.get(processor_idx, processor_idx)
+                    overall_current = len(bg_processed_indices) + event_data["current"]
+
+                    status = event_data["status"]
+                    citation_dict = event_data["citation"]
+                    filter_result = event_data.get("filter_result")
+                    web_source = event_data.get("web_source", "none")
+
+                    # Build state entry
+                    state_entry = {
+                        "index": original_idx,
+                        "relevant": status == "relevant",
+                        "web_source": web_source
+                    }
+
+                    if status == "relevant" and filter_result:
+                        zotero_data = filter_result.get("zotero_item", filter_result)
+                        preview_results["relevant"].append({
+                            "index": original_idx,
+                            "citation": citation_dict,
+                            "zotero_data": zotero_data,
+                            "relevance_score": filter_result.get("relevance_score"),
+                            "relevance_reason": filter_result.get("relevance_reason"),
+                            "web_source": web_source
+                        })
+                        state_entry["relevance_score"] = filter_result.get("relevance_score")
+                        state_entry["relevance_reason"] = filter_result.get("relevance_reason")
+                        state_entry["zotero_data"] = zotero_data
+                    elif status == "error":
+                        error_msg = event_data.get('error_message', 'Unknown')
+                        preview_results["skipped"].append({
+                            "index": original_idx,
+                            "citation": citation_dict,
+                            "reason": f"Error: {error_msg}"
+                        })
+                        state_entry["relevant"] = None
+                        state_entry["error"] = error_msg
+                    else:
+                        preview_results["skipped"].append({
+                            "index": original_idx,
+                            "citation": citation_dict,
+                            "reason": "Not relevant (LLM decision)"
+                        })
+                        state_entry["reason"] = "Not relevant"
+
+                    # Save state progressively
+                    try:
+                        append_filtering_state(session_folder, state_entry)
+                    except Exception as save_err:
+                        logger.error(f"State save error: {save_err}")
+
+                    # Update background task progress
+                    title = event_data.get("title", "")[:50]
+                    await background_task_manager.update_progress(
+                        bg_task.id,
+                        current=overall_current,
+                        total=total_citations,
+                        message=f"{status.upper()}: {title}",
+                        log_line=f"[{overall_current}/{total_citations}] {status}: {title}"
+                    )
+
+            # Save final preview
+            preview_path = os.path.join(session_folder, "preview.json")
+            with open(preview_path, "w", encoding="utf-8") as f:
+                json.dump(preview_results, f, indent=2, ensure_ascii=False)
+
+            # Update pipeline session status to FILTERED
+            session_db = SessionLocal()
+            try:
+                ps = session_db.query(PipelineSession).filter_by(id=session_id).first()
+                if ps:
+                    ps.status = SessionStatus.FILTERED
+                    session_db.commit()
+            finally:
+                session_db.close()
+
+            # Final progress update
+            relevant_count = len(preview_results["relevant"])
+            skipped_count = len(preview_results["skipped"])
+            await background_task_manager.update_progress(
+                bg_task.id,
+                current=total_citations,
+                total=total_citations,
+                message=f"Complete: {relevant_count} relevant, {skipped_count} skipped",
+                log_line=f"Filtering finished: {relevant_count} relevant, {skipped_count} skipped",
+                result_file=preview_path
+            )
+
+        except Exception as e:
+            logger.exception(f"Background filtering failed: {e}")
+            await background_task_manager.update_progress(
+                bg_task.id,
+                current=0,
+                message=f"Error: {str(e)}",
+                log_line=f"FATAL ERROR: {str(e)}"
+            )
+            raise
+
+    # Start the background task
+    await background_task_manager.start_task(bg_task.id, run_filtering(), db)
+
+    return JSONResponse({
+        "task_id": bg_task.id,
+        "message": f"Background filtering started for {total_citations} citations",
+        "already_processed": len(processed_indices),
+        "remaining": remaining_count
+    })
+
+
+@router.post("/{project_id}/import_citations_bg")
+async def import_citations_background(
+    project_id: int,
+    session_id: int = Form(...),
+    selected_indices: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Start citation import to Zotero as a background task.
+
+    This endpoint creates a persistent background task for importing selected
+    citations to Zotero. Progress is stored in the database and can be monitored
+    via /api/tasks/{task_id}/stream.
+
+    Args:
+        project_id: ID of the project
+        session_id: Pipeline session ID
+        selected_indices: JSON array of selected citation indices
+        db: Database session
+        current_user: Authenticated user
+
+    Returns:
+        JSONResponse with:
+            - task_id: Background task ID for monitoring
+            - message: Status message
+            - total: Number of citations to import
+
+    Raises:
+        HTTPException 404: Session or project not found
+        HTTPException 403: User doesn't have access
+        HTTPException 400: Missing credentials or invalid data
+    """
+    # Validate session and project access
+    pipeline_session = db.query(PipelineSession).filter(
+        PipelineSession.id == session_id,
+        PipelineSession.project_id == project_id
+    ).first()
+
+    if not pipeline_session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Build paths
+    session_folder = os.path.join(UPLOAD_DIR, pipeline_session.session_folder)
+    preview_path = os.path.join(session_folder, "preview.json")
+    config_path = os.path.join(session_folder, "config.json")
+
+    if not os.path.exists(preview_path):
+        raise HTTPException(status_code=400, detail="Preview not found. Run filtering first.")
+    if not os.path.exists(config_path):
+        raise HTTPException(status_code=400, detail="Configuration not found")
+
+    # Load preview
+    try:
+        with open(preview_path, "r", encoding="utf-8") as f:
+            preview = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to load preview: {str(e)}")
+
+    # Load config
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to load config: {str(e)}")
+
+    # Parse selected indices
+    try:
+        selected = json.loads(selected_indices)
+        if not isinstance(selected, list):
+            raise ValueError("Must be a JSON array")
+        to_import = [preview["relevant"][i] for i in selected]
+    except (json.JSONDecodeError, IndexError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid selected indices: {str(e)}")
+
+    # Get Zotero credentials
+    zotero_api_key = get_credential_or_env(current_user, "zotero_api_key")
+    zotero_user_id = get_credential_or_env(current_user, "zotero_user_id")
+    zotero_group_id = get_credential_or_env(current_user, "zotero_group_id")
+
+    if not zotero_api_key:
+        raise HTTPException(status_code=400, detail=get_credential_error_message("zotero_api_key"))
+
+    library_type = "groups" if zotero_group_id else "users"
+    library_id = zotero_group_id or zotero_user_id
+
+    if not library_id:
+        raise HTTPException(status_code=400, detail=get_credential_error_message("zotero_user_id"))
+
+    # Check for already imported (resume support)
+    already_imported_indices = get_imported_indices(session_folder)
+    total_to_import = len(to_import)
+    remaining_count = total_to_import - len([i for i in selected if i in already_imported_indices])
+
+    # Create background task
+    bg_task = await background_task_manager.create_task(
+        db=db,
+        task_type=TaskType.IMPORT_CITATIONS,
+        user_id=current_user.id,
+        session_folder=session_folder,
+        project_id=project_id,
+        total=total_to_import,
+        message=f"Initializing import ({len(already_imported_indices)} already imported)"
+    )
+
+    # Define the background coroutine
+    async def run_import():
+        """Execute citation import in background."""
+        try:
+            # Update pipeline session status
+            from app.database.session import SessionLocal
+            session_db = SessionLocal()
+            try:
+                ps = session_db.query(PipelineSession).filter_by(id=session_id).first()
+                if ps:
+                    ps.status = SessionStatus.IMPORTING_CITATIONS
+                    session_db.commit()
+            finally:
+                session_db.close()
+
+            # Get or create collection
+            try:
+                coll_result = get_or_create_collection(
+                    library_type=library_type,
+                    library_id=library_id,
+                    collection_name=config["collection_name"],
+                    description=config.get("collection_description", ""),
+                    api_key=zotero_api_key
+                )
+                collection_key = coll_result["key"]
+            except ZoteroAPIError as e:
+                raise Exception(f"Zotero collection error: {str(e)}")
+
+            # Load existing import stats for resume
+            existing_stats = get_import_stats(session_folder)
+            created = existing_stats["created"]
+            updated = existing_stats["updated"]
+            errors = existing_stats["errors"]
+
+            processed_count = len([i for i in selected if i in already_imported_indices])
+
+            # Import each citation
+            for idx, item in enumerate(to_import):
+                original_idx = selected[idx]
+
+                # Skip if already imported
+                if original_idx in already_imported_indices:
+                    continue
+
+                processed_count += 1
+                title = item["citation"].get("title", "")[:50]
+
+                try:
+                    # Prepare Zotero data
+                    zotero_data = item["zotero_data"].copy()
+                    zotero_data["collections"] = [collection_key]
+
+                    # Clean N/A values
+                    na_patterns = {"N/A", "n/a", "NA", "na", "None", "null", "-"}
+                    for field in ["DOI", "ISSN", "ISBN", "pages", "volume", "issue"]:
+                        if field in zotero_data and zotero_data[field] in na_patterns:
+                            zotero_data[field] = ""
+
+                    # Create or update item
+                    result = create_or_update_item(
+                        library_type=library_type,
+                        library_id=library_id,
+                        item_data=zotero_data,
+                        api_key=zotero_api_key
+                    )
+
+                    if result["success"]:
+                        if result["action"] == "created":
+                            created += 1
+                        else:
+                            updated += 1
+
+                        # Save import state
+                        append_import_state(session_folder, {
+                            "index": original_idx,
+                            "imported": True,
+                            "zotero_key": result["item_key"],
+                            "action": result["action"]
+                        })
+
+                        await background_task_manager.update_progress(
+                            bg_task.id,
+                            current=processed_count,
+                            total=total_to_import,
+                            message=f"{result['action'].upper()}: {title}",
+                            log_line=f"[{processed_count}/{total_to_import}] {result['action']}: {title}"
+                        )
+
+                        # Try PDF attachment
+                        fulltext_url = item["citation"].get("fulltext_url")
+                        if fulltext_url:
+                            try:
+                                pdf_result = await download_pdf(
+                                    fulltext_url=str(fulltext_url),
+                                    timeout=60,
+                                    max_size_mb=50,
+                                    convert_html=True
+                                )
+
+                                if pdf_result.success and pdf_result.pdf_bytes:
+                                    target_keys = result.get("synced_keys", [result["item_key"]])
+                                    for parent_key in target_keys:
+                                        try:
+                                            upload_file_attachment(
+                                                library_type=library_type,
+                                                library_id=library_id,
+                                                parent_item_key=parent_key,
+                                                pdf_bytes=pdf_result.pdf_bytes,
+                                                filename=pdf_result.filename,
+                                                md5_hash=pdf_result.md5_hash,
+                                                mtime=pdf_result.mtime,
+                                                api_key=zotero_api_key,
+                                                original_url=str(fulltext_url)
+                                            )
+                                        except Exception:
+                                            pass
+                            except Exception as pdf_err:
+                                logger.warning(f"PDF attachment failed: {pdf_err}")
+
+                    else:
+                        errors += 1
+                        error_msg = result.get("message", "Unknown error")
+                        append_import_state(session_folder, {
+                            "index": original_idx,
+                            "imported": False,
+                            "error": error_msg
+                        })
+                        await background_task_manager.update_progress(
+                            bg_task.id,
+                            current=processed_count,
+                            total=total_to_import,
+                            message=f"ERROR: {title}",
+                            log_line=f"[{processed_count}/{total_to_import}] ERROR: {error_msg}"
+                        )
+
+                except Exception as e:
+                    errors += 1
+                    append_import_state(session_folder, {
+                        "index": original_idx,
+                        "imported": False,
+                        "error": str(e)
+                    })
+                    await background_task_manager.update_progress(
+                        bg_task.id,
+                        current=processed_count,
+                        total=total_to_import,
+                        message=f"EXCEPTION: {title}",
+                        log_line=f"[{processed_count}/{total_to_import}] Exception: {str(e)}"
+                    )
+
+            # Update pipeline session status
+            session_db = SessionLocal()
+            try:
+                ps = session_db.query(PipelineSession).filter_by(id=session_id).first()
+                if ps:
+                    ps.status = SessionStatus.COMPLETED
+                    ps.row_count = total_to_import
+                    ps.chunk_count = created + updated
+                    session_db.commit()
+            finally:
+                session_db.close()
+
+            # Final progress update
+            await background_task_manager.update_progress(
+                bg_task.id,
+                current=total_to_import,
+                total=total_to_import,
+                message=f"Complete: {created} created, {updated} updated, {errors} errors",
+                log_line=f"Import finished: {created} created, {updated} updated, {errors} errors"
+            )
+
+        except Exception as e:
+            logger.exception(f"Background import failed: {e}")
+            await background_task_manager.update_progress(
+                bg_task.id,
+                current=0,
+                message=f"Error: {str(e)}",
+                log_line=f"FATAL ERROR: {str(e)}"
+            )
+            raise
+
+    # Start the background task
+    await background_task_manager.start_task(bg_task.id, run_import(), db)
+
+    return JSONResponse({
+        "task_id": bg_task.id,
+        "message": f"Background import started for {total_to_import} citations",
+        "total": total_to_import,
+        "already_imported": len(already_imported_indices),
+        "remaining": remaining_count
+    })

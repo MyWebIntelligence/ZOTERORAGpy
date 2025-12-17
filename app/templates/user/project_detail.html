@@ -1805,8 +1805,419 @@
         }
     }
 
+    // ===== Background Task Tracker =====
+    // Handles persistent background tasks that continue running even when browser closes
+
+    class BackgroundTaskTracker {
+        constructor(taskId, options = {}) {
+            this.taskId = taskId;
+            this.reconnectAttempts = 0;
+            this.maxReconnects = options.maxReconnects || 10;
+            this.pollInterval = options.pollInterval || 2000;
+            this.onProgress = options.onProgress || (() => {});
+            this.onComplete = options.onComplete || (() => {});
+            this.onError = options.onError || (() => {});
+            this.onLog = options.onLog || (() => {});
+            this.aborted = false;
+            this.eventSource = null;
+        }
+
+        async connect() {
+            if (this.aborted) return;
+
+            try {
+                const response = await fetch(`/api/tasks/${this.taskId}/stream`, {
+                    headers: {
+                        'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to connect to task stream');
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (!this.aborted) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.substring(6));
+                                this.handleEvent(data);
+
+                                if (['completed', 'failed', 'cancelled'].includes(data.type)) {
+                                    this.reconnectAttempts = 0;
+                                    return; // Normal end
+                                }
+                            } catch (e) {
+                                console.error('Error parsing SSE data:', e, line);
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                if (this.aborted) return;
+
+                // Auto-reconnect
+                if (this.reconnectAttempts < this.maxReconnects) {
+                    this.reconnectAttempts++;
+                    console.log(`[BackgroundTask] Reconnecting... (${this.reconnectAttempts}/${this.maxReconnects})`);
+                    setTimeout(() => this.connect(), this.pollInterval);
+                } else {
+                    this.onError({ message: 'Connection lost after max reconnect attempts' });
+                }
+            }
+        }
+
+        handleEvent(data) {
+            switch (data.type) {
+                case 'progress':
+                    this.reconnectAttempts = 0; // Reset on successful data
+                    this.onProgress(data);
+                    break;
+                case 'log':
+                    this.onLog(data.message);
+                    break;
+                case 'completed':
+                    this.onComplete({ success: true, result_file: data.result_file });
+                    break;
+                case 'failed':
+                case 'cancelled':
+                    this.onError({ type: data.type, message: data.message });
+                    break;
+                case 'heartbeat':
+                    // Keep alive
+                    break;
+            }
+        }
+
+        abort() {
+            this.aborted = true;
+        }
+    }
+
+    // Current background task tracker
+    let activeTaskTracker = null;
+
+    /**
+     * Start filtering using background task mode.
+     * This allows the task to continue even if browser is closed.
+     */
+    async function startFilteringBackground() {
+        closeModal('confirmLargeBatchModal');
+        openModal('filteringProgressModal');
+
+        // Reset progress UI
+        document.getElementById('filteringProgressBar').style.width = '0%';
+        document.getElementById('filteringProgressText').textContent = 'Démarrage de la tâche...';
+        document.getElementById('filteringLiveLog').innerHTML = '';
+
+        const formData = new FormData();
+        formData.append('session_id', currentSessionId);
+
+        try {
+            // Start background task
+            const response = await fetch(`/api/projects/${projectId}/filter_citations_bg`, {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Failed to start background task');
+            }
+
+            const result = await response.json();
+            const taskId = result.task_id;
+            const totalCitations = result.already_processed + result.remaining;
+
+            console.log('[Background] Task started:', result);
+
+            // Store task ID for resume
+            localStorage.setItem(`project_${projectId}_active_task`, JSON.stringify({
+                taskId: taskId,
+                type: 'filter_citations',
+                sessionId: currentSessionId,
+                startedAt: new Date().toISOString()
+            }));
+
+            // Connect to task stream
+            activeTaskTracker = new BackgroundTaskTracker(taskId, {
+                onProgress: (data) => {
+                    const percent = totalCitations > 0 ? Math.round((data.current / totalCitations) * 100) : 0;
+                    document.getElementById('filteringProgressBar').style.width = `${percent}%`;
+                    document.getElementById('filteringProgressText').textContent = `${data.current} / ${totalCitations} citations traitées`;
+
+                    // Parse message for status
+                    const msg = data.message || '';
+                    const statusMatch = msg.match(/^(RELEVANT|SKIPPED|ERROR):/i);
+                    const status = statusMatch ? statusMatch[1].toLowerCase() : 'processing';
+                    const title = msg.replace(/^(RELEVANT|SKIPPED|ERROR):\s*/i, '');
+
+                    const badgeClass = status === 'relevant' ? 'badge-success' :
+                                       status === 'error' ? 'badge-danger' : 'badge-secondary';
+                    const log = document.getElementById('filteringLiveLog');
+                    const logEntry = document.createElement('div');
+                    logEntry.className = 'log-entry';
+                    logEntry.innerHTML = `<span class="badge ${badgeClass}">${status}</span> ${escapeHtml(title)}`;
+                    log.appendChild(logEntry);
+                    log.scrollTop = log.scrollHeight;
+                },
+                onComplete: async (data) => {
+                    console.log('[Background] Task completed:', data);
+                    localStorage.removeItem(`project_${projectId}_active_task`);
+                    closeModal('filteringProgressModal');
+
+                    // Fetch final stats and show preview
+                    try {
+                        const previewResponse = await fetch(`/api/sessions/${currentSessionId}/preview`, {
+                            headers: {
+                                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                            }
+                        });
+                        if (previewResponse.ok) {
+                            previewData = await previewResponse.json();
+                            const relevantCount = previewData.relevant?.length || 0;
+                            const skippedCount = previewData.skipped?.length || 0;
+                            loadPreviewAndShow(relevantCount, skippedCount);
+                        }
+                    } catch (e) {
+                        showToast('Filtrage terminé. Rechargez la page pour voir les résultats.', 'success');
+                    }
+                },
+                onError: (data) => {
+                    console.error('[Background] Task error:', data);
+                    localStorage.removeItem(`project_${projectId}_active_task`);
+                    closeModal('filteringProgressModal');
+                    showToast(data.message || 'Erreur lors du filtrage', 'error');
+                },
+                onLog: (message) => {
+                    const log = document.getElementById('filteringLiveLog');
+                    const logEntry = document.createElement('div');
+                    logEntry.className = 'log-entry';
+                    logEntry.innerHTML = escapeHtml(message);
+                    log.appendChild(logEntry);
+                    log.scrollTop = log.scrollHeight;
+                }
+            });
+
+            activeTaskTracker.connect();
+
+        } catch (error) {
+            console.error('Background task error:', error);
+            closeModal('filteringProgressModal');
+            showToast(error.message || 'Erreur lors du démarrage', 'error');
+        }
+    }
+
+    /**
+     * Check for active background tasks on page load.
+     */
+    async function checkActiveBackgroundTasks() {
+        try {
+            const response = await fetch(`/api/tasks/active?project_id=${projectId}`, {
+                headers: {
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                }
+            });
+
+            if (!response.ok) return;
+
+            const data = await response.json();
+            const tasks = data.tasks || [];
+
+            if (tasks.length > 0) {
+                // Show notification about active task
+                const task = tasks[0];  // Take first active task
+                console.log('[Background] Found active task:', task);
+
+                // Show resume prompt
+                showActiveTaskNotification(task);
+            }
+        } catch (error) {
+            console.error('Error checking active tasks:', error);
+        }
+    }
+
+    /**
+     * Show notification for an active background task with option to resume monitoring.
+     */
+    function showActiveTaskNotification(task) {
+        const taskTypeLabels = {
+            'filter_citations': 'Filtrage des citations',
+            'import_citations': 'Import Zotero'
+        };
+
+        const label = taskTypeLabels[task.task_type] || task.task_type;
+        const progress = task.progress || {};
+        const percent = progress.percent || 0;
+
+        // Create notification element
+        const notification = document.createElement('div');
+        notification.className = 'active-task-notification';
+        notification.innerHTML = `
+            <div class="notification-content">
+                <i class="bi bi-arrow-repeat spin"></i>
+                <div class="notification-text">
+                    <strong>${label} en cours</strong>
+                    <small>${Math.round(percent)}% - ${progress.message || 'Processing...'}</small>
+                </div>
+                <button class="btn btn-sm btn-primary" onclick="resumeTaskMonitoring(${task.id})">
+                    Suivre
+                </button>
+            </div>
+        `;
+
+        // Add styles if not present
+        if (!document.getElementById('active-task-styles')) {
+            const styles = document.createElement('style');
+            styles.id = 'active-task-styles';
+            styles.textContent = `
+                .active-task-notification {
+                    position: fixed;
+                    bottom: 20px;
+                    right: 20px;
+                    background: var(--color-surface);
+                    border: 1px solid var(--color-brand-primary);
+                    border-radius: var(--radius-lg);
+                    padding: var(--space-4);
+                    box-shadow: var(--shadow-lg);
+                    z-index: 1000;
+                    animation: slideIn 0.3s ease;
+                }
+                .notification-content {
+                    display: flex;
+                    align-items: center;
+                    gap: var(--space-3);
+                }
+                .notification-text {
+                    display: flex;
+                    flex-direction: column;
+                }
+                .notification-text small {
+                    color: var(--color-text-secondary);
+                }
+                .spin {
+                    animation: spin 1s linear infinite;
+                }
+                @keyframes spin {
+                    from { transform: rotate(0deg); }
+                    to { transform: rotate(360deg); }
+                }
+                @keyframes slideIn {
+                    from { transform: translateX(100%); opacity: 0; }
+                    to { transform: translateX(0); opacity: 1; }
+                }
+            `;
+            document.head.appendChild(styles);
+        }
+
+        document.body.appendChild(notification);
+
+        // Store reference for removal
+        window.activeTaskNotification = notification;
+    }
+
+    /**
+     * Resume monitoring a background task.
+     */
+    function resumeTaskMonitoring(taskId) {
+        // Remove notification
+        if (window.activeTaskNotification) {
+            window.activeTaskNotification.remove();
+        }
+
+        // Determine task type and show appropriate modal
+        fetch(`/api/tasks/${taskId}`, {
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+            }
+        })
+        .then(response => response.json())
+        .then(task => {
+            const taskType = task.task_type;
+            const progress = task.progress || {};
+            const total = progress.total || 0;
+
+            if (taskType === 'filter_citations') {
+                openModal('filteringProgressModal');
+                document.getElementById('filteringProgressBar').style.width = `${progress.percent || 0}%`;
+                document.getElementById('filteringProgressText').textContent = `${progress.current || 0} / ${total} citations traitées`;
+
+                // Populate log from task logs
+                const log = document.getElementById('filteringLiveLog');
+                log.innerHTML = '';
+                (task.logs || []).forEach(line => {
+                    const logEntry = document.createElement('div');
+                    logEntry.className = 'log-entry';
+                    logEntry.textContent = line;
+                    log.appendChild(logEntry);
+                });
+
+                // Connect to stream
+                activeTaskTracker = new BackgroundTaskTracker(taskId, {
+                    onProgress: (data) => {
+                        const percent = total > 0 ? Math.round((data.current / total) * 100) : 0;
+                        document.getElementById('filteringProgressBar').style.width = `${percent}%`;
+                        document.getElementById('filteringProgressText').textContent = `${data.current} / ${total} citations traitées`;
+                    },
+                    onComplete: async () => {
+                        closeModal('filteringProgressModal');
+                        // Reload session state
+                        handlePopSessionClick(currentSessionId || task.session_folder, 'filtered');
+                    },
+                    onError: (data) => {
+                        closeModal('filteringProgressModal');
+                        showToast(data.message || 'Erreur', 'error');
+                    }
+                });
+                activeTaskTracker.connect();
+
+            } else if (taskType === 'import_citations') {
+                openModal('importingProgressModal');
+                document.getElementById('importingProgressBar').style.width = `${progress.percent || 0}%`;
+                document.getElementById('importingProgressText').textContent = `${progress.current || 0} / ${total} importées`;
+
+                activeTaskTracker = new BackgroundTaskTracker(taskId, {
+                    onProgress: (data) => {
+                        const percent = total > 0 ? Math.round((data.current / total) * 100) : 0;
+                        document.getElementById('importingProgressBar').style.width = `${percent}%`;
+                        document.getElementById('importingProgressText').textContent = `${data.current} / ${total} importées`;
+                    },
+                    onComplete: () => {
+                        closeModal('importingProgressModal');
+                        showToast('Import terminé!', 'success');
+                        loadSessions();
+                    },
+                    onError: (data) => {
+                        closeModal('importingProgressModal');
+                        showToast(data.message || 'Erreur', 'error');
+                    }
+                });
+                activeTaskTracker.connect();
+            }
+        })
+        .catch(error => {
+            console.error('Error resuming task:', error);
+            showToast('Erreur lors de la reprise', 'error');
+        });
+    }
+
     // Load data on page load
     loadMembers();
     loadSessions();
+    checkActiveBackgroundTasks();
 </script>
 {% endblock %}

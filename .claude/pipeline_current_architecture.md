@@ -1,7 +1,7 @@
 # Architecture actuelle du pipeline RAGpy
 
 **Date de création** : 2025-10-21
-**Dernière mise à jour** : 2025-12-15 (Mise à jour Fonctionnalités Futures suite analyse code)
+**Dernière mise à jour** : 2025-12-16 (Corrections bug Zotero + Cookie consent Playwright)
 **Objectif** : Documenter l'architecture existante complète avec analyse détaillée
 
 ---
@@ -545,6 +545,86 @@ def build_subprocess_env(user, required_keys=None):
 
 ---
 
+## Corrections récentes (2025-12-16)
+
+### 🐛 **Bug fix Zotero API 500 - Extraction clé item**
+
+**Problème identifié** : Après création d'un item Zotero, les attachments PDF échouaient avec erreur HTTP 500.
+
+**Cause racine** : L'API Zotero v3 retourne un objet complet dans `result["successful"]["0"]`, pas directement la clé.
+
+```python
+# ❌ Code bugué (zotero_client.py)
+item_key = result["successful"]["0"]  # Retourne objet complet {key: "ABC123", ...}
+
+# ✅ Code corrigé
+created_item = result["successful"]["0"]
+item_key = created_item["key"] if isinstance(created_item, dict) else created_item
+```
+
+**Fichiers impactés** :
+| Fichier | Fonction | Ligne |
+|---------|----------|-------|
+| `app/utils/zotero_client.py` | `create_child_note()` | ~306 |
+| `app/utils/zotero_client.py` | `create_or_update_item()` | ~1643 |
+
+### 🍪 **Cookie consent popup dismissal - Playwright PDF**
+
+**Problème** : Les conversions HTML→PDF via Playwright incluaient les bannières de consentement cookies, polluant les PDFs générés.
+
+**Solution implémentée** : Approche en 3 couches dans `app/utils/pdf_downloader.py`.
+
+**Couche 1 - Dialog handlers** :
+```python
+# Intercept et dismiss automatique des alert/confirm/prompt JS
+page.on('dialog', lambda dialog: asyncio.create_task(dialog.dismiss()))
+```
+
+**Couche 2 - Clic boutons consentement** :
+```python
+COOKIE_ACCEPT_SELECTORS = [
+    # Boutons texte (multi-langues EN/FR/DE)
+    'button:has-text("Accept")',
+    'button:has-text("Accepter")',
+    'button:has-text("Accept all")',
+    'button:has-text("Tout accepter")',
+    'button:has-text("I agree")',
+    'button:has-text("Alle akzeptieren")',
+    # Attributs ARIA
+    '[aria-label*="accept" i]',
+    '[aria-label*="consent" i]',
+    # Classes/IDs courants
+    '.cookie-accept', '#accept-cookies',
+    '[class*="cookie"] button[class*="accept"]',
+    # Data attributes
+    '[data-action="accept"]',
+    '[data-consent="accept"]',
+    # ... 40+ sélecteurs au total
+]
+```
+
+**Couche 3 - Injection CSS fallback** :
+```python
+# Masquer overlays résiduels si clics échouent
+await page.evaluate("""() => {
+    const hideSelectors = ['[class*="cookie"]', '[class*="consent"]', ...];
+    hideSelectors.forEach(sel => {
+        document.querySelectorAll(sel).forEach(el => {
+            if (el.offsetHeight > 100) el.style.display = 'none';
+        });
+    });
+    document.body.style.overflow = 'auto';  // Restaurer scroll
+}""")
+```
+
+**Nouvelle fonction** : `_dismiss_popups(page, timeout_ms=3000) -> bool`
+
+**Sites testés avec succès** :
+- Taylor & Francis (tandfonline.com)
+- MDPI (mdpi.com)
+
+---
+
 ## Roadmap et opportunités
 
 ### 🎯 **Améliorations prioritaires**
@@ -599,6 +679,8 @@ def build_subprocess_env(user, required_keys=None):
 9. **Contrôle concurrence LLM** ✅ : Sémaphore global multi-utilisateurs (2025-11-25)
 10. **Retry logic LLM** ✅ : Résilience API avec retry automatique (2025-11-25)
 11. **Sécurité credentials role-based** ✅ : Isolation ADMIN/NON-ADMIN (2025-12-07)
+12. **Cookie consent dismissal** ✅ : PDFs Playwright sans popups (2025-12-16)
+13. **Bug fix Zotero attachments** ✅ : Extraction clé item corrigée (2025-12-16)
 
 ### ⚠️ **Limitations restantes**
 
