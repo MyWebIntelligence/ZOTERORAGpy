@@ -137,6 +137,78 @@ Transformer un export Zotero (`.json` + arborescence `files/`) en CSV enrichi av
 - `OPENAI_API_KEY` et `OPENAI_OCR_MODEL` pour le fallback vision.
 - `OPENAI_OCR_MAX_PAGES`, `OPENAI_OCR_MAX_TOKENS`, `OPENAI_OCR_RENDER_SCALE` pour contrôler les appels de secours.
 
+#### Gestion des PDFs volumineux (Mistral > 50 MB)
+
+L'API Mistral `/v1/files` rejette les uploads au-dessus de ~50 MB. Pour les livres scannés et autres PDFs volumineux, RAGpy applique automatiquement (depuis 2026-05-04) une stratégie en deux temps :
+
+1. **Compression PyMuPDF** (`garbage=4` + `deflate` streams/images/fonts) si la taille dépasse `MISTRAL_MAX_UPLOAD_MB`. La compression visuelle est préservée ; seuls les objets inutiles et flux non compressés sont réduits. (Skip si seul le critère pages est dépassé — la compression ne réduit pas le nombre de pages.)
+2. **Découpage en parts** si la compression ne suffit pas OU si `page_count > MISTRAL_MAX_PAGES` (Lot G) : sub-PDFs de `MISTRAL_SPLIT_PART_MB` ET `MISTRAL_SPLIT_PART_PAGES` (les deux critères), OCRisés séquentiellement, puis concaténés avec marqueurs `<!-- Part N/M (pages A-B) -->`. **Renumérotation globale** des `<!-- Page N -->` markers : chaque part Mistral recommence à 1, le concatenateur applique un offset cumulatif pour garantir des numéros uniques (1→1188 pour un livre de 1188 pages découpé en 3 parts de 500).
+
+Variables d'environnement associées :
+
+| Variable | Défaut | Rôle |
+|----------|--------|------|
+| `MISTRAL_MAX_UPLOAD_MB` | `45` | Seuil de bascule vers le mode large-file (marge sous la limite serveur de 50 MB) |
+| `MISTRAL_MAX_PAGES` | `950` | Seuil de bascule sur le nombre de pages (limite serveur Mistral = 1000 pages, code 3730) |
+| `MISTRAL_SPLIT_PART_PAGES` | `500` | Pages cible par part découpée (Lot G — découpe par pages en plus de la taille MB) |
+| `MISTRAL_AUTO_COMPRESS` | `true` | Active la recompression PyMuPDF avant upload |
+| `MISTRAL_AUTO_SPLIT` | `true` | Active le découpage automatique si la compression ne suffit pas |
+| `MISTRAL_SPLIT_PART_MB` | `30` | Taille cible de chaque part découpée |
+
+**Fonctions concernées** (dans `scripts/rad_dataframe.py`) :
+- `_pdf_size_mb(path)` — taille en MB
+- `_compress_pdf_for_ocr(path)` — recompression vers fichier temporaire
+- `_split_pdf_for_ocr(path, max_size_mb)` — découpage en parts
+- `_extract_text_with_mistral(path, max_pages)` — orchestre fast-path / compress / split
+- `_mistral_upload_and_ocr(path, max_pages)` — upload + appel OCR pour un fichier déjà sous-limite
+
+**Garde-fous** :
+- Les fichiers temporaires (compression, parts) sont supprimés via `_safe_unlink()` même en cas d'erreur (clauses `try/finally`).
+- Si `MISTRAL_AUTO_SPLIT=false` et que le fichier reste trop gros, l'OCR échoue explicitement avec un message indiquant comment activer l'option (plutôt qu'un fallback silencieux vers PyMuPDF legacy).
+- Le sémaphore global `MISTRAL_SEMAPHORE` (`MISTRAL_CONCURRENT_CALLS`) reste respecté : chaque part prend un slot, donc un livre découpé en N parts mobilise N slots successifs.
+
+### Lot 1 — Robustesse Mistral (retry transitoire + diagnostic 401)
+
+`_mistral_upload_and_ocr` enrobe désormais `_mistral_upload_and_ocr_once` d'une boucle de retry (voir `SPRINT_ocr_resilience.md`). Un glitch transitoire Mistral (404 « Could not get file » dû à la course upload→OCR, 429, 5xx, timeout réseau) ne fait **plus** basculer immédiatement sur le fallback dégradé : il est réessayé `MISTRAL_OCR_RETRIES` fois (défaut 4) avec **backoff exponentiel** `MISTRAL_OCR_RETRY_BACKOFF * 2**tentative`, plafonné à `MISTRAL_OCR_RETRY_MAX_BACKOFF` (défaut 60 s), **avec jitter** (anti-thundering-herd sur les workers parallèles).
+
+- `_classify_mistral_http_error(exc, pdf_path)` mappe le `requests.HTTPError` :
+  - **401** → `OCRExtractionError` **permanent** avec message actionnable : « clé invalide OU plafond de dépense mensuel atteint (console.mistral.ai → Limits) » (cf. mémoire `reference-mistral-401-spend-cap`). **Jamais** réessayé.
+  - **404 / 408 / 429 / 5xx** → `_MistralTransientError` (réessayé).
+  - autres 4xx → `OCRExtractionError` permanent.
+- **`Retry-After` (429)** : `_parse_retry_after` lit l'en-tête (delta-secondes **et** HTTP-date) et l'attache à `_MistralTransientError.retry_after` ; `_mistral_retry_wait(attempt, retry_after)` le respecte **exactement** (plafonné, sans jitter) au lieu du backoff calculé.
+- Le sémaphore est acquis **par tentative** dans `_once` ; le `time.sleep` du backoff a lieu dans le wrapper, **hors slot**, donc un retry endormi ne bloque pas les autres workers.
+- Variables : `MISTRAL_OCR_RETRIES` (défaut 4), `MISTRAL_OCR_RETRY_BACKOFF` (défaut 3.0 s), `MISTRAL_OCR_RETRY_MAX_BACKOFF` (défaut 60 s).
+
+**Salvage partiel des livres découpés (review-driven).** `_extract_text_with_mistral` renvoie désormais un `_MistralOcr(text, partial, pages_done, pages_total, error)`. Dans le chemin split, une part qui échoue après ses retries ne jette **plus** tout le livre : les parts réussies sont conservées, la part échouée laisse un marqueur explicite `<!-- … OCR ÉCHOUÉ … -->` (la renumérotation globale des pages est préservée), et le résultat est flaggé `partial=True` (→ `texteocr_partial` + `OCR_PARTIAL` dans errors.json). Deux exceptions au salvage : (1) `_MistralAuthError` (401, niveau **compte** : clé/plafond — les autres parts échoueraient pareil) **abandonne** le livre pour que le 401 remonte ; (2) si **toutes** les parts échouent, on lève `OCRExtractionError` (→ fallback legacy).
+
+### Politique fournisseurs — OpenAI Vision désactivé par défaut
+
+La chaîne OCR par défaut est désormais **Mistral → legacy (PyMuPDF)**. Le fallback **OpenAI Vision est désactivé** (`OCR_ENABLE_OPENAI_FALLBACK=0`, défaut) : sa transcription page-par-page est plafonnée à `OPENAI_OCR_MAX_PAGES` et tronque silencieusement les livres. La branche OpenAI (avec ses garde-fous partiels Lot 2) reste dans le code et n'est exécutée que si `OCR_ENABLE_OPENAI_FALLBACK=1`. Quand Mistral échoue (ex. 401 plafond) et OpenAI est désactivé, on tombe directement sur legacy — flaggé `partial` par le garde-fou de densité si le texte est trop maigre (livre scanné). Conseil d'exploitation : aligner `PDF_EXTRACTION_WORKERS` sur `MISTRAL_CONCURRENT_CALLS` pour limiter les 429.
+
+### Lot 2 — Garde-fou anti-troncature (jamais de « success » silencieux)
+
+Un OCR manifestement incomplet n'est **plus jamais** marqué succès silencieux. `OCRResult` porte maintenant `partial: bool`, `pages_done`, `pages_total`, `error`, propagés dans le CSV (`texteocr_partial`, `texteocr_pages_done`, `texteocr_pages_total`) et dans `*_errors.json` (entrée `error_type="OCR_PARTIAL"` + `logger.warning`).
+
+- **Provider plafonné (OpenAI vision, `OPENAI_OCR_MAX_PAGES`)** : `_extract_text_with_openai` renvoie un `_PagedOcr(text, pages_done, pages_total)`. Si `pages_done < pages_total` (ex. livre 284 p → 10 pages), `extract_text_with_ocr` tente d'abord le moteur **non plafonné** (legacy) ; si legacy n'est pas plus complet, il renvoie le texte OpenAI **flaggé `partial=True`** avec le détail des pages.
+- **Heuristique de densité générique** : `_ocr_density_warning(text, pages_total, ...)` flague `partial=True` quand la densité < `OCR_MIN_CHARS_PER_PAGE` car./page (défaut 500) — typiquement un livre scanné passé dans l'extracteur texte PyMuPDF legacy. Appliquée aux résultats OpenAI complets et au fallback legacy ; **le chemin Mistral (bon) n'est pas touché** pour éviter les faux positifs.
+- Variable : `OCR_MIN_CHARS_PER_PAGE` (défaut 500).
+
+Tests : `tests/test_ocr_providers.py` (classification d'erreur, boucle de retry, flag partiel, densité, chaîne de fallback — 30 tests).
+
+### Lot H — Détection structure par headings markdown (book note)
+
+Quand un livre n'a **aucune Table des matières imprimée** (ex. monographies poche dont la ToC a été retirée pour économiser des pages, ou OCR qui n'a pas capturé la ToC), Phase 1 du `book_note_generator` ne peut rien deviner depuis les `PHASE1_TOC_PAGES` (premières) ou `PHASE1_LAST_TOC_PAGES` (dernières) — généralement remerciements / bibliographie. Résultat : le LLM retourne 1-2 chapitres et la note finale est tronquée.
+
+Mistral OCR émet pourtant `# Chapitre N. Titre` en markdown H1 dans le corps du livre. Lot H exploite ce signal :
+
+1. **`_CHAPTER_PATTERNS_EXPLICIT`** (priorité 1) — `Chapitre N` / `Chapter N` / `IV. Title` avec préfixe markdown optionnel `^(?:\s*#{1,6}\s+|\s*)`.
+2. **`_CHAPTER_PATTERN_H1_FALLBACK`** (priorité 2) — quand priorité 1 retourne <3 chapitres, on retombe sur tous les H1 markdown bruts `^#\s+(.{3,200})$`. Mistral utilise H1 uniquement pour les sauts de chapitre (H2-H3 = sous-sections gérées par `_detect_sections`), donc même les livres dont les chapitres n'ont pas de numérotation explicite (ex. *L'esprit sociologique* de Lahire — chapitres nommés uniquement par leur titre) sont correctement segmentés. Les paratextes (DU MÊME AUTEUR, Remerciements, Bibliographie) sont laissés à Phase 1 LLM qui les marque `is_paratext=True`.
+3. **`_split_text_into_chapters_heuristic`** retourne `(heading, body, (start_page, end_page))` ; les pages sont lues depuis le `<!-- Page N -->` voisin via `_page_marker_positions` + `_page_at_offset`.
+4. **`_build_initial_structure`** marque `structure_signal="markdown_headings"` quand ≥3 chapitres détectés avec corps substantiels (≥`MIN_CHAPTER_CHARS`). Les entrées de ToC qui matchent aussi le pattern (corps trop courts) sont filtrées au lieu de déclencher un fallback wholesale vers `_split_text_into_fixed_parts`.
+5. **Garde-fou dans `_merge_llm_structure`** : si Phase 0 a `markdown_headings` ≥3 chapitres et Phase 1 retourne `< max(3, len(initial)//2)`, on garde la structure Phase 0 et on marque `structure_signal="markdown_headings_guardrail"`. Évite la régression observée sur Lahire 1188 pages où Phase 1 retournait 2 chapitres au lieu de 17.
+
+Tests : `tests/test_book_note_generator_v2.py::TestLotHMarkdownHeadings` (7 tests, dont 2 spécifiques au fallback H1).
+
 ### Paramètres CLI
 ```bash
 python scripts/rad_dataframe.py \
@@ -150,7 +222,7 @@ python scripts/rad_dataframe.py \
 
 ### Comportement remarqué
 - En cas de PDF introuvable, tente une recherche fuzzy (normalisation accent, Levenshtein ≤ 2) dans le dossier visé.
-- `extract_text_with_ocr` commence par envoyer les PDF à l'endpoint `v1/ocr` de Mistral (upload + document_id), puis bascule sur un fallback OpenAI vision, avant de revenir au flux PyMuPDF historique si aucun service distant n'est disponible.
+- `extract_text_with_ocr` commence par envoyer les PDF à l'endpoint `v1/ocr` de Mistral (upload + document_id). Si le fichier dépasse `MISTRAL_MAX_UPLOAD_MB` il est compressé puis, si nécessaire, découpé en parts avant upload (voir section « Gestion des PDFs volumineux » ci-dessus). En cas d'échec Mistral, fallback OpenAI vision puis flux PyMuPDF historique si aucun service distant n'est disponible.
 - Les métadonnées extraites incluent désormais `texteocr_provider` pour tracer l'origine (`mistral`, `openai`, `legacy`).
 - Le CSV est encodé en `utf-8-sig` pour compatibilité Excel.
 

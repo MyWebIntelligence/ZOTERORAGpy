@@ -36,11 +36,14 @@ SENTINEL_PREFIX = "ragpy-note-id:"
 # =============================================================================
 
 # Mapping of note modes to template files
+# NOTE: "book" mode is multi-phase and dispatched to book_note_generator.py;
+# its template file (book_prompt.md) is parsed there, not loaded by _load_prompt_template().
 TEMPLATE_MAP = {
     "extended": "zotero_prompt.md",
     "short": "zotero_prompt_short.md",
     "pedagogique": "zotero_prompt_pedagogique.md",
-    "evaluation": "zotero_prompt_evaluation.md"
+    "evaluation": "zotero_prompt_evaluation.md",
+    "book": "book_prompt.md"
 }
 
 # Mapping of note modes to display prefixes (for Zotero note identification)
@@ -48,15 +51,18 @@ NOTE_MODE_PREFIX = {
     "extended": "[FICHE]",
     "pedagogique": "[CLAIR]",
     "evaluation": "[EVAL]",
+    "book": "[LIVRE]",
     "short": ""  # No prefix for short summaries
 }
 
-# Mapping of note modes to max_tokens
+# Mapping of note modes to max_tokens (per LLM call ; book mode uses
+# multiple smaller calls and overrides this in book_note_generator).
 NOTE_MODE_MAX_TOKENS = {
     "extended": 16000,
     "short": 2000,
     "pedagogique": 10000,
-    "evaluation": 10000
+    "evaluation": 10000,
+    "book": 8000
 }
 
 # Display names for UI
@@ -64,6 +70,7 @@ NOTE_MODE_DISPLAY = {
     "extended": "Fiche de lecture [FICHE]",
     "pedagogique": "Fiche pédagogique [CLAIR]",
     "evaluation": "Grille d'évaluation [EVAL]",
+    "book": "Fiche de lecture livre [LIVRE]",
     "short": "Résumé court"
 }
 

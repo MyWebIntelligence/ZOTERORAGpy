@@ -834,6 +834,62 @@ def infer_item_type_from_source(source: Optional[str]) -> str:
     return "journalArticle"
 
 
+def build_basic_zotero_item(citation: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Construit un item Zotero basique à partir des données PoP brutes (sans LLM).
+
+    Utilise :
+    - infer_item_type_from_source() pour deviner itemType
+    - parse_authors_list() pour parser les auteurs
+    - Mapping direct des champs PoP disponibles
+
+    Args:
+        citation: Dict contenant les champs PoP (title, authors, year, source, etc.)
+
+    Returns:
+        Dict Zotero item compatible avec create_or_update_item()
+
+    Example:
+        >>> citation = {"title": "Test", "authors": ["Smith J"], "year": 2024, "source": "Nature"}
+        >>> zotero_item = build_basic_zotero_item(citation)
+        >>> zotero_item["itemType"]
+        'journalArticle'
+    """
+    # 1. Inférer itemType depuis le champ 'source'
+    source = citation.get("source", "")
+    item_type = infer_item_type_from_source(source)
+
+    # 2. Parser les auteurs
+    authors_raw = citation.get("authors", [])
+    if isinstance(authors_raw, str):
+        authors_raw = [authors_raw]
+    creators = parse_authors_list(authors_raw)
+
+    # 3. Construire l'item Zotero
+    zotero_item = {
+        "itemType": item_type,
+        "title": citation.get("title", "Untitled"),
+        "creators": creators,
+        "date": str(citation.get("year", "")) if citation.get("year") else "",
+        "url": citation.get("article_url") or citation.get("fulltext_url") or "",
+        "DOI": citation.get("doi", ""),
+        "abstractNote": citation.get("abstract", ""),
+        "extra": f"citation:{citation.get('cites', 0)}",  # Préserver le nombre de citations
+    }
+
+    # 4. Ajouter publicationTitle si pertinent
+    if source and item_type in ["journalArticle", "conferencePaper"]:
+        zotero_item["publicationTitle"] = source
+
+    # 5. Nettoyer champs vides
+    zotero_item = {k: v for k, v in zotero_item.items() if v}
+
+    # 6. Sanitize selon itemType (utiliser sanitize_zotero_item existant)
+    zotero_item = sanitize_zotero_item(zotero_item)
+
+    return zotero_item
+
+
 def parse_author_name(author_str: str) -> ZoteroCreator:
     """
     Parse author name string into Zotero creator format.

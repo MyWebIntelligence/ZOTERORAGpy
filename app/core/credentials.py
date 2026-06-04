@@ -341,6 +341,40 @@ def update_user_credentials(user: User, updates: Dict[str, str], db: Session) ->
     db.commit()
 
 
+def _normalise_mistral_base_url(value: str) -> str:
+    """
+    Strip any path suffix from a stored Mistral base URL.
+
+    The codebase appends specific paths (`/v1/files`, `/v1/ocr`) to
+    `MISTRAL_API_BASE_URL`, so the env value must be the bare host. Some user
+    credential records have historically stored the OCR endpoint
+    (`https://api.mistral.ai/v1/ocr`) here, leading to malformed requests
+    such as `https://api.mistral.ai/v1/ocr/v1/files` that 404.
+
+    Returns the base URL trimmed to scheme+host (e.g. `https://api.mistral.ai`).
+    Logs a warning when normalisation actually changes the input.
+    """
+    if not value:
+        return value
+    cleaned = value.strip().rstrip("/")
+    # Match any URL whose path is non-empty and re-emit only scheme+netloc.
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(cleaned)
+        if parsed.scheme and parsed.netloc and parsed.path:
+            normalised = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
+            if normalised != cleaned:
+                logger.warning(
+                    "Mistral base URL credential normalised: %r → %r "
+                    "(le suffixe de chemin a été retiré pour éviter les 404).",
+                    value, normalised,
+                )
+                return normalised
+    except Exception as exc:
+        logger.debug("Mistral URL normalisation skipped: %s", exc)
+    return cleaned
+
+
 def build_subprocess_env(
     user: User,
     required_keys: List[str] = None
@@ -391,6 +425,13 @@ def build_subprocess_env(
     for cred_key, env_key in CREDENTIAL_ENV_MAPPING.items():
         value = user_creds.get(cred_key)
         if value:
+            # Defensive normalisation for known-broken historical values.
+            # Some users saved `mistral_url` as `https://api.mistral.ai/v1/ocr`
+            # (the OCR endpoint path leaked into the base URL setting), which
+            # then produces requests to `.../v1/ocr/v1/files` and fails with
+            # 404. Strip any `/v1/...` suffix so the base URL is the host.
+            if cred_key == "mistral_url":
+                value = _normalise_mistral_base_url(value)
             env[env_key] = value
             logger.debug(f"Injected user credential '{cred_key}' as '{env_key}'")
 

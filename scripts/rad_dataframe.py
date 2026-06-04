@@ -26,6 +26,7 @@ import unicodedata
 import base64
 import time
 import csv
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
@@ -274,6 +275,42 @@ MISTRAL_OCR_MODEL = os.getenv("MISTRAL_OCR_MODEL", "mistral-ocr-latest")
 MISTRAL_OCR_TIMEOUT = _env_int("MISTRAL_OCR_TIMEOUT", 300)
 MISTRAL_DELETE_UPLOADED_FILE = _truthy_env(os.getenv("MISTRAL_DELETE_UPLOADED_FILE"), True)
 
+# Lot 1 — transient-error resilience. Mistral occasionally returns a 404
+# "Could not get file" right after a successful upload (upload→OCR race) or a
+# 5xx/429; those are worth retrying before falling back to a degraded provider.
+# A 401 is NOT retried (key refused or monthly spend cap).
+# Backoff is exponential (MISTRAL_OCR_RETRY_BACKOFF * 2**attempt), capped at
+# MISTRAL_OCR_RETRY_MAX_BACKOFF, with jitter added at the sleep site to avoid a
+# thundering herd when many parallel workers hit a 429 in the same window. A
+# server `Retry-After` header (429) overrides the computed wait.
+MISTRAL_OCR_RETRIES = _env_int("MISTRAL_OCR_RETRIES", 4)
+MISTRAL_OCR_RETRY_BACKOFF = _env_float("MISTRAL_OCR_RETRY_BACKOFF", 3.0)
+MISTRAL_OCR_RETRY_MAX_BACKOFF = _env_float("MISTRAL_OCR_RETRY_MAX_BACKOFF", 60.0)
+
+# Provider policy — the OpenAI Vision fallback is OFF by default (operational
+# requirement). Its page-by-page transcription is lower fidelity AND hard-capped
+# at OPENAI_OCR_MAX_PAGES, silently truncating books. The OCR chain is therefore
+# Mistral → legacy (PyMuPDF). Set OCR_ENABLE_OPENAI_FALLBACK=1 to re-enable the
+# opt-in OpenAI branch (kept intact, with the Lot 2 partial/truncation guards).
+OCR_ENABLE_OPENAI_FALLBACK = _truthy_env(os.getenv("OCR_ENABLE_OPENAI_FALLBACK"), False)
+
+# Large-file handling for Mistral OCR uploads (server-side limit ≈ 50 MB).
+# When a PDF exceeds MISTRAL_MAX_UPLOAD_MB, the pipeline first attempts to
+# recompress it (PyMuPDF garbage collection + deflate). If the file is still
+# too large, it is split into sub-PDFs of MISTRAL_SPLIT_PART_MB and each part
+# is OCR'd separately, then concatenated.
+MISTRAL_MAX_UPLOAD_MB = _env_float("MISTRAL_MAX_UPLOAD_MB", 45.0)
+MISTRAL_AUTO_COMPRESS = _truthy_env(os.getenv("MISTRAL_AUTO_COMPRESS"), True)
+MISTRAL_AUTO_SPLIT = _truthy_env(os.getenv("MISTRAL_AUTO_SPLIT"), True)
+MISTRAL_SPLIT_PART_MB = _env_float("MISTRAL_SPLIT_PART_MB", 30.0)
+
+# Mistral OCR also rejects documents whose page count exceeds 1000 (HTTP 400
+# code 3730: "document_parser_too_many_pages"). The size-MB split alone does
+# not catch this because some PDFs are large in pages but light in bytes
+# (e.g. text-only academic books > 1000 pages but < 15 MB). Lot G:
+MISTRAL_MAX_PAGES = _env_int("MISTRAL_MAX_PAGES", 950)
+MISTRAL_SPLIT_PART_PAGES = _env_int("MISTRAL_SPLIT_PART_PAGES", 500)
+
 OPENAI_OCR_MODEL = os.getenv("OPENAI_OCR_MODEL", "gpt-4o-mini")
 OPENAI_OCR_PROMPT = os.getenv(
     "OPENAI_OCR_PROMPT",
@@ -282,6 +319,12 @@ OPENAI_OCR_PROMPT = os.getenv(
 OPENAI_OCR_MAX_PAGES = _env_int("OPENAI_OCR_MAX_PAGES", 10)
 OPENAI_OCR_MAX_TOKENS = _env_int("OPENAI_OCR_MAX_TOKENS", 2048)
 OPENAI_OCR_RENDER_SCALE = _env_float("OPENAI_OCR_RENDER_SCALE", 2.0)
+
+# Lot 2 — anti-truncation guard. Below this average character density a text
+# document is almost certainly under-extracted (e.g. a scanned book run
+# through the PyMuPDF legacy text extractor). Such results are flagged
+# `partial` instead of being returned as a silent success.
+OCR_MIN_CHARS_PER_PAGE = _env_int("OCR_MIN_CHARS_PER_PAGE", 500)
 
 
 # ============================================================================
@@ -464,9 +507,71 @@ class OCRExtractionError(Exception):
     """Raised when OCR extraction fails for all providers."""
 
 
+class _MistralTransientError(Exception):
+    """Internal: a transient Mistral OCR failure worth retrying (Lot 1).
+
+    Examples: HTTP 404 "Could not get file" right after upload, 429 rate
+    limiting, 5xx server errors. Distinguished from permanent failures (401
+    auth/spend-cap, other 4xx, empty response) which must NOT be retried and
+    propagate as OCRExtractionError instead.
+
+    `retry_after` carries the server-directed wait (seconds) parsed from a 429
+    `Retry-After` header when present; the retry loop honours it over its own
+    computed backoff.
+    """
+    retry_after: Optional[float] = None
+
+
+class _MistralAuthError(OCRExtractionError):
+    """Permanent, account-level Mistral failure (HTTP 401).
+
+    Either the key is invalid or the workspace monthly spend cap is reached
+    (see memory `reference-mistral-401-spend-cap`). It is account-global, so
+    when a multi-part book is being OCR'd part-by-part there is no point trying
+    the remaining parts — they would all 401 too. The split loop re-raises this
+    immediately (aborting the book) instead of salvaging, whereas a part-local
+    failure salvages the successful parts.
+    """
+
+
 class OCRResult(NamedTuple):
+    """OCR outcome for one document.
+
+    `partial` (Lot 2) is True when the text is known to be incomplete — a
+    capped provider (OpenAI vision, OPENAI_OCR_MAX_PAGES) that processed fewer
+    pages than the document holds, or a result whose character density is
+    suspiciously low. `pages_done`/`pages_total` quantify the coverage and
+    `error` carries a human-readable explanation for errors.json / the UI.
+    """
     text: str
     provider: str
+    partial: bool = False
+    pages_done: int = 0
+    pages_total: int = 0
+    error: Optional[str] = None
+
+
+class _PagedOcr(NamedTuple):
+    """Internal return type carrying page-coverage info from a page-based
+    provider (currently OpenAI vision) up to `extract_text_with_ocr`."""
+    text: str
+    pages_done: int
+    pages_total: int
+
+
+class _MistralOcr(NamedTuple):
+    """Internal return type of `_extract_text_with_mistral`.
+
+    Beyond the markdown `text`, it reports whether the document was only
+    PARTIALLY OCR'd — used when a split book had some parts fail but others
+    succeed (salvage instead of discarding everything). `pages_done` /
+    `pages_total` quantify coverage; `error` summarises the failed parts.
+    """
+    text: str
+    partial: bool = False
+    pages_done: int = 0
+    pages_total: int = 0
+    error: Optional[str] = None
 
 
 def _extract_text_with_legacy_pdf(pdf_path: str, max_pages: Optional[int] = None) -> str:
@@ -506,26 +611,566 @@ def _extract_text_with_legacy_pdf(pdf_path: str, max_pages: Optional[int] = None
     return "\n\n".join(filter(None, full_text))
 
 
-def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -> str:
-    """
-    Extract text from PDF using Mistral OCR API with rate limiting.
+def _pdf_size_mb(pdf_path: str) -> float:
+    """Return the size of a PDF file in megabytes."""
+    return os.path.getsize(pdf_path) / (1024 * 1024)
 
-    Uses a semaphore to limit concurrent API calls and prevent rate limit errors.
-    The semaphore value is controlled by MISTRAL_CONCURRENT_CALLS env variable.
+
+def _pdf_page_count(pdf_path: str) -> int:
+    """
+    Return the page count of a PDF using PyMuPDF.
+
+    Returns 0 on any error (corrupted PDF, missing dep). Callers must treat
+    a 0 return as "unknown" — Lot G uses this defensively to avoid splitting
+    a PDF whose page count cannot be determined.
+    """
+    try:
+        with fitz.open(pdf_path) as doc:
+            return doc.page_count
+    except Exception as exc:  # noqa: BLE001 — defensive
+        logger.warning("Page count unavailable for %s: %s", pdf_path, exc)
+        return 0
+
+
+def _compress_pdf_for_ocr(pdf_path: str) -> str:
+    """
+    Recompress a PDF using PyMuPDF to reduce file size before Mistral upload.
+
+    Applies garbage collection (level 4 — most aggressive) and deflate
+    compression on streams, images and fonts. The visual content is preserved;
+    only object overhead and uncompressed streams are reduced.
 
     Args:
-        pdf_path: Path to the PDF file to process
-        max_pages: Optional maximum number of pages to process
+        pdf_path: Path to the source PDF file.
 
     Returns:
-        Extracted text in Markdown format
+        Path to a temporary recompressed PDF file. Caller is responsible for
+        deleting the temporary file.
 
     Raises:
-        OCRExtractionError: If API key is missing or extraction fails
+        OCRExtractionError: If PyMuPDF fails to open or save the document.
+    """
+    import tempfile
+
+    try:
+        doc = fitz.open(pdf_path)
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="ragpy_compressed_",
+            suffix=".pdf",
+            delete=False,
+        )
+        tmp.close()
+        doc.save(
+            tmp.name,
+            garbage=4,
+            deflate=True,
+            deflate_images=True,
+            deflate_fonts=True,
+        )
+        doc.close()
+        return tmp.name
+    except Exception as exc:
+        raise OCRExtractionError(
+            f"Échec de la compression PDF pour {pdf_path}: {exc}"
+        ) from exc
+
+
+def _split_pdf_for_ocr(
+    pdf_path: str,
+    max_size_mb: float,
+    max_pages: Optional[int] = None,
+) -> List[str]:
+    """
+    Split a large PDF into sub-PDFs each respecting both constraints.
+
+    The number of pages per part is the minimum that satisfies BOTH:
+      - the file-size constraint (`max_size_mb`), estimated by linear ratio
+        from the source size;
+      - the page-count constraint (`max_pages`), enforced as a hard cap so
+        we stay under the Mistral OCR server limit (1000 pages, code 3730).
+
+    Each part is recompressed (garbage=4, deflate) to maximise the chance of
+    staying under the size cap.
+
+    Args:
+        pdf_path: Path to the source PDF file.
+        max_size_mb: Target maximum size per part, in megabytes.
+        max_pages: Optional hard cap on pages per part (None = no cap).
+
+    Returns:
+        Ordered list of temporary file paths for each part. Caller is
+        responsible for deleting them.
+
+    Raises:
+        OCRExtractionError: If splitting fails or the resulting parts are empty.
+    """
+    import tempfile
+
+    try:
+        size_mb = _pdf_size_mb(pdf_path)
+        doc = fitz.open(pdf_path)
+        total_pages = len(doc)
+        if total_pages == 0:
+            doc.close()
+            raise OCRExtractionError(f"PDF vide: {pdf_path}")
+
+        # Pages per part — start from file-size ratio, then clamp by page cap.
+        ratio = max_size_mb / max(size_mb, 0.001)
+        pages_per_part = max(1, int(total_pages * ratio))
+        if max_pages is not None and max_pages > 0:
+            pages_per_part = min(pages_per_part, max_pages)
+        # Always ≤ total_pages so range() loops at least once.
+        pages_per_part = min(pages_per_part, total_pages)
+
+        parts: List[str] = []
+        for start in range(0, total_pages, pages_per_part):
+            end = min(start + pages_per_part - 1, total_pages - 1)
+            sub = fitz.open()
+            sub.insert_pdf(doc, from_page=start, to_page=end)
+
+            tmp = tempfile.NamedTemporaryFile(
+                prefix=f"ragpy_part_p{start + 1}-{end + 1}_",
+                suffix=".pdf",
+                delete=False,
+            )
+            tmp.close()
+            sub.save(tmp.name, garbage=4, deflate=True)
+            sub.close()
+            parts.append(tmp.name)
+
+        doc.close()
+
+        if not parts:
+            raise OCRExtractionError(
+                f"Échec du découpage du PDF: aucune part générée pour {pdf_path}"
+            )
+        return parts
+    except OCRExtractionError:
+        raise
+    except Exception as exc:
+        raise OCRExtractionError(
+            f"Échec du découpage PDF pour {pdf_path}: {exc}"
+        ) from exc
+
+
+def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -> "_MistralOcr":
+    """
+    Extract text from PDF using Mistral OCR with size-aware preprocessing.
+
+    Mistral's `/v1/files` endpoint rejects uploads above ~50 MB. This wrapper
+    implements a 3-step strategy before delegating to the actual upload call:
+
+    1. If the file is below MISTRAL_MAX_UPLOAD_MB, upload it directly.
+    2. If MISTRAL_AUTO_COMPRESS is enabled, attempt PyMuPDF recompression.
+       If the result fits, OCR it as a single document.
+    3. If MISTRAL_AUTO_SPLIT is enabled, split the (compressed) PDF into
+       parts of MISTRAL_SPLIT_PART_MB, OCR each part sequentially, and
+       concatenate the markdown outputs with explicit page-range markers.
+
+    Resilience (review-driven): in the split path, a part that fails after its
+    own retries no longer discards the whole book. The successful parts are
+    kept, the failed part leaves an explicit `<!-- … OCR ÉCHOUÉ … -->` marker
+    (preserving global page numbering), and the result is flagged `partial`.
+    Only an account-level 401 (`_MistralAuthError`) or an all-parts-failed run
+    raises — so the caller can fall back.
+
+    Args:
+        pdf_path: Path to the PDF file to process.
+        max_pages: Optional cap on the number of pages to process. When
+            splitting, this cap is honoured globally (parts beyond the cap
+            are skipped).
+
+    Returns:
+        `_MistralOcr(text, partial, pages_done, pages_total, error)`. `text` is
+        Markdown; split documents prefix each part with `<!-- Part N … -->`.
+
+    Raises:
+        _MistralAuthError: On HTTP 401 (account-level — aborts the book).
+        OCRExtractionError: If MISTRAL_API_KEY is missing, every part failed,
+            or the file remains over-size with auto-handling disabled.
     """
     if not MISTRAL_API_KEY:
         raise OCRExtractionError("MISTRAL_API_KEY manquante.")
 
+    size_mb = _pdf_size_mb(pdf_path)
+    page_count = _pdf_page_count(pdf_path)
+    over_size = size_mb > MISTRAL_MAX_UPLOAD_MB
+    over_pages = page_count > MISTRAL_MAX_PAGES > 0
+
+    # Fast path: file under both limits.
+    if not over_size and not over_pages:
+        text = _mistral_upload_and_ocr(pdf_path, max_pages=max_pages)
+        return _MistralOcr(
+            text=text, partial=False,
+            pages_done=page_count, pages_total=page_count,
+        )
+
+    logger.info(
+        "PDF %s = %.1f MB / %d pages > seuils Mistral (%.1f MB / %d pages) — "
+        "bascule sur le mode large-file.",
+        pdf_path, size_mb, page_count, MISTRAL_MAX_UPLOAD_MB, MISTRAL_MAX_PAGES,
+    )
+
+    # Step 1: try compression. Only useful when the size is the blocker;
+    # compression cannot reduce the page count, so a 1188-page PDF will still
+    # need to be split even after recompression.
+    skip_compression = over_pages and not over_size
+    compressed_path: Optional[str] = None
+    if MISTRAL_AUTO_COMPRESS and not skip_compression:
+        try:
+            compressed_path = _compress_pdf_for_ocr(pdf_path)
+            compressed_size = _pdf_size_mb(compressed_path)
+            logger.info(
+                "Compression PDF: %.1f MB → %.1f MB (%s)",
+                size_mb, compressed_size, os.path.basename(compressed_path),
+            )
+            # Only return early on compression if BOTH limits are now satisfied
+            # (compression cannot reduce the page count).
+            if compressed_size <= MISTRAL_MAX_UPLOAD_MB and not over_pages:
+                try:
+                    text = _mistral_upload_and_ocr(compressed_path, max_pages=max_pages)
+                    return _MistralOcr(
+                        text=text, partial=False,
+                        pages_done=page_count, pages_total=page_count,
+                    )
+                finally:
+                    _safe_unlink(compressed_path)
+        except OCRExtractionError as comp_err:
+            logger.warning("Compression échouée pour %s: %s", pdf_path, comp_err)
+            _safe_unlink(compressed_path)
+            compressed_path = None
+
+    # Step 2: split (use compressed file if available, otherwise the original).
+    if not MISTRAL_AUTO_SPLIT:
+        _safe_unlink(compressed_path)
+        reason = (
+            f"PDF trop volumineux ({size_mb:.1f} MB)"
+            if over_size
+            else f"PDF trop long ({page_count} pages > {MISTRAL_MAX_PAGES})"
+        )
+        raise OCRExtractionError(
+            f"{reason} pour Mistral et MISTRAL_AUTO_SPLIT désactivé. "
+            f"Activez MISTRAL_AUTO_SPLIT=true ou réduisez le document en amont."
+        )
+
+    source_for_split = compressed_path or pdf_path
+    parts: List[str] = []
+    try:
+        parts = _split_pdf_for_ocr(
+            source_for_split,
+            max_size_mb=MISTRAL_SPLIT_PART_MB,
+            max_pages=MISTRAL_SPLIT_PART_PAGES,
+        )
+        logger.info(
+            "Découpage PDF %s en %d parts (cible ≤ %.1f MB / ≤ %d pages chacune).",
+            os.path.basename(pdf_path),
+            len(parts),
+            MISTRAL_SPLIT_PART_MB,
+            MISTRAL_SPLIT_PART_PAGES,
+        )
+
+        markdown_blocks: List[str] = []
+        remaining_pages = max_pages
+        page_offset = 0  # Lot G — global page renumbering across parts.
+        succeeded_parts = 0
+        failed_parts: List[str] = []   # human-readable "i/N (pages A-B)"
+        pages_done = 0
+        for idx, part_path in enumerate(parts, start=1):
+            # Compute per-part max_pages so the global cap is honoured.
+            part_max_pages = remaining_pages if remaining_pages is not None else None
+            if part_max_pages is not None and part_max_pages <= 0:
+                logger.info("Cap max_pages atteint, parts restantes ignorées.")
+                break
+
+            # Page count is read up-front so global numbering advances even for
+            # a failed part (the gap stays honest and book_note sees it).
+            with fitz.open(part_path) as part_doc:
+                part_page_count = len(part_doc)
+            part_range = f"{page_offset + 1}-{page_offset + part_page_count}"
+
+            try:
+                part_text = _mistral_upload_and_ocr(part_path, max_pages=part_max_pages)
+            except _MistralAuthError:
+                # Account-level 401 (spend cap / bad key): the remaining parts
+                # would all fail too — abort the whole book so the caller can
+                # surface the actionable error rather than salvage a fragment.
+                logger.error(
+                    "Échec OCR Mistral 401 (compte) sur la part %d/%d — abandon du livre.",
+                    idx, len(parts),
+                )
+                raise
+            except Exception as part_err:
+                # Part-local failure (transient exhausted, oversize, empty …).
+                # Salvage: keep going, leave an explicit gap marker.
+                logger.error(
+                    "Échec OCR Mistral sur la part %d/%d (pages %s): %s — "
+                    "part ignorée, OCR partiel.",
+                    idx, len(parts), part_range, part_err,
+                )
+                failed_parts.append(f"{idx}/{len(parts)} (pages {part_range})")
+                markdown_blocks.append(
+                    f"<!-- Part {idx}/{len(parts)} (pages {part_range}) — "
+                    f"OCR ÉCHOUÉ: {part_err} -->"
+                )
+                page_offset += part_page_count
+                if remaining_pages is not None:
+                    remaining_pages -= part_page_count
+                continue
+
+            # Lot G — Mistral indexes page markers from 1 within each part.
+            # When we concatenate N parts, raw output would have duplicate
+            # `<!-- Page 1 -->`, `<!-- Page 2 -->`, ... per part, breaking
+            # downstream chapter slicing (book_note_generator). Renumber by
+            # adding a cumulative offset = sum of pages in previous parts.
+            if page_offset > 0:
+                def _shift_page(m: "re.Match[str]", offset: int = page_offset) -> str:
+                    try:
+                        return f"<!-- Page {int(m.group(1)) + offset} -->"
+                    except (TypeError, ValueError):
+                        return m.group(0)
+                part_text = re.sub(
+                    r"<!--\s*Page\s+(\d+)\s*-->",
+                    _shift_page,
+                    part_text,
+                )
+
+            markdown_blocks.append(
+                f"<!-- Part {idx}/{len(parts)} (pages {part_range}) -->\n{part_text}"
+            )
+            succeeded_parts += 1
+            pages_done += part_page_count
+            page_offset += part_page_count
+
+            if remaining_pages is not None:
+                remaining_pages -= part_page_count
+
+        if succeeded_parts == 0:
+            # Every part failed — let the caller fall back (legacy).
+            raise OCRExtractionError(
+                f"Aucune part OCRisée avec succès pour {pdf_path} "
+                f"({len(failed_parts)} parts en échec)."
+            )
+
+        partial = bool(failed_parts)
+        error_summary = None
+        if partial:
+            error_summary = (
+                f"OCR Mistral partiel : {len(failed_parts)}/{len(parts)} parts "
+                f"en échec ({', '.join(failed_parts)})."
+            )
+            logger.warning("%s pour %s", error_summary, pdf_path)
+        return _MistralOcr(
+            text="\n\n".join(markdown_blocks),
+            partial=partial,
+            pages_done=pages_done,
+            pages_total=page_offset,
+            error=error_summary,
+        )
+    finally:
+        for p in parts:
+            _safe_unlink(p)
+        _safe_unlink(compressed_path)
+
+
+def _safe_unlink(path: Optional[str]) -> None:
+    """Best-effort deletion of a temporary file, never raises."""
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.unlink(path)
+    except OSError as exc:
+        logger.debug("Nettoyage de %s impossible: %s", path, exc)
+
+
+def _classify_mistral_http_error(exc: requests.HTTPError, pdf_path: str) -> Exception:
+    """Map a Mistral HTTP error to a transient or a permanent OCR exception (Lot 1).
+
+    Retry policy:
+      - 401 → permanent: key refused OR workspace monthly spend cap reached
+        (see memory `reference-mistral-401-spend-cap`). Surfaces an actionable
+        message; NOT retried.
+      - 404 / 408 / 429 / 5xx → transient (`_MistralTransientError`): retried by
+        the caller before any fallback. 404 covers the "Could not get file"
+        upload→OCR race.
+      - any other 4xx → permanent (`OCRExtractionError`).
+
+    Args:
+        exc: The raised `requests.HTTPError`.
+        pdf_path: Path of the PDF being processed (for the message).
+
+    Returns:
+        An exception instance to raise (transient or permanent).
+    """
+    resp = getattr(exc, "response", None)
+    status = resp.status_code if resp is not None else None
+    body = ""
+    if resp is not None:
+        try:
+            body = resp.text or ""
+        except Exception:  # noqa: BLE001 — body is best-effort only
+            body = ""
+    snippet = body[:300]
+    name = os.path.basename(pdf_path)
+
+    if status == 401:
+        return _MistralAuthError(
+            "OCR Mistral refusé (401) : clé API invalide OU plafond de dépense "
+            "mensuel du workspace atteint (console.mistral.ai → Limits/Usage). "
+            "Vérifiez le plafond AVANT de régénérer une clé — la même clé "
+            "refonctionne une fois le plafond relevé."
+        )
+    if status in (404, 408, 429) or (status is not None and 500 <= status < 600):
+        label = (
+            "fichier introuvable (transitoire, upload→OCR)"
+            if status == 404
+            else f"erreur transitoire {status}"
+        )
+        transient = _MistralTransientError(f"Mistral OCR {label} pour {name}: {snippet}")
+        if status == 429 and resp is not None:
+            ra = _parse_retry_after(getattr(resp, "headers", {}).get("Retry-After"))
+            if ra is not None:
+                transient.retry_after = ra
+        return transient
+    return OCRExtractionError(f"Erreur Mistral ({status}) pour {name}: {snippet}")
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """Parse a `Retry-After` header into seconds (Lot 1).
+
+    Supports both RFC 7231 forms:
+      - delta-seconds (e.g. "30") → returned as-is;
+      - HTTP-date (e.g. "Wed, 21 Oct 2015 07:28:00 GMT") → converted to the
+        number of seconds from now (clamped to >= 0; past dates → 0).
+    Callers fall back to exponential backoff when this returns None.
+
+    Args:
+        value: Raw header value or None.
+
+    Returns:
+        Non-negative float seconds, or None if absent/unparseable.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        seconds = float(text)
+        return seconds if seconds >= 0 else None
+    except (TypeError, ValueError):
+        pass
+    # HTTP-date form.
+    try:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+
+        target = parsedate_to_datetime(text)
+        if target is None:
+            return None
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        delta = (target - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, delta)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _mistral_retry_wait(attempt: int, retry_after: Optional[float] = None) -> float:
+    """Compute the backoff (seconds) before Mistral retry `attempt` (0-indexed).
+
+    Honours a server-directed `Retry-After` when present (capped at
+    MISTRAL_OCR_RETRY_MAX_BACKOFF); otherwise applies exponential backoff
+    (MISTRAL_OCR_RETRY_BACKOFF * 2**attempt) capped at the same ceiling. Jitter
+    is intentionally NOT added here — the caller adds it only on the
+    exponential path, so this helper stays deterministic and testable.
+
+    Args:
+        attempt: 0-indexed attempt number that just failed.
+        retry_after: Optional server-directed wait in seconds.
+
+    Returns:
+        Wait in seconds (>= 0), capped at MISTRAL_OCR_RETRY_MAX_BACKOFF.
+    """
+    if retry_after is not None and retry_after > 0:
+        return min(float(retry_after), MISTRAL_OCR_RETRY_MAX_BACKOFF)
+    base = MISTRAL_OCR_RETRY_BACKOFF * (2 ** attempt)
+    return min(base, MISTRAL_OCR_RETRY_MAX_BACKOFF)
+
+
+def _mistral_upload_and_ocr(pdf_path: str, max_pages: Optional[int] = None) -> str:
+    """
+    Upload a PDF to Mistral and request OCR, retrying transient failures (Lot 1).
+
+    Wraps `_mistral_upload_and_ocr_once` with a retry loop (MISTRAL_OCR_RETRIES)
+    on transient errors only — 404 "Could not get file" (upload→OCR race), 429,
+    5xx and network timeouts. Backoff is exponential (capped) with jitter, and a
+    429 `Retry-After` header overrides the computed wait. The backoff sleep
+    happens between attempts, outside the per-attempt MISTRAL_SEMAPHORE slot held
+    inside `_once`, so a sleeping retry does not block other workers. Permanent
+    failures (401 spend-cap, other 4xx, empty response) are raised immediately
+    without retry.
+
+    Args:
+        pdf_path: Path to the PDF file (already verified to fit upload limit).
+        max_pages: Optional `pages` list end for the OCR request.
+
+    Returns:
+        Extracted markdown text.
+
+    Raises:
+        OCRExtractionError: On permanent failure or once retries are exhausted.
+    """
+    last_error: Optional[Exception] = None
+    total_attempts = MISTRAL_OCR_RETRIES + 1
+    for attempt in range(total_attempts):
+        try:
+            return _mistral_upload_and_ocr_once(pdf_path, max_pages=max_pages)
+        except (_MistralTransientError, requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            if attempt < MISTRAL_OCR_RETRIES:
+                retry_after = getattr(exc, "retry_after", None)
+                wait = _mistral_retry_wait(attempt, retry_after)
+                # Add jitter only on the exponential path; respect an explicit
+                # server Retry-After exactly (capped).
+                if retry_after is None:
+                    wait += random.uniform(0, min(wait * 0.25, 5.0))
+                logger.warning(
+                    "OCR Mistral transitoire (tentative %d/%d) pour %s: %s — "
+                    "nouvel essai dans %.1fs%s",
+                    attempt + 1, total_attempts, pdf_path, exc, wait,
+                    " (Retry-After serveur)" if retry_after is not None else "",
+                )
+                time.sleep(wait)
+            else:
+                logger.error(
+                    "OCR Mistral: échec après %d tentatives pour %s: %s",
+                    total_attempts, pdf_path, exc,
+                )
+    raise OCRExtractionError(
+        f"OCR Mistral échoué après {total_attempts} tentatives pour "
+        f"{os.path.basename(pdf_path)}: {last_error}"
+    )
+
+
+def _mistral_upload_and_ocr_once(pdf_path: str, max_pages: Optional[int] = None) -> str:
+    """
+    Single Mistral upload+OCR attempt (no retry). Internal helper used by
+    `_mistral_upload_and_ocr` (which adds retries) for both the fast path and
+    each split part.
+
+    Uses the global MISTRAL_SEMAPHORE to enforce concurrency limits.
+
+    Args:
+        pdf_path: Path to the PDF file (already verified to fit upload limit).
+        max_pages: Optional `page_ranges.end` for the OCR request.
+
+    Returns:
+        Extracted markdown text.
+
+    Raises:
+        OCRExtractionError: Permanent failure (401, other 4xx, missing file_id,
+            empty response).
+        _MistralTransientError: Transient failure worth retrying (404/429/5xx).
+    """
     base_url = MISTRAL_API_BASE_URL.rstrip("/")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}"}
 
@@ -547,7 +1192,10 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
                     timeout=MISTRAL_OCR_TIMEOUT,
                 )
 
-            upload_resp.raise_for_status()
+            try:
+                upload_resp.raise_for_status()
+            except requests.HTTPError as http_err:
+                raise _classify_mistral_http_error(http_err, pdf_path) from http_err
             upload_payload = upload_resp.json()
             file_id = (
                 upload_payload.get("id")
@@ -568,12 +1216,10 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
                 "include_image_base64": False,
             }
             if max_pages:
-                payload["page_ranges"] = [
-                    {
-                        "start": 1,
-                        "end": max_pages,
-                    }
-                ]
+                # The Mistral OCR API expects an explicit list of 1-indexed
+                # page numbers under "pages" (the previous "page_ranges" form
+                # is rejected with HTTP 422 "extra_forbidden").
+                payload["pages"] = list(range(1, max_pages + 1))
 
             response = session.post(
                 f"{base_url}/v1/ocr",
@@ -583,46 +1229,68 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
             )
             try:
                 response.raise_for_status()
-            except requests.HTTPError:
+            except requests.HTTPError as http_err:
                 logger.warning(
                     "Appel Mistral OCR échoué (%s) pour %s: %s",
                     response.status_code,
                     pdf_path,
                     response.text,
                 )
-                raise
+                raise _classify_mistral_http_error(http_err, pdf_path) from http_err
 
             response_payload = response.json()
 
-            text_fragments: List[str] = []
+            # Build markdown with explicit `<!-- Page N -->` markers so
+            # downstream consumers (book mode, chunker) can split by page.
+            # Prefer the API-provided `pages` array, since it carries indices.
+            markdown_text = ""
             if isinstance(response_payload, dict):
-                possible_fields = [
-                    response_payload.get("markdown"),
-                    response_payload.get("text"),
-                ]
-                for candidate in possible_fields:
-                    if isinstance(candidate, str) and candidate.strip():
-                        text_fragments.append(candidate.strip())
-
                 pages = response_payload.get("pages")
-                if isinstance(pages, list):
-                    for page in pages:
-                        if isinstance(page, dict):
-                            for key in ("markdown", "text"):
-                                page_text = page.get(key)
-                                if isinstance(page_text, str) and page_text.strip():
-                                    text_fragments.append(page_text.strip())
+                if isinstance(pages, list) and pages:
+                    page_blocks: List[str] = []
+                    for fallback_idx, page in enumerate(pages, start=1):
+                        if not isinstance(page, dict):
+                            continue
+                        # Mistral returns a 0-indexed `index`; normalise to
+                        # 1-indexed page numbers. Fallback to enumerate order.
+                        raw_idx = page.get("index")
+                        if isinstance(raw_idx, int):
+                            page_num = raw_idx + 1
+                        else:
+                            page_num = fallback_idx
+                        page_md = ""
+                        for key in ("markdown", "text"):
+                            value = page.get(key)
+                            if isinstance(value, str) and value.strip():
+                                page_md = value.strip()
+                                break
+                        if page_md:
+                            page_blocks.append(f"<!-- Page {page_num} -->\n{page_md}")
+                    if page_blocks:
+                        markdown_text = "\n\n".join(page_blocks)
 
-                outputs = response_payload.get("output")
-                if isinstance(outputs, list):
-                    for block in outputs:
-                        if isinstance(block, dict):
-                            for key in ("markdown", "text", "content"):
-                                value = block.get(key)
-                                if isinstance(value, str) and value.strip():
-                                    text_fragments.append(value.strip())
+                if not markdown_text:
+                    # Top-level markdown (older API shape) — no page boundaries.
+                    for key in ("markdown", "text"):
+                        candidate = response_payload.get(key)
+                        if isinstance(candidate, str) and candidate.strip():
+                            markdown_text = candidate.strip()
+                            break
 
-            markdown_text = "\n\n".join(dict.fromkeys(text_fragments))
+                if not markdown_text:
+                    # Final fallback: outputs[] array (rare).
+                    outputs = response_payload.get("output")
+                    if isinstance(outputs, list):
+                        blocks: List[str] = []
+                        for block in outputs:
+                            if isinstance(block, dict):
+                                for key in ("markdown", "text", "content"):
+                                    value = block.get(key)
+                                    if isinstance(value, str) and value.strip():
+                                        blocks.append(value.strip())
+                                        break
+                        markdown_text = "\n\n".join(blocks)
+
             markdown_text = markdown_text.strip()
             if not markdown_text:
                 logger.warning(
@@ -654,7 +1322,23 @@ def _extract_text_with_openai(
     pdf_path: str,
     api_key: str,
     max_pages: Optional[int] = None,
-) -> str:
+) -> _PagedOcr:
+    """
+    Transcribe a PDF page-by-page with the OpenAI vision model.
+
+    This provider is HARD-CAPPED at OPENAI_OCR_MAX_PAGES pages (one vision API
+    call per page is expensive). It therefore returns coverage information
+    (`pages_done`, `pages_total`) so the caller can detect and flag silent
+    truncation (Lot 2) rather than presenting a 10-page excerpt of a 284-page
+    book as a success.
+
+    Returns:
+        `_PagedOcr(text, pages_done, pages_total)`. `pages_done < pages_total`
+        signals the cap truncated the document.
+
+    Raises:
+        OCRExtractionError: If no page produced any text.
+    """
     from openai import OpenAI
 
     base_limit = max_pages if max_pages is not None else float("inf")
@@ -662,6 +1346,8 @@ def _extract_text_with_openai(
 
     outputs: List[str] = []
     client = OpenAI(api_key=api_key)
+    total_pages = 0
+    limit = 0
 
     with fitz.open(pdf_path) as doc:
         total_pages = len(doc)
@@ -711,10 +1397,23 @@ def _extract_text_with_openai(
     if not outputs:
         raise OCRExtractionError("La réponse OpenAI est vide.")
 
-    return "\n\n".join(outputs)
+    return _PagedOcr(
+        text="\n\n".join(outputs),
+        pages_done=limit,
+        pages_total=total_pages,
+    )
 
 
-def _finalize_ocr_result(text: str, provider: str, return_details: bool):
+def _finalize_ocr_result(
+    text: str,
+    provider: str,
+    return_details: bool,
+    *,
+    partial: bool = False,
+    pages_done: int = 0,
+    pages_total: int = 0,
+    error: Optional[str] = None,
+):
     """
     Format the OCR result based on the return_details flag.
 
@@ -722,13 +1421,62 @@ def _finalize_ocr_result(text: str, provider: str, return_details: bool):
         text: Extracted text content
         provider: Name of the OCR provider used ('mistral', 'openai', 'legacy')
         return_details: If True, return OCRResult; otherwise return just text
+        partial: Lot 2 — True when the text is known to be incomplete.
+        pages_done: Number of pages actually transcribed.
+        pages_total: Total page count of the source document.
+        error: Human-readable explanation when partial/suspect.
 
     Returns:
         OCRResult namedtuple if return_details is True, else string
     """
     if return_details:
-        return OCRResult(text=text, provider=provider)
+        return OCRResult(
+            text=text,
+            provider=provider,
+            partial=partial,
+            pages_done=pages_done,
+            pages_total=pages_total,
+            error=error,
+        )
     return text
+
+
+def _ocr_density_warning(
+    text: str,
+    pages_total: int,
+    pdf_path: str,
+    provider: str,
+) -> Optional[str]:
+    """
+    Generic sanity guard (Lot 2): flag suspiciously sparse OCR output.
+
+    When the average character density falls below OCR_MIN_CHARS_PER_PAGE,
+    the extraction is almost certainly incomplete (e.g. a scanned book run
+    through the PyMuPDF legacy text extractor returning a few headers). Logs a
+    WARNING and returns an explanatory message; returns None when the density
+    is healthy or the page count is unknown.
+
+    Args:
+        text: Extracted text.
+        pages_total: Source document page count (0 = unknown → no check).
+        pdf_path: Path of the document (for the log line).
+        provider: Provider name (for the message).
+
+    Returns:
+        Explanatory string when suspect, else None.
+    """
+    if pages_total <= 0 or not text:
+        return None
+    density = len(text) / pages_total
+    if density < OCR_MIN_CHARS_PER_PAGE:
+        msg = (
+            f"OCR suspect ({provider}) : {density:.0f} car./page sur "
+            f"{pages_total} pages (< {OCR_MIN_CHARS_PER_PAGE}) — extraction "
+            f"probablement incomplète."
+        )
+        logger.warning("%s (%s)", msg, pdf_path)
+        return msg
+    return None
 
 
 def extract_text_with_ocr(
@@ -740,10 +1488,14 @@ def extract_text_with_ocr(
     """
     Extract text from a PDF using the best available OCR provider.
 
-    Attempts providers in order of preference:
-    1. Mistral OCR API (if MISTRAL_API_KEY is set)
-    2. OpenAI Vision API (if OPENAI_API_KEY is set)
-    3. PyMuPDF legacy extraction (always available)
+    Provider order (default):
+    1. Mistral OCR API (if MISTRAL_API_KEY is set) — with transient-error retry.
+    2. PyMuPDF legacy extraction (always available) — local last resort.
+
+    The OpenAI Vision fallback is DISABLED by default (OCR_ENABLE_OPENAI_FALLBACK)
+    because it is hard-capped at OPENAI_OCR_MAX_PAGES and silently truncates
+    books. When explicitly re-enabled, it is tried between Mistral and legacy
+    with the Lot 2 partial/truncation guards.
 
     Args:
         pdf_path: Path to the PDF file to process
@@ -767,10 +1519,18 @@ def extract_text_with_ocr(
         if MISTRAL_API_KEY:
             try:
                 logger.debug("Tentative d'OCR Mistral pour %s", pdf_path)
-                mistral_text = _extract_text_with_mistral(pdf_path, max_pages=max_pages)
+                mistral_outcome = _extract_text_with_mistral(pdf_path, max_pages=max_pages)
                 provider_used = "mistral"
                 extraction_success = True
-                return _finalize_ocr_result(mistral_text, "mistral", return_details)
+                # A split book with some failed parts is salvaged but flagged
+                # partial (never a silent success).
+                return _finalize_ocr_result(
+                    mistral_outcome.text, "mistral", return_details,
+                    partial=mistral_outcome.partial,
+                    pages_done=mistral_outcome.pages_done,
+                    pages_total=mistral_outcome.pages_total,
+                    error=mistral_outcome.error,
+                )
             except Exception as mistral_error:
                 last_error = mistral_error
                 logger.warning(
@@ -785,13 +1545,63 @@ def extract_text_with_ocr(
             logger.debug("MISTRAL_API_KEY absente, OCR Mistral ignoré pour %s", pdf_path)
 
         openai_key = os.getenv("OPENAI_API_KEY")
-        if openai_key:
+        if openai_key and not OCR_ENABLE_OPENAI_FALLBACK:
+            # Default policy — OpenAI Vision OCR is disabled (truncates books).
+            logger.info(
+                "OCR OpenAI désactivé par défaut (OCR_ENABLE_OPENAI_FALLBACK=0) — "
+                "chaîne Mistral → legacy uniquement pour %s.", pdf_path,
+            )
+        if openai_key and OCR_ENABLE_OPENAI_FALLBACK:
             try:
-                logger.debug("Fallback OpenAI OCR pour %s", pdf_path)
-                openai_text = _extract_text_with_openai(pdf_path, openai_key, max_pages=max_pages)
+                logger.debug("Fallback OpenAI OCR (opt-in) pour %s", pdf_path)
+                openai_outcome = _extract_text_with_openai(pdf_path, openai_key, max_pages=max_pages)
+                openai_text = openai_outcome.text
+                pages_done = openai_outcome.pages_done
+                pages_total = openai_outcome.pages_total
+                is_capped = pages_total > 0 and pages_done < pages_total
+
+                if is_capped:
+                    # Lot 2 — the OpenAI cap truncated the document. Never return
+                    # this as a silent success: try the non-capped legacy engine
+                    # first, and if it is no better, return the OpenAI text FLAGGED
+                    # partial so it surfaces in the UI / errors.json.
+                    logger.warning(
+                        "OCR PARTIEL OpenAI pour %s : %d/%d pages transcrites "
+                        "(cap OPENAI_OCR_MAX_PAGES=%s). Tentative d'un moteur non "
+                        "plafonné avant d'accepter le résultat partiel.",
+                        pdf_path, pages_done, pages_total, OPENAI_OCR_MAX_PAGES,
+                    )
+                    legacy_text = _extract_text_with_legacy_pdf(pdf_path, max_pages=max_pages)
+                    if legacy_text.strip() and len(legacy_text) > len(openai_text):
+                        logger.info(
+                            "Moteur legacy plus complet que l'OpenAI plafonné pour "
+                            "%s (%d > %d caractères) — adoption de legacy.",
+                            pdf_path, len(legacy_text), len(openai_text),
+                        )
+                        provider_used = "legacy"
+                        extraction_success = True
+                        return _finalize_ocr_result(
+                            legacy_text, "legacy", return_details,
+                            pages_done=pages_total, pages_total=pages_total,
+                        )
+                    provider_used = "openai"
+                    extraction_success = True
+                    return _finalize_ocr_result(
+                        openai_text, "openai", return_details,
+                        partial=True, pages_done=pages_done, pages_total=pages_total,
+                        error=f"OCR plafonné OpenAI : {pages_done}/{pages_total} pages",
+                    )
+
+                # Full OpenAI result — generic density sanity check (Lot 2).
+                density_error = _ocr_density_warning(openai_text, pages_total, pdf_path, "openai")
                 provider_used = "openai"
                 extraction_success = True
-                return _finalize_ocr_result(openai_text, "openai", return_details)
+                return _finalize_ocr_result(
+                    openai_text, "openai", return_details,
+                    partial=bool(density_error),
+                    pages_done=pages_done, pages_total=pages_total,
+                    error=density_error,
+                )
             except Exception as openai_error:
                 last_error = openai_error
                 logger.warning(
@@ -802,7 +1612,7 @@ def extract_text_with_ocr(
                 # Track error
                 if METRICS_AVAILABLE and track_error:
                     track_error('pdf_extraction', type(openai_error).__name__)
-        else:
+        elif not openai_key:
             logger.debug("OPENAI_API_KEY absente, OCR OpenAI ignoré pour %s", pdf_path)
 
         if not MISTRAL_API_KEY and not openai_key:
@@ -816,9 +1626,18 @@ def extract_text_with_ocr(
 
         legacy_text = _extract_text_with_legacy_pdf(pdf_path, max_pages=max_pages)
         if legacy_text.strip():
+            # Lot 2 — legacy is the last resort; flag suspiciously sparse output
+            # (typical of a scanned book with no real text layer) as partial.
+            legacy_pages = _pdf_page_count(pdf_path)
+            density_error = _ocr_density_warning(legacy_text, legacy_pages, pdf_path, "legacy")
             provider_used = "legacy"
             extraction_success = True
-            return _finalize_ocr_result(legacy_text, "legacy", return_details)
+            return _finalize_ocr_result(
+                legacy_text, "legacy", return_details,
+                partial=bool(density_error),
+                pages_done=legacy_pages, pages_total=legacy_pages,
+                error=density_error,
+            )
 
     finally:
         # Record metrics
@@ -837,10 +1656,151 @@ def extract_text_with_ocr(
                 pass  # Don't fail on metrics errors
 
     error_message = (
-        "Impossible d'extraire le texte du document. Configurez MISTRAL_API_KEY ou OPENAI_API_KEY "
-        "pour activer l'OCR en Markdown."
+        "Impossible d'extraire le texte du document. Configurez MISTRAL_API_KEY "
+        "pour activer l'OCR Markdown (le fallback OpenAI est désactivé par défaut ; "
+        "activez OCR_ENABLE_OPENAI_FALLBACK=1 pour l'autoriser)."
     )
     raise OCRExtractionError(error_message)
+
+
+# ============================================================================
+# Non-PDF extractors (EPUB, plain text)
+# ============================================================================
+
+def _flatten_epub_toc(toc_entry: Any, depth: int = 0) -> List[Tuple[int, str, str]]:
+    """
+    Flatten the nested EPUB native ToC into a list of (depth, label, href) tuples.
+
+    `book.toc` from ebooklib is a tree of `epub.Link` objects and tuples
+    ``(Section, [children])``. We walk it depth-first and yield every Link.
+    Used by Lot F to inject the EPUB's native ToC at the head of the
+    extracted text so Phase 1 can rely on a high-quality structural index
+    for un-paginated EPUBs.
+    """
+    from ebooklib import epub  # local import: ebooklib is optional dep
+
+    out: List[Tuple[int, str, str]] = []
+    if toc_entry is None:
+        return out
+    if isinstance(toc_entry, list):
+        for child in toc_entry:
+            out.extend(_flatten_epub_toc(child, depth))
+        return out
+    if isinstance(toc_entry, tuple):
+        # (Section, [children]) form
+        sec, children = toc_entry[0], toc_entry[1] if len(toc_entry) > 1 else []
+        sec_label = getattr(sec, "title", None) or str(sec)
+        out.append((depth, sec_label, ""))
+        out.extend(_flatten_epub_toc(children, depth + 1))
+        return out
+    if isinstance(toc_entry, epub.Link):
+        out.append((depth, toc_entry.title or "", toc_entry.href or ""))
+        return out
+    if isinstance(toc_entry, epub.Section):
+        out.append((depth, toc_entry.title or "", ""))
+        return out
+    return out
+
+
+def _extract_text_from_epub(epub_path: str) -> OCRResult:
+    """Extract text from an EPUB, promoting pagination anchors to ``<!-- Page N -->`` markers.
+
+    Lot F enhancements:
+    1. Native EPUB ToC (``book.toc``) is serialised as a leading
+       ``<!-- EPUB_TOC_BEGIN -->...<!-- EPUB_TOC_END -->`` block, which gives
+       Phase 1 a high-quality structural index even when no `<a id="page_X"/>`
+       pagebreak anchors are present.
+    2. Each ``EpubHtml`` item gets a synthetic ``<!-- Page N -->`` marker
+       prepended (where N is the spine index). This guarantees that
+       SourceFormat detection sees pagination markers, that
+       ``_split_text_by_pages`` can produce a per-item map, and that
+       the chapter slicer in Lot B can rebuild chapter bodies after the
+       positional fallback cap fires.
+    3. Real EPUB 3 ``epub:type="pagebreak"`` anchors and legacy
+       ``<a id="page_N"/>`` ancors are still promoted to ``<!-- Page N -->``
+       markers when present (preferred over the synthetic ones).
+    """
+    from ebooklib import epub, ITEM_DOCUMENT
+    from bs4 import BeautifulSoup
+
+    book = epub.read_epub(epub_path)
+
+    # 1. Serialise native ToC as a leading block. We list label + href + depth
+    #    so Phase 1 can match TOC entries to chapter files even without page
+    #    numbers. Limit to first 200 entries to bound prompt size.
+    toc_entries = _flatten_epub_toc(book.toc)
+    toc_lines: List[str] = []
+    for depth, label, href in toc_entries[:200]:
+        if not label:
+            continue
+        indent = "  " * min(depth, 4)
+        toc_lines.append(f"{indent}- {label}" + (f" → {href}" if href else ""))
+    toc_block = ""
+    if toc_lines:
+        toc_block = (
+            "<!-- EPUB_TOC_BEGIN -->\n"
+            "Table of Contents (extracted from EPUB native NCX/NAV):\n"
+            + "\n".join(toc_lines)
+            + "\n<!-- EPUB_TOC_END -->\n\n"
+        )
+
+    # 2. Walk the spine items, prepending a synthetic Page marker per item.
+    #    Real pagebreak/page anchors override the synthetic marker by being
+    #    inserted inline at their natural position in the text.
+    parts: List[str] = []
+    has_real_pagebreaks = False
+    spine_index = 0
+    for item in book.get_items_of_type(ITEM_DOCUMENT):
+        spine_index += 1
+        soup = BeautifulSoup(item.get_content(), "lxml")
+
+        item_has_pagebreak = False
+        for anchor in soup.find_all(attrs={"epub:type": "pagebreak"}):
+            label = anchor.get("title") or anchor.get("id") or "?"
+            anchor.replace_with(f"\n<!-- Page {label} -->\n")
+            item_has_pagebreak = True
+
+        for anchor in soup.find_all("a", id=lambda v: bool(v) and v.startswith("page")):
+            label = anchor["id"].split("_", 1)[-1] if "_" in anchor["id"] else anchor["id"][4:] or "?"
+            anchor.replace_with(f"\n<!-- Page {label} -->\n")
+            item_has_pagebreak = True
+
+        if item_has_pagebreak:
+            has_real_pagebreaks = True
+
+        item_text = soup.get_text("\n", strip=True)
+        if not item_text:
+            continue
+
+        # Title heuristic for the synthetic boundary: first <h1>/<h2>/<title>
+        # found in the item, used as a debug hint only — Phase 1 reads the
+        # text directly to extract chapter titles.
+        title_hint = ""
+        for tag_name in ("title", "h1", "h2", "h3"):
+            tag = soup.find(tag_name)
+            if tag and tag.get_text(strip=True):
+                title_hint = tag.get_text(strip=True)[:120]
+                break
+
+        # Prepend a synthetic marker only when the item itself did not emit
+        # real pagebreak ancors. This avoids pseudo-pages collisions with
+        # real ones in EPUB 3 paginated books.
+        if not item_has_pagebreak:
+            marker = f"<!-- Page {spine_index} -->\n"
+            if title_hint:
+                marker += f"<!-- EpubItemTitle: {title_hint} -->\n"
+            parts.append(marker + item_text)
+        else:
+            parts.append(item_text)
+
+    text = toc_block + "\n\n".join(p for p in parts if p)
+    return OCRResult(text=text, provider="epub")
+
+
+def _extract_text_from_plain(path: str) -> OCRResult:
+    """Read a ``.txt`` or ``.md`` file as UTF-8 (errors='replace')."""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return OCRResult(text=f.read(), provider="plain_text")
 
 
 # ============================================================================
@@ -908,61 +1868,119 @@ def _process_single_zotero_item(
             ])
         }
 
-        # Process PDF attachments
+        # Process attachments (PDF, EPUB, plain text)
         for attachment in item.get("attachments", []):
             path_from_json = attachment.get("path", "").strip()
-            if not path_from_json or not path_from_json.lower().endswith(".pdf"):
+            if not path_from_json:
                 continue
 
-            # Resolve PDF path
-            if os.path.isabs(path_from_json):
-                actual_pdf_path = path_from_json
-            else:
-                actual_pdf_path = os.path.join(pdf_base_dir, path_from_json)
+            ext = os.path.splitext(path_from_json)[1].lower()
+            if ext not in (".pdf", ".epub", ".txt", ".md"):
+                logger.warning(f"[{item_index}] Unsupported extension {ext or '(none)'} for {path_from_json}")
+                errors.append({
+                    "itemKey": item_key,
+                    "title": metadata.get("title", ""),
+                    "error_type": "UNSUPPORTED_EXTENSION",
+                    "error_message": f"Extension non supportée: {ext or '(none)'}",
+                    "path": path_from_json,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                })
+                continue
 
-            # Fuzzy search if not found
-            if not os.path.exists(actual_pdf_path):
-                actual_pdf_path = _find_pdf_fuzzy(actual_pdf_path, path_from_json, pdf_base_dir)
-                if actual_pdf_path is None:
-                    logger.warning(f"[{item_index}] PDF not found: {path_from_json}")
+            # Resolve attachment path
+            if os.path.isabs(path_from_json):
+                actual_path = path_from_json
+            else:
+                actual_path = os.path.join(pdf_base_dir, path_from_json)
+
+            # Fuzzy search (PDF-only — non-PDF attachments rarely have renamed files)
+            if not os.path.exists(actual_path):
+                if ext == ".pdf":
+                    actual_path = _find_pdf_fuzzy(actual_path, path_from_json, pdf_base_dir)
+                else:
+                    actual_path = None
+
+                if actual_path is None:
+                    logger.warning(f"[{item_index}] File not found: {path_from_json}")
                     errors.append({
                         "itemKey": item_key,
                         "title": metadata.get("title", ""),
-                        "error_type": "PDF_NOT_FOUND",
-                        "error_message": f"PDF not found: {path_from_json}",
+                        "error_type": "PDF_NOT_FOUND" if ext == ".pdf" else "FILE_NOT_FOUND",
+                        "error_message": f"File not found: {path_from_json}",
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                     })
                     continue
 
-            logger.info(f"[{item_index}] Processing PDF: {os.path.basename(actual_pdf_path)}")
+            logger.info(f"[{item_index}] Processing {ext} file: {os.path.basename(actual_path)}")
 
             try:
-                # Perform OCR with retry logic
-                ocr_payload = extract_text_with_ocr_retry(
-                    actual_pdf_path,
-                    return_details=True,
-                )
+                if ext == ".pdf":
+                    ocr_payload = extract_text_with_ocr_retry(actual_path, return_details=True)
+                elif ext == ".epub":
+                    ocr_payload = _extract_text_from_epub(actual_path)
+                else:  # .txt, .md
+                    ocr_payload = _extract_text_from_plain(actual_path)
 
                 # Build record
+                ocr_partial = bool(getattr(ocr_payload, "partial", False))
+                ocr_pages_done = int(getattr(ocr_payload, "pages_done", 0) or 0)
+                ocr_pages_total = int(getattr(ocr_payload, "pages_total", 0) or 0)
                 record = {
                     **metadata,
                     "filename": os.path.basename(path_from_json),
-                    "path": actual_pdf_path,
+                    "path": actual_path,
                     "attachment_title": attachment.get("title", ""),
                     "texteocr": ocr_payload.text,
                     "texteocr_provider": ocr_payload.provider,
+                    "texteocr_partial": ocr_partial,
+                    "texteocr_pages_done": ocr_pages_done,
+                    "texteocr_pages_total": ocr_pages_total,
                 }
                 records.append(record)
-                logger.info(f"[{item_index}] ✓ OCR success for {item_key} ({ocr_payload.provider})")
+
+                if ocr_partial:
+                    # Lot 2 — partial OCR is still saved (better than nothing) but
+                    # surfaced as a WARNING and recorded in errors.json so it is
+                    # never a silent success.
+                    partial_msg = getattr(ocr_payload, "error", None) or (
+                        f"OCR partiel : {ocr_pages_done}/{ocr_pages_total} pages"
+                    )
+                    logger.warning(
+                        f"[{item_index}] ⚠ OCR PARTIEL pour {item_key} "
+                        f"({ocr_payload.provider}) : {partial_msg}"
+                    )
+                    errors.append({
+                        "itemKey": item_key,
+                        "title": metadata.get("title", ""),
+                        "error_type": "OCR_PARTIAL",
+                        "error_message": partial_msg,
+                        "provider": ocr_payload.provider,
+                        "pages_done": ocr_pages_done,
+                        "pages_total": ocr_pages_total,
+                        "pdf_path": actual_path,
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                else:
+                    logger.info(f"[{item_index}] ✓ Extraction success for {item_key} ({ocr_payload.provider})")
 
             except OCRExtractionError as ocr_error:
-                logger.error(f"[{item_index}] OCR failed for {actual_pdf_path}: {ocr_error}")
+                logger.error(f"[{item_index}] OCR failed for {actual_path}: {ocr_error}")
                 errors.append({
                     "itemKey": item_key,
                     "title": metadata.get("title", ""),
                     "error_type": "OCR_FAILED",
                     "error_message": str(ocr_error),
-                    "pdf_path": actual_pdf_path,
+                    "pdf_path": actual_path,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                })
+            except Exception as extract_error:
+                logger.error(f"[{item_index}] Extraction failed for {actual_path}: {extract_error}")
+                errors.append({
+                    "itemKey": item_key,
+                    "title": metadata.get("title", ""),
+                    "error_type": "EXTRACTION_FAILED",
+                    "error_message": str(extract_error),
+                    "path": actual_path,
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                 })
 
@@ -1017,7 +2035,8 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
     # CSV column order (consistent with original)
     CSV_FIELDNAMES = [
         "itemKey", "type", "title", "abstract", "date", "url", "doi",
-        "authors", "filename", "path", "attachment_title", "texteocr", "texteocr_provider"
+        "authors", "filename", "path", "attachment_title", "texteocr", "texteocr_provider",
+        "texteocr_partial", "texteocr_pages_done", "texteocr_pages_total"
     ]
 
     # Load progress (items already processed)
@@ -1288,46 +2307,68 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
                     ])
                 }
 
-                # Traitement des attachments PDF
+                # Traitement des attachments (PDF, EPUB, texte brut)
                 for attachment in item.get("attachments", []):
                     path_from_json = attachment.get("path", "").strip()
-                    if path_from_json and path_from_json.lower().endswith(".pdf"):
+                    if not path_from_json:
+                        continue
 
-                        # Résoudre le chemin du PDF
-                        if os.path.isabs(path_from_json):
-                            actual_pdf_path = path_from_json
+                    ext = os.path.splitext(path_from_json)[1].lower()
+                    if ext not in (".pdf", ".epub", ".txt", ".md"):
+                        logger.warning(f"Extension non supportée: {ext or '(none)'} pour {path_from_json}")
+                        continue
+
+                    # Résoudre le chemin de la pièce jointe
+                    if os.path.isabs(path_from_json):
+                        actual_path = path_from_json
+                    else:
+                        actual_path = os.path.join(pdf_base_dir, path_from_json)
+
+                    if not os.path.exists(actual_path):
+                        if ext == ".pdf":
+                            actual_path = _find_pdf_fuzzy(actual_path, path_from_json, pdf_base_dir)
                         else:
-                            actual_pdf_path = os.path.join(pdf_base_dir, path_from_json)
-
-                        if not os.path.exists(actual_pdf_path):
-                            actual_pdf_path = _find_pdf_fuzzy(actual_pdf_path, path_from_json, pdf_base_dir)
-                            if actual_pdf_path is None:
-                                logger.warning(f"PDF non trouvé: {path_from_json}")
-                                continue
-
-                        logger.info(f"Traitement du PDF : {actual_pdf_path}")
-                        try:
-                            ocr_payload = extract_text_with_ocr(
-                                actual_pdf_path,
-                                return_details=True,
-                            )
-                        except OCRExtractionError as ocr_error:
-                            logger.error(
-                                "Échec OCR pour %s (%s): %s",
-                                actual_pdf_path,
-                                path_from_json,
-                                ocr_error,
-                            )
+                            actual_path = None
+                        if actual_path is None:
+                            logger.warning(f"Fichier non trouvé: {path_from_json}")
                             continue
 
-                        records.append({
-                            **metadata,
-                            "filename": os.path.basename(path_from_json),
-                            "path": actual_pdf_path,
-                            "attachment_title": attachment.get("title", ""),
-                            "texteocr": ocr_payload.text,
-                            "texteocr_provider": ocr_payload.provider,
-                        })
+                    logger.info(f"Traitement du fichier {ext} : {actual_path}")
+                    try:
+                        if ext == ".pdf":
+                            ocr_payload = extract_text_with_ocr(actual_path, return_details=True)
+                        elif ext == ".epub":
+                            ocr_payload = _extract_text_from_epub(actual_path)
+                        else:  # .txt, .md
+                            ocr_payload = _extract_text_from_plain(actual_path)
+                    except OCRExtractionError as ocr_error:
+                        logger.error(
+                            "Échec OCR pour %s (%s): %s",
+                            actual_path,
+                            path_from_json,
+                            ocr_error,
+                        )
+                        continue
+                    except Exception as extract_error:
+                        logger.error(
+                            "Échec extraction pour %s (%s): %s",
+                            actual_path,
+                            path_from_json,
+                            extract_error,
+                        )
+                        continue
+
+                    records.append({
+                        **metadata,
+                        "filename": os.path.basename(path_from_json),
+                        "path": actual_path,
+                        "attachment_title": attachment.get("title", ""),
+                        "texteocr": ocr_payload.text,
+                        "texteocr_provider": ocr_payload.provider,
+                        "texteocr_partial": bool(getattr(ocr_payload, "partial", False)),
+                        "texteocr_pages_done": int(getattr(ocr_payload, "pages_done", 0) or 0),
+                        "texteocr_pages_total": int(getattr(ocr_payload, "pages_total", 0) or 0),
+                    })
             except Exception as item_error:
                 logger.error(f"Error processing item: {item_error}")
                 continue
@@ -1386,6 +2427,9 @@ def extract_pdf_metadata_to_dataframe(pdf_directory: str) -> pd.DataFrame:
                     "attachment_title": os.path.splitext(filename)[0],
                     "texteocr": ocr_payload.text,
                     "texteocr_provider": ocr_payload.provider,
+                    "texteocr_partial": bool(getattr(ocr_payload, "partial", False)),
+                    "texteocr_pages_done": int(getattr(ocr_payload, "pages_done", 0) or 0),
+                    "texteocr_pages_total": int(getattr(ocr_payload, "pages_total", 0) or 0),
                 })
         except Exception as e:
             logger.error(f"Failed to process {filename}: {e}")

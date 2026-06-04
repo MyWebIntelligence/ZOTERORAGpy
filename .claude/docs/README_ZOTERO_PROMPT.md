@@ -2,16 +2,31 @@
 
 ## 📝 Vue d'ensemble
 
-RAGpy propose **4 modes de génération** de fiches de lecture académiques via LLM. Chaque mode est optimisé pour un usage spécifique et utilise son propre template de prompt.
+RAGpy propose **5 modes de génération** de fiches de lecture académiques via LLM. Chaque mode est optimisé pour un usage spécifique et utilise son propre template de prompt.
 
-## 🎯 Les 4 Modes Disponibles
+## 🎯 Les 5 Modes Disponibles
 
 | Mode | Fichier template | Préfixe | Longueur | Usage |
 |------|------------------|---------|----------|-------|
 | **extended** | `zotero_prompt.md` | `[FICHE]` | 2500-3000 mots | Méta-analyse méthodologique complète |
 | **pedagogique** | `zotero_prompt_pedagogique.md` | `[CLAIR]` | 2400-2800 mots | Tutoriel pour étudiants L3 |
 | **evaluation** | `zotero_prompt_evaluation.md` | `[EVAL]` | 2200-2750 mots | Grille d'évaluation peer review |
+| **book** | `book_prompt.md` (multi-phase) | `[LIVRE]` | 5000-12000 mots | Livre : analyse chapitre par chapitre + synthèse transversale |
 | **short** | `zotero_prompt_short.md` | (aucun) | 400-600 mots | Enrichit le champ Abstract |
+
+### Mode Livre [LIVRE] — architecture multi-phase
+
+Contrairement aux 4 autres modes qui produisent une fiche en un seul appel LLM, le mode `book` enchaîne **3 phases LLM + 2 phases de traitement local** orchestrées par `app/utils/book_note_generator.py` :
+
+1. **Phase 0 (local)** — découpage heuristique du texte OCR en chapitres (regex `Chapitre N` / `Chapter N` / chiffres romains, fallback en N parts).
+2. **Phase 1 (1 appel LLM)** — détection de la typologie (`monograph` / `edited_volume` / `coauthored` / `handbook`) et raffinement de la liste des chapitres avec auteurs et pages. Sortie JSON.
+3. **Phase 2 (N appels LLM)** — analyse de chaque chapitre avec mémoire incrémentale : chaque appel reçoit les résumés courts des chapitres précédents pour positionner le chapitre courant dans la dynamique du livre. Produit un bloc HTML structuré + un résumé court (50-80 mots).
+4. **Phase 3 (1 appel LLM)** — synthèse transversale (lignes de force, tensions internes, dialogues) + évaluation globale + verdict + exploitation. Réutilise les résumés courts (pas de re-lecture du livre).
+5. **Phase 4 (local)** — assemblage HTML final : préfixe `[LIVRE]` + Section A + N fiches-chapitres + Section B + sentinel.
+
+**Coût typique** (livre 14 chapitres, ~100k mots, modèle `google/gemini-2.5-flash`) : ~0,17 € au lieu de ~3-5 € en mono-shot.
+
+**Concurrence** : tous les appels passent par le sémaphore global `MAX_CONCURRENT_LLM_CALLS` (les chapitres sont analysés séquentiellement à l'intérieur d'un livre pour permettre la mémoire incrémentale, mais plusieurs livres peuvent être traités en parallèle).
 
 ### Mode Extended [FICHE] (défaut)
 
