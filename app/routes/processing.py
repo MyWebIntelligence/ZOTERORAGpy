@@ -922,6 +922,7 @@ async def generate_zotero_notes_sse(
         build_note_html_async, build_abstract_text_async, sentinel_in_html,
         TEMPLATE_MAP, NOTE_MODE_DISPLAY
     )
+    from app.utils.book_note_generator import build_book_note_async
     from app.utils.zotero_client import (
         verify_api_key, create_child_note, check_note_exists,
         update_item_abstract, ZoteroAPIError
@@ -1074,17 +1075,31 @@ async def generate_zotero_notes_sse(
                     status = "created"
 
                     if not use_short_mode:
-                        # HTML NOTE MODE (extended, pedagogique, evaluation)
+                        # HTML NOTE MODE (extended, pedagogique, evaluation, book)
                         # Uses global semaphore for concurrency control
-                        sentinel, note_html = await build_note_html_async(
-                            metadata=metadata,
-                            text_content=texteocr,
-                            model=model,
-                            use_llm=True,
-                            mode=note_mode,
-                            openai_api_key=openai_key,
-                            openrouter_api_key=openrouter_key
-                        )
+                        if note_mode == "book":
+                            # Books require a multi-phase pipeline (structure
+                            # detection → per-chapter analysis → synthesis).
+                            metadata["publisher"] = row.get("publisher", "") or row.get("publicationTitle", "")
+                            metadata["itemType"] = row.get("itemType", "book")
+                            metadata["numPages"] = row.get("numPages", "")
+                            sentinel, note_html = await build_book_note_async(
+                                metadata=metadata,
+                                text_content=texteocr,
+                                model=model,
+                                openai_api_key=openai_key,
+                                openrouter_api_key=openrouter_key,
+                            )
+                        else:
+                            sentinel, note_html = await build_note_html_async(
+                                metadata=metadata,
+                                text_content=texteocr,
+                                model=model,
+                                use_llm=True,
+                                mode=note_mode,
+                                openai_api_key=openai_key,
+                                openrouter_api_key=openrouter_key
+                            )
 
                         # Store generated note
                         generated_notes.append({

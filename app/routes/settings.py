@@ -3,7 +3,7 @@ Settings Routes
 ===============
 
 This module manages application-level settings and credentials. It allows ADMIN users
-only to view and update API keys and configuration variables stored in the `.env` file.
+only to view and update API keys and configuration variables.
 
 Key Features:
 - Credential Management: Retrieve and save API keys (OpenAI, Pinecone, etc.) - ADMIN ONLY.
@@ -12,16 +12,30 @@ Key Features:
 
 Security Note:
     All endpoints in this module require authentication.
-    .env file access is restricted to ADMIN role only.
+    These credential endpoints are restricted to the ADMIN role.
     Regular users should use their personal credentials stored in the database
     via the /users/me/credentials endpoint.
+
+Storage Note:
+    The pipeline reads credentials from the per-user database store first, with
+    `.env` only as an admin fallback (see app/core/credentials.py). To keep the
+    admin settings form authoritative, /save_credentials writes BOTH the `.env`
+    file and the admin's personal database credentials, and /get_credentials
+    returns the effective value (database first, then `.env`).
 """
 import os
 import logging
 from fastapi import APIRouter, Body, Query, Depends
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from app.core.config import RAGPY_DIR
+from app.core.credentials import (
+    get_user_credentials,
+    update_user_credentials,
+    CREDENTIAL_ENV_MAPPING,
+)
+from app.database.session import get_db
 from app.middleware.auth import require_admin, get_current_active_user
 from app.models.user import User
 
@@ -35,9 +49,16 @@ async def get_credentials(
     admin_user: User = Depends(require_admin)
 ):
     """
-    Get credentials from ragpy/.env for the settings form.
+    Get the admin's *effective* credentials for the settings form.
 
-    **ADMIN ONLY**: This endpoint exposes sensitive API keys from the .env file.
+    Returns the values the pipeline actually uses: the admin's personal
+    credentials (stored encrypted in the database) take precedence, falling back
+    to the application's ``.env`` file when a personal value is absent. This
+    mirrors the precedence enforced by ``get_credential_or_env`` /
+    ``build_subprocess_env`` so the form never shows a value that differs from
+    what runs.
+
+    **ADMIN ONLY**: This endpoint exposes sensitive API keys.
     Regular users should use /users/me/credentials for their personal credentials.
 
     Args:
@@ -93,23 +114,40 @@ async def get_credentials(
     ]
     
     credentials = {k: env_vars.get(k, "") for k in credential_keys}
-    
+
+    # Overlay the admin's personal credentials (database) so the form reflects
+    # the *effective* value used by the pipeline (database takes precedence over
+    # .env, matching get_credential_or_env / build_subprocess_env).
+    user_creds = get_user_credentials(admin_user)
+    for cred_key, env_key in CREDENTIAL_ENV_MAPPING.items():
+        value = user_creds.get(cred_key)
+        if value:
+            credentials[env_key] = value
+
     return credentials
 
 @router.post("/save_credentials")
 async def save_credentials(
     data: dict = Body(...),
-    admin_user: User = Depends(require_admin)
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     """
-    Save credentials for OpenAI, OpenRouter, Mistral, Pinecone, Weaviate, Qdrant to ragpy/.env.
+    Save credentials for OpenAI, OpenRouter, Mistral, Pinecone, Weaviate, Qdrant.
 
-    **ADMIN ONLY**: This endpoint modifies the application's .env file.
-    Regular users should use PUT /users/me/credentials for their personal credentials.
+    Writes to BOTH stores so the saved value is the one the pipeline uses:
+      1. The application's ``.env`` file (deployment-wide fallback).
+      2. The admin's personal credentials in the database — the store read first
+         by ``build_subprocess_env`` / ``get_credential_or_env``. Without this
+         mirror, a stale personal credential would silently shadow the ``.env``
+         value for admins, so the UI key would never take effect.
+
+    **ADMIN ONLY**. Regular users use PUT /users/me/credentials.
 
     Args:
         data: Dictionary of credential key-value pairs to save.
         admin_user: The authenticated admin user (injected by require_admin).
+        db: Database session (injected) used to persist personal credentials.
 
     Returns:
         JSONResponse: Status message indicating success or failure.
@@ -162,10 +200,33 @@ async def save_credentials(
             for k, v in env_vars.items():
                 f.write(f"{k}={v}\n")
         logger.info(f"Successfully saved credentials to {env_path}")
-        return JSONResponse({"status": "success", "message": "Credentials saved successfully."})
     except Exception as e:
         logger.error(f"Error writing to .env file: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": f"Failed to save credentials: {str(e)}"})
+
+    # Mirror the same values into the admin's personal credentials (database).
+    # This is the store the pipeline reads first, so it is what actually takes
+    # effect for the admin's own runs. An empty value clears the personal
+    # credential (handled by update_user_credentials), falling back to .env.
+    env_to_cred = {env_key: cred_key for cred_key, env_key in CREDENTIAL_ENV_MAPPING.items()}
+    db_updates = {
+        env_to_cred[key]: str(data[key]).strip()
+        for key in valid_keys
+        if key in data and key in env_to_cred
+    }
+    if db_updates:
+        try:
+            update_user_credentials(admin_user, db_updates, db)
+            logger.info(
+                f"Mirrored {len(db_updates)} credential(s) to personal store for {admin_user.email}"
+            )
+        except Exception as e:
+            logger.error(f"Error mirroring credentials to database: {str(e)}", exc_info=True)
+            return JSONResponse(status_code=500, content={
+                "error": f"Credentials saved to .env but failed to persist personal credentials: {str(e)}"
+            })
+
+    return JSONResponse({"status": "success", "message": "Credentials saved successfully."})
 
 
 @router.get("/api/pinecone/indexes")

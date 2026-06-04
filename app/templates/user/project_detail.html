@@ -362,7 +362,7 @@
             <div id="relevantTab" class="tab-content active">
                 <div class="form-group">
                     <label class="form-checkbox">
-                        <input type="checkbox" id="selectAllRelevant" onchange="toggleSelectAll()" checked>
+                        <input type="checkbox" id="selectAllRelevant" onchange="toggleSelectAll('relevant')" checked>
                         Tout sélectionner
                     </label>
                 </div>
@@ -1397,7 +1397,7 @@
         updateSelectedCount();
     }
 
-    // Populate skipped citations list (read-only)
+    // Populate skipped citations list (with checkboxes for reintegration)
     function populateSkippedList(items) {
         const container = document.getElementById('skippedList');
 
@@ -1410,29 +1410,60 @@
             return;
         }
 
-        container.innerHTML = items.map(item => {
+        // Header with "Select All" checkbox
+        let html = `
+        <div class="form-group mb-3">
+            <label class="form-checkbox">
+                <input type="checkbox" id="selectAllSkipped" onchange="toggleSelectAllSkipped()">
+                <strong>Tout sélectionner (import direct)</strong>
+            </label>
+            <div class="alert alert-info mt-2" style="font-size: 0.9em;">
+                <i class="bi bi-info-circle"></i>
+                Les citations sélectionnées seront importées directement dans Zotero avec des <strong>métadonnées basiques</strong> (titre, auteurs, année, URL).
+                Pas d'analyse LLM.
+            </div>
+        </div>
+        `;
+
+        // Add checkboxes to each citation card
+        html += items.map((item, arrayIndex) => {
             const citation = item.citation || {};
             const authors = Array.isArray(citation.authors) ? citation.authors.join(', ') : (citation.authors || 'N/A');
             const year = citation.year || 'N/A';
 
             return `
             <div class="citation-card skipped">
+                <label class="citation-checkbox">
+                    <input type="checkbox"
+                           class="skipped-checkbox"
+                           data-index="${arrayIndex}"
+                           onchange="updateSelectedCount()">
+                </label>
                 <div class="citation-content">
                     <h4>${escapeHtml(citation.title || 'Sans titre')}</h4>
                     <p class="citation-meta">
                         ${escapeHtml(authors)} (${year})
                     </p>
-                    <p class="citation-reason"><em>${escapeHtml(item.reason || 'Non pertinent')}</em></p>
                 </div>
             </div>
         `;
         }).join('');
+
+        container.innerHTML = html;
+        updateSelectedCount();
     }
 
     // Update selected count display
     function updateSelectedCount() {
-        const checked = document.querySelectorAll('.relevant-checkbox:checked').length;
-        document.getElementById('selectedCount').textContent = checked;
+        const relevantChecked = document.querySelectorAll('.relevant-checkbox:checked').length;
+        const skippedChecked = document.querySelectorAll('.skipped-checkbox:checked').length;
+
+        // Display total with reintegration count if any
+        let countText = relevantChecked.toString();
+        if (skippedChecked > 0) {
+            countText += ` + ${skippedChecked} réintégrées`;
+        }
+        document.getElementById('selectedCount').textContent = countText;
     }
 
     // Toggle select all checkboxes
@@ -1445,6 +1476,16 @@
             });
             updateSelectedCount();
         }
+    }
+
+    // Toggle select all skipped citations (for reintegration)
+    function toggleSelectAllSkipped() {
+        const selectAllCheckbox = document.getElementById('selectAllSkipped');
+        const checked = selectAllCheckbox.checked;
+        document.querySelectorAll('.skipped-checkbox').forEach(cb => {
+            cb.checked = checked;
+        });
+        updateSelectedCount();
     }
 
     // Switch between relevant/skipped tabs
@@ -1467,12 +1508,31 @@
 
     // Step 4: Import selected citations with SSE
     async function importSelected() {
-        const selectedCheckboxes = document.querySelectorAll('.relevant-checkbox:checked');
-        const selectedIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
+        // Get relevant citations
+        const relevantCheckboxes = document.querySelectorAll('.relevant-checkbox:checked');
+        const selectedIndices = Array.from(relevantCheckboxes).map(cb => parseInt(cb.dataset.index));
 
-        if (selectedIndices.length === 0) {
+        // Get skipped citations to reintegrate
+        const skippedCheckboxes = document.querySelectorAll('.skipped-checkbox:checked');
+        const skippedIndices = Array.from(skippedCheckboxes).map(cb => parseInt(cb.dataset.index));
+
+        const totalSelected = selectedIndices.length + skippedIndices.length;
+
+        if (totalSelected === 0) {
             showToast('Veuillez sélectionner au moins une citation', 'warning');
             return;
+        }
+
+        // Confirmation if reintegrating skipped citations
+        if (skippedIndices.length > 0) {
+            const confirmMsg =
+                `${skippedIndices.length} citation(s) ignorée(s) seront importées directement dans Zotero.\n` +
+                `Les métadonnées seront basiques (pas d'analyse LLM).\n\n` +
+                `Continuer ?`;
+
+            if (!confirm(confirmMsg)) {
+                return;
+            }
         }
 
         closeModal('previewCitationsModal');
@@ -1480,12 +1540,13 @@
 
         // Reset progress UI
         document.getElementById('importingProgressBar').style.width = '0%';
-        document.getElementById('importingProgressText').textContent = '0 / 0 importées';
+        document.getElementById('importingProgressText').textContent = `0 / ${totalSelected} importées`;
         document.getElementById('importingLiveLog').innerHTML = '';
 
         const formData = new FormData();
         formData.append('session_id', currentSessionId);
         formData.append('selected_indices', JSON.stringify(selectedIndices));
+        formData.append('skipped_indices', JSON.stringify(skippedIndices));  // NEW
 
         try {
             const response = await fetch(`/api/projects/${projectId}/import_citations_sse`, {
@@ -1503,7 +1564,7 @@
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
-            let totalToImport = selectedIndices.length;
+            let totalToImport = totalSelected;
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -1559,6 +1620,50 @@
                 errorEntry.className = 'log-entry error';
                 errorEntry.innerHTML = `<span class="badge badge-danger">error</span> ${escapeHtml(data.message || 'Unknown error')}`;
                 errorLog.appendChild(errorEntry);
+                break;
+
+            case 'phase':
+                // New phase (e.g., reintegration)
+                const phaseLog = document.getElementById('importingLiveLog');
+                const phaseEntry = document.createElement('div');
+                phaseEntry.className = 'log-entry';
+                phaseEntry.innerHTML = `<span class="badge badge-primary">phase</span> ${escapeHtml(data.message)}`;
+                phaseLog.appendChild(phaseEntry);
+                phaseLog.scrollTop = phaseLog.scrollHeight;
+                break;
+
+            case 'importing_forced':
+                // Force importing skipped citation (without LLM)
+                // Update progress counter
+                if (data.current !== undefined && data.total !== undefined) {
+                    const percent = data.total > 0 ? Math.round((data.current / data.total) * 100) : 0;
+                    document.getElementById('importingProgressBar').style.width = `${percent}%`;
+                    document.getElementById('importingProgressText').textContent = `${data.current} / ${data.total} importées`;
+                }
+                // Display log entry
+                const forcingLog = document.getElementById('importingLiveLog');
+                const forcingEntry = document.createElement('div');
+                forcingEntry.className = 'log-entry';
+                forcingEntry.innerHTML = `<span class="badge badge-info"><i class="bi bi-upload"></i> import forcé</span> ${escapeHtml(data.title)}`;
+                forcingLog.appendChild(forcingEntry);
+                forcingLog.scrollTop = forcingLog.scrollHeight;
+                break;
+
+            case 'forced_imported':
+                // Citation successfully force imported
+                // Update progress counter
+                if (data.current !== undefined && data.total !== undefined) {
+                    const percent = data.total > 0 ? Math.round((data.current / data.total) * 100) : 0;
+                    document.getElementById('importingProgressBar').style.width = `${percent}%`;
+                    document.getElementById('importingProgressText').textContent = `${data.current} / ${data.total} importées`;
+                }
+                // Display log entry
+                const importedLog = document.getElementById('importingLiveLog');
+                const importedEntry = document.createElement('div');
+                importedEntry.className = 'log-entry';
+                importedEntry.innerHTML = `<span class="badge badge-success"><i class="bi bi-check-circle"></i> importée</span> ${escapeHtml(data.title)} <span class="text-muted">(${data.action})</span>`;
+                importedLog.appendChild(importedEntry);
+                importedLog.scrollTop = importedLog.scrollHeight;
                 break;
 
             case 'complete':

@@ -483,6 +483,7 @@ async def import_citations_sse(
     project_id: int,
     session_id: int = Form(...),
     selected_indices: str = Form(...),  # JSON array "[0,1,2,...]"
+    skipped_indices: str = Form("[]"),  # JSON array of skipped citations to reintegrate
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -570,14 +571,28 @@ async def import_citations_sse(
                 yield f'data: {{"type": "error", "message": "Invalid selected indices format: {str(e)}"}}\n\n'
                 return
 
+            # Parse skipped indices (for reintegration)
+            try:
+                skipped_selected = json.loads(skipped_indices)
+                if not isinstance(skipped_selected, list):
+                    raise ValueError("skipped_indices must be a JSON array")
+            except Exception as e:
+                logger.error(f"Invalid skipped_indices format: {e}")
+                yield f'data: {{"type": "error", "message": "Invalid skipped indices format: {str(e)}"}}\n\n'
+                return
+
             # Filter selected items
             try:
                 to_import = [preview["relevant"][i] for i in selected]
-                logger.info(f"Selected {len(to_import)} citations to import")
+                logger.info(f"Selected {len(to_import)} relevant citations to import")
             except IndexError as e:
                 logger.error(f"Invalid index in selection: {e}")
                 yield f'data: {{"type": "error", "message": "Invalid citation index in selection"}}\n\n'
                 return
+
+            # Log reintegration request if any
+            if skipped_selected:
+                logger.info(f"Reintegration requested: {len(skipped_selected)} skipped citations will be re-filtered with LLM")
 
             # ========== RESUME SUPPORT FOR IMPORT ==========
             # Check for existing import progress (for crash recovery)
@@ -636,8 +651,8 @@ async def import_citations_sse(
                 return
 
             # Send init event with resume info
-            total = len(to_import)
-            yield f'data: {{"type": "init", "total": {total}, "already_imported": {already_imported_count}, "remaining": {total - already_imported_count}}}\n\n'
+            total = len(to_import) + len(skipped_selected)  # Include reintegration count
+            yield f'data: {{"type": "init", "total": {total}, "already_imported": {already_imported_count}, "remaining": {total - already_imported_count}, "reintegration_count": {len(skipped_selected)}}}\n\n'
 
             # Initialize counters with existing stats if resuming
             created = existing_import_stats["created"]
@@ -800,6 +815,132 @@ async def import_citations_sse(
 
                     yield f'data: {{"type": "error", "index": {original_idx}, "message": "{error_msg}"}}\n\n'
                     logger.error(f"Exception importing citation {original_idx}: {e}", exc_info=True)
+
+            # ========== PHASE 2: DIRECT IMPORT OF SKIPPED CITATIONS (WITHOUT LLM) ==========
+            if skipped_selected:
+                from app.utils.citation_filter import build_basic_zotero_item
+
+                yield f'data: {{"type": "phase", "message": "Import forcé des citations ignorées..."}}\n\n'
+                logger.info(f"Starting forced import phase: {len(skipped_selected)} citations")
+
+                forced_imported = 0
+
+                for skip_idx in skipped_selected:
+                    try:
+                        # Get original citation from preview.json
+                        try:
+                            skipped_entry = preview["skipped"][skip_idx]
+                            citation = skipped_entry["citation"]
+                        except (IndexError, KeyError) as e:
+                            error_msg = f"Invalid skipped index {skip_idx}: {e}"
+                            logger.error(error_msg)
+                            errors += 1
+                            yield f'data: {{"type": "error", "message": "{error_msg}"}}\n\n'
+                            processed_count += 1
+                            continue
+
+                        title = citation.get("title", "N/A")
+                        title_escaped = title.replace('"', '\\"').replace('\n', ' ')[:50]
+
+                        # Increment counter BEFORE sending event
+                        processed_count += 1
+
+                        # Yield importing_forced event with progress counters
+                        yield f'data: {{"type": "importing_forced", "current": {processed_count}, "total": {total}, "title": "{title_escaped}"}}\n\n'
+                        logger.info(f"Force importing skipped citation {skip_idx}: {title[:50]}")
+
+                        # Build basic Zotero item (WITHOUT LLM)
+                        try:
+                            zotero_data = build_basic_zotero_item(citation)
+                            zotero_data["collections"] = [collection_key]
+                        except Exception as build_err:
+                            error_msg = f"Failed to build Zotero item: {str(build_err)}"
+                            logger.error(f"Build error for citation {skip_idx}: {build_err}")
+                            errors += 1
+                            yield f'data: {{"type": "error", "message": "{error_msg}"}}\n\n'
+                            processed_count += 1
+                            continue
+
+                        # Create or update Zotero item
+                        try:
+                            result = create_or_update_item(
+                                library_type=library_type,
+                                library_id=library_id,
+                                item_data=zotero_data,
+                                api_key=zotero_api_key
+                            )
+
+                            if result["success"]:
+                                if result["action"] == "created":
+                                    created += 1
+                                else:
+                                    updated += 1
+
+                                forced_imported += 1
+                                # Note: processed_count already incremented before importing_forced event
+
+                                # Yield success event with progress counters
+                                yield f'data: {{"type": "forced_imported", "current": {processed_count}, "total": {total}, "action": "{result["action"]}", "item_key": "{result["item_key"]}", "title": "{title_escaped}"}}\n\n'
+                                logger.info(f"Citation {skip_idx} force imported: {result['item_key']} ({result['action']})")
+
+                                # Try to attach PDF if available
+                                fulltext_url = citation.get("fulltext_url")
+                                if fulltext_url:
+                                    try:
+                                        pdf_result = await download_pdf(
+                                            fulltext_url=str(fulltext_url),
+                                            timeout=60,
+                                            max_size_mb=50,
+                                            convert_html=True
+                                        )
+
+                                        if pdf_result.success and pdf_result.pdf_bytes:
+                                            target_keys = result.get("synced_keys", [result["item_key"]])
+                                            for parent_key in target_keys:
+                                                try:
+                                                    attach_result = upload_file_attachment(
+                                                        library_type=library_type,
+                                                        library_id=library_id,
+                                                        parent_item_key=parent_key,
+                                                        pdf_bytes=pdf_result.pdf_bytes,
+                                                        filename=pdf_result.filename,
+                                                        md5_hash=pdf_result.md5_hash,
+                                                        mtime=pdf_result.mtime,
+                                                        api_key=zotero_api_key,
+                                                        original_url=str(fulltext_url)
+                                                    )
+                                                    if attach_result["success"]:
+                                                        logger.info(f"PDF attached to forced import item {parent_key}")
+                                                        yield f'data: {{"type": "pdf_attached", "attachment_key": "{attach_result["attachment_key"]}"}}\n\n'
+                                                        break
+                                                except Exception as att_err:
+                                                    logger.warning(f"PDF attachment failed for {parent_key}: {att_err}")
+                                    except Exception as pdf_err:
+                                        logger.warning(f"PDF download failed (non-blocking) for citation {skip_idx}: {pdf_err}")
+
+                            else:
+                                # Zotero import failed
+                                error_msg = result.get("message", "Zotero import failed")
+                                errors += 1
+                                processed_count += 1
+                                yield f'data: {{"type": "error", "message": "Import failed: {error_msg}"}}\n\n'
+                                logger.error(f"Failed to import forced citation {skip_idx}: {error_msg}")
+
+                        except Exception as import_err:
+                            error_msg = str(import_err).replace('"', '\\"')
+                            errors += 1
+                            processed_count += 1
+                            yield f'data: {{"type": "error", "message": "{error_msg}"}}\n\n'
+                            logger.error(f"Exception importing forced citation {skip_idx}: {import_err}", exc_info=True)
+
+                    except Exception as e:
+                        error_msg = f"Unexpected error during forced import: {str(e)}"
+                        logger.error(f"Force import exception for citation {skip_idx}: {e}", exc_info=True)
+                        errors += 1
+                        processed_count += 1
+                        yield f'data: {{"type": "error", "message": "{error_msg}"}}\n\n'
+
+                logger.info(f"Forced import phase complete: {forced_imported}/{len(skipped_selected)} citations imported")
 
             # Save error log if any
             if error_details:
