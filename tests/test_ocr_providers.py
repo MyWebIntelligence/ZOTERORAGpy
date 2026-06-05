@@ -20,6 +20,8 @@ Run with: pytest tests/test_ocr_providers.py -v
 """
 
 import os
+import subprocess
+import types
 from unittest import mock
 
 import pytest
@@ -579,3 +581,169 @@ class TestMistralPartialFlowsToOcrResult:
         assert result.provider == "mistral"
         assert result.partial is False
         assert result.error is None
+
+
+# ===========================================================================
+# Lot 4 — OCR LOCAL (Docling) provider
+# ===========================================================================
+
+@pytest.fixture
+def mistral_fails_no_openai(monkeypatch):
+    """Mistral configuré mais échoue ; OpenAI off (défaut) → on atteint le local."""
+    monkeypatch.setattr(rad, "MISTRAL_API_KEY", "key")
+    monkeypatch.setattr(rad, "OCR_ENABLE_OPENAI_FALLBACK", False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rad, "_extract_text_with_mistral",
+        mock.Mock(side_effect=OCRExtractionError("mistral down")),
+    )
+
+
+class TestLocalOcrChain:
+    def test_local_used_before_legacy_when_available(self, mistral_fails_no_openai, monkeypatch):
+        monkeypatch.setattr(rad, "OCR_ENABLE_LOCAL_FALLBACK", True)
+        monkeypatch.setattr(rad, "_local_ocr_available", lambda: True)
+        dense = "word " * 5000  # 25 000 car. → 2 500 car./page sur 10 pages (> seuil 500)
+        monkeypatch.setattr(rad, "_extract_text_with_local", mock.Mock(return_value=dense))
+        monkeypatch.setattr(rad, "_pdf_page_count", mock.Mock(return_value=10))
+        legacy_spy = mock.Mock(side_effect=AssertionError("legacy must NOT run when local succeeds"))
+        monkeypatch.setattr(rad, "_extract_text_with_legacy_pdf", legacy_spy)
+
+        result = extract_text_with_ocr("book.pdf", return_details=True)
+        assert result.provider == rad.LOCAL_OCR_ENGINE  # "docling"
+        assert result.partial is False
+        legacy_spy.assert_not_called()
+
+    def test_local_sparse_flagged_partial(self, mistral_fails_no_openai, monkeypatch):
+        monkeypatch.setattr(rad, "OCR_ENABLE_LOCAL_FALLBACK", True)
+        monkeypatch.setattr(rad, "_local_ocr_available", lambda: True)
+        monkeypatch.setattr(rad, "_extract_text_with_local", mock.Mock(return_value="x" * 50))
+        monkeypatch.setattr(rad, "_pdf_page_count", mock.Mock(return_value=200))
+        monkeypatch.setattr(rad, "_extract_text_with_legacy_pdf", mock.Mock(return_value=""))
+
+        result = extract_text_with_ocr("scan.pdf", return_details=True)
+        assert result.provider == rad.LOCAL_OCR_ENGINE
+        assert result.partial is True
+        assert result.error and "suspect" in result.error.lower()
+
+    def test_local_skipped_when_unavailable(self, mistral_fails_no_openai, monkeypatch):
+        monkeypatch.setattr(rad, "OCR_ENABLE_LOCAL_FALLBACK", True)
+        monkeypatch.setattr(rad, "_local_ocr_available", lambda: False)
+        local_spy = mock.Mock(side_effect=AssertionError("local must NOT run when unavailable"))
+        monkeypatch.setattr(rad, "_extract_text_with_local", local_spy)
+        monkeypatch.setattr(rad, "_extract_text_with_legacy_pdf", mock.Mock(return_value="word " * 5000))
+        monkeypatch.setattr(rad, "_pdf_page_count", mock.Mock(return_value=10))
+
+        result = extract_text_with_ocr("book.pdf", return_details=True)
+        assert result.provider == "legacy"
+        local_spy.assert_not_called()
+
+    def test_local_disabled_by_flag(self, mistral_fails_no_openai, monkeypatch):
+        monkeypatch.setattr(rad, "OCR_ENABLE_LOCAL_FALLBACK", False)
+        monkeypatch.setattr(rad, "_local_ocr_available", lambda: True)
+        local_spy = mock.Mock(side_effect=AssertionError("local must NOT run when flag off"))
+        monkeypatch.setattr(rad, "_extract_text_with_local", local_spy)
+        monkeypatch.setattr(rad, "_extract_text_with_legacy_pdf", mock.Mock(return_value="word " * 5000))
+        monkeypatch.setattr(rad, "_pdf_page_count", mock.Mock(return_value=10))
+
+        result = extract_text_with_ocr("book.pdf", return_details=True)
+        assert result.provider == "legacy"
+        local_spy.assert_not_called()
+
+    def test_local_failure_falls_through_to_legacy(self, mistral_fails_no_openai, monkeypatch):
+        monkeypatch.setattr(rad, "OCR_ENABLE_LOCAL_FALLBACK", True)
+        monkeypatch.setattr(rad, "_local_ocr_available", lambda: True)
+        monkeypatch.setattr(
+            rad, "_extract_text_with_local",
+            mock.Mock(side_effect=OCRExtractionError("docling crashed")),
+        )
+        monkeypatch.setattr(rad, "_extract_text_with_legacy_pdf", mock.Mock(return_value="word " * 5000))
+        monkeypatch.setattr(rad, "_pdf_page_count", mock.Mock(return_value=10))
+
+        result = extract_text_with_ocr("book.pdf", return_details=True)
+        assert result.provider == "legacy"
+
+
+class TestLocalOcrSubprocessWrapper:
+    def test_success_reads_output_markdown(self, monkeypatch):
+        def fake_run(cmd, capture_output, text, timeout):
+            out = cmd[cmd.index("--output") + 1]
+            with open(out, "w", encoding="utf-8") as f:
+                f.write("<!-- Page 1 -->\nhello")
+            return types.SimpleNamespace(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(rad.subprocess, "run", fake_run)
+        assert rad._extract_text_with_local("book.pdf") == "<!-- Page 1 -->\nhello"
+
+    def test_nonzero_returncode_raises(self, monkeypatch):
+        def fake_run(cmd, capture_output, text, timeout):
+            return types.SimpleNamespace(returncode=3, stderr="boom", stdout="")
+        monkeypatch.setattr(rad.subprocess, "run", fake_run)
+        with pytest.raises(OCRExtractionError, match="rc=3"):
+            rad._extract_text_with_local("book.pdf")
+
+    def test_empty_output_raises(self, monkeypatch):
+        def fake_run(cmd, capture_output, text, timeout):
+            out = cmd[cmd.index("--output") + 1]
+            open(out, "w").close()
+            return types.SimpleNamespace(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(rad.subprocess, "run", fake_run)
+        with pytest.raises(OCRExtractionError, match="vide"):
+            rad._extract_text_with_local("book.pdf")
+
+    def test_timeout_raises(self, monkeypatch):
+        def fake_run(cmd, capture_output, text, timeout):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+        monkeypatch.setattr(rad.subprocess, "run", fake_run)
+        with pytest.raises(OCRExtractionError, match="timeout"):
+            rad._extract_text_with_local("book.pdf")
+
+    def test_max_pages_forwarded(self, monkeypatch):
+        captured = {}
+        def fake_run(cmd, capture_output, text, timeout):
+            captured["cmd"] = cmd
+            out = cmd[cmd.index("--output") + 1]
+            with open(out, "w", encoding="utf-8") as f:
+                f.write("ok")
+            return types.SimpleNamespace(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(rad.subprocess, "run", fake_run)
+        rad._extract_text_with_local("book.pdf", max_pages=42)
+        assert "--max-pages" in captured["cmd"]
+        assert captured["cmd"][captured["cmd"].index("--max-pages") + 1] == "42"
+
+
+class TestLocalOcrAvailability:
+    def test_available_true_when_check_returns_zero(self, monkeypatch):
+        monkeypatch.setattr(rad, "_LOCAL_OCR_AVAILABLE", None)
+        monkeypatch.setattr(
+            rad.subprocess, "run",
+            lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+        assert rad._local_ocr_available() is True
+
+    def test_available_false_when_check_nonzero(self, monkeypatch):
+        monkeypatch.setattr(rad, "_LOCAL_OCR_AVAILABLE", None)
+        monkeypatch.setattr(
+            rad.subprocess, "run",
+            lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr=""),
+        )
+        assert rad._local_ocr_available() is False
+
+    def test_venv_python_preferred_when_present(self, monkeypatch):
+        monkeypatch.setattr(rad, "LOCAL_OCR_PYTHON", "")
+        monkeypatch.setattr(rad.os.path, "exists", lambda p: p == rad._LOCAL_OCR_VENV_PYTHON)
+        assert rad._local_ocr_python() == rad._LOCAL_OCR_VENV_PYTHON
+
+    def test_explicit_python_overrides(self, monkeypatch):
+        monkeypatch.setattr(rad, "LOCAL_OCR_PYTHON", "/custom/py")
+        assert rad._local_ocr_python() == "/custom/py"
+
+
+class TestRadChunkSkipsLocalProviders:
+    def test_recode_skip_set_includes_local_engines(self):
+        try:
+            from scripts.rad_chunk import RECODE_SKIP_PROVIDERS
+        except Exception:
+            pytest.skip("rad_chunk import indisponible dans cet environnement")
+        assert "docling" in RECODE_SKIP_PROVIDERS
+        assert "mistral" in RECODE_SKIP_PROVIDERS  # non-régression
+        assert "csv" in RECODE_SKIP_PROVIDERS

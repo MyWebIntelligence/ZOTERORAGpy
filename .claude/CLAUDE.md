@@ -183,7 +183,21 @@ Variables d'environnement associées :
 
 ### Politique fournisseurs — OpenAI Vision désactivé par défaut
 
-La chaîne OCR par défaut est désormais **Mistral → legacy (PyMuPDF)**. Le fallback **OpenAI Vision est désactivé** (`OCR_ENABLE_OPENAI_FALLBACK=0`, défaut) : sa transcription page-par-page est plafonnée à `OPENAI_OCR_MAX_PAGES` et tronque silencieusement les livres. La branche OpenAI (avec ses garde-fous partiels Lot 2) reste dans le code et n'est exécutée que si `OCR_ENABLE_OPENAI_FALLBACK=1`. Quand Mistral échoue (ex. 401 plafond) et OpenAI est désactivé, on tombe directement sur legacy — flaggé `partial` par le garde-fou de densité si le texte est trop maigre (livre scanné). Conseil d'exploitation : aligner `PDF_EXTRACTION_WORKERS` sur `MISTRAL_CONCURRENT_CALLS` pour limiter les 429.
+La chaîne OCR par défaut est désormais **Mistral → (OpenAI opt-in) → OCR local → legacy (PyMuPDF)**. Le fallback **OpenAI Vision est désactivé** (`OCR_ENABLE_OPENAI_FALLBACK=0`, défaut) : sa transcription page-par-page est plafonnée à `OPENAI_OCR_MAX_PAGES` et tronque silencieusement les livres. La branche OpenAI (avec ses garde-fous partiels Lot 2) reste dans le code et n'est exécutée que si `OCR_ENABLE_OPENAI_FALLBACK=1`. Quand Mistral échoue (ex. 401 plafond) et OpenAI est désactivé, on tente l'OCR local (cf. Lot 4) puis legacy — flaggé `partial` par le garde-fou de densité si le texte est trop maigre (livre scanné). Conseil d'exploitation : aligner `PDF_EXTRACTION_WORKERS` sur `MISTRAL_CONCURRENT_CALLS` pour limiter les 429.
+
+### Lot 4 — OCR LOCAL (Docling) — sans clé, sans cap, hors-ligne
+
+Voie d'OCR **locale** insérée dans la chaîne **avant** le dernier recours `legacy` : c'est elle qui traite les **PDF scannés** que `legacy` (extraction texte PyMuPDF) ne sait pas lire, **sans clé API ni cap de pages**, y compris quand Mistral est KO (plafond/panne). Voir `.claude/tasks/SPRINT_ocr_local_docling.md`.
+
+- **Isolation (double)** : (1) **process** — l'OCR tourne dans le subprocess dédié **[scripts/ocr_local.py](scripts/ocr_local.py)** ; (2) **venv** — Docling est installé dans un **venv séparé `/opt/ocr-venv`**, PAS dans l'env principal, car il exige `numpy 2.x` / `httpx 0.28` qui casseraient `spacy`/`thinc` (numpy<2) et `mistralai`/`weaviate` (httpx<0.28). Le subprocess est lancé avec `/opt/ocr-venv/bin/python` (`_local_ocr_python()`, surchargeable via `LOCAL_OCR_PYTHON`). torch installé en **CPU-only** (évite ~5 Go de CUDA).
+- **Détection** : `_local_ocr_available()` (dans `rad_dataframe.py`) délègue à `ocr_local.py --check` exécuté avec le python du venv (simple `find_spec`, n'importe pas torch), résultat caché. Si Docling n'est pas installé, le provider est **sauté silencieusement** dans la chaîne.
+- **Contrat de sortie** : `render_markdown_with_page_markers()` émet markdown + `<!-- Page N -->` (export par page, repli mono-marqueur si la version Docling ne supporte pas `page_no`).
+- **Skip recodage** : `texteocr_provider="docling"` est ajouté à `RECODE_SKIP_PROVIDERS` dans `rad_chunk.py` (markdown déjà propre, comme Mistral).
+- **Concurrence** : `LOCAL_OCR_SEMAPHORE` (`LOCAL_OCR_CONCURRENCY`, défaut 1) — CPU/RAM-bound, distinct de `MISTRAL_SEMAPHORE`.
+- **Variables** : `OCR_ENABLE_LOCAL_FALLBACK` (défaut 1), `LOCAL_OCR_ENGINE` (docling), `LOCAL_OCR_DEVICE` (cpu|cuda), `LOCAL_OCR_MAX_PAGES`, `LOCAL_OCR_TIMEOUT`, `LOCAL_OCR_CONCURRENCY`.
+- **Installation (opt-in)** : `pip install -r scripts/requirements-ocr-local.txt` ou image Docker `docker compose build --build-arg INSTALL_LOCAL_OCR=true` (Dockerfile `ARG INSTALL_LOCAL_OCR=false` par défaut → image légère).
+
+Tests : `tests/test_ocr_local.py` (pagination, détection moteur) + `tests/test_ocr_providers.py::TestLocalOcrChain`/`TestLocalOcrSubprocessWrapper` (chaîne, wrapper subprocess, skip recodage).
 
 ### Lot 2 — Garde-fou anti-troncature (jamais de « success » silencieux)
 

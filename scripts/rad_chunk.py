@@ -143,6 +143,11 @@ DEFAULT_DOC_WORKERS = get_env_int('DEFAULT_DOC_WORKERS', 3)
 DEFAULT_INPUT_JSON_WITH_EMBEDDINGS = "df_chunks_with_embeddings.json"
 DEFAULT_OUTPUT_JSON_SPARSE = "df_chunks_with_embeddings_sparse.json"
 
+# Providers dont l'OCR produit déjà un markdown propre → recodage GPT inutile
+# (économie de coût). Mistral et CSV historiquement ; Lot 4 ajoute les moteurs
+# d'OCR LOCAL (Docling/MinerU/Marker) qui sortent aussi du markdown structuré.
+RECODE_SKIP_PROVIDERS = ("mistral", "csv", "docling", "mineru", "marker")
+
 # ----------------------------------------------------------------------
 # PART 1: Découpage en CHUNKs assisté par gpt_recode
 # ----------------------------------------------------------------------
@@ -265,8 +270,9 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model=
     if isinstance(provider_raw, float) and pd.isna(provider_raw):
         provider_raw = ""
     provider = str(provider_raw).strip().lower()
-    # Skip recodage GPT si OCR Mistral (déjà Markdown) ou source CSV (déjà propre)
-    recode_required = provider not in ("mistral", "csv")
+    # Skip recodage GPT si l'OCR produit déjà du Markdown propre (Mistral, OCR
+    # local Docling/MinerU/Marker) ou source CSV déjà propre.
+    recode_required = provider not in RECODE_SKIP_PROVIDERS
 
     doc_id = str(random.randint(10**11, 10**12 - 1))
     text_chunks = TEXT_SPLITTER.split_text(text)

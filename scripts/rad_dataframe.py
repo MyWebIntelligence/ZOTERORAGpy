@@ -20,6 +20,7 @@ Example:
 """
 
 import os
+import sys
 import json
 import re
 import unicodedata
@@ -27,6 +28,7 @@ import base64
 import time
 import csv
 import random
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
@@ -325,6 +327,35 @@ OPENAI_OCR_RENDER_SCALE = _env_float("OPENAI_OCR_RENDER_SCALE", 2.0)
 # through the PyMuPDF legacy text extractor). Such results are flagged
 # `partial` instead of being returned as a silent success.
 OCR_MIN_CHARS_PER_PAGE = _env_int("OCR_MIN_CHARS_PER_PAGE", 500)
+
+# Lot 4 — OCR LOCAL (Docling). Voie d'OCR sans clé/cap/réseau, exécutée dans un
+# subprocess isolé (scripts/ocr_local.py) pour garder torch/easyocr HORS du
+# process FastAPI. Insérée dans la chaîne avant le dernier recours `legacy`.
+# `available()` se désactive proprement si le moteur n'est pas installé.
+OCR_ENABLE_LOCAL_FALLBACK = _truthy_env(os.getenv("OCR_ENABLE_LOCAL_FALLBACK"), True)
+LOCAL_OCR_ENGINE = os.getenv("LOCAL_OCR_ENGINE", "docling")
+LOCAL_OCR_DEVICE = os.getenv("LOCAL_OCR_DEVICE", "cpu")
+LOCAL_OCR_MAX_PAGES = _env_int("LOCAL_OCR_MAX_PAGES", 0)        # 0 = pas de cap
+LOCAL_OCR_TIMEOUT = _env_int("LOCAL_OCR_TIMEOUT", 1800)        # par document (s)
+LOCAL_OCR_CONCURRENCY = _env_int("LOCAL_OCR_CONCURRENCY", 1)   # CPU/RAM-bound → bas
+LOCAL_OCR_SEMAPHORE = threading.Semaphore(LOCAL_OCR_CONCURRENCY)
+_LOCAL_OCR_SCRIPT = os.path.join(SCRIPT_DIR, "ocr_local.py")
+# Interpréteur Python pour le subprocess OCR local. Docling vit dans un venv
+# DÉDIÉ (/opt/ocr-venv) pour ne pas casser numpy/httpx du pipeline principal ;
+# on utilise donc son python. Surchargeable via LOCAL_OCR_PYTHON ; repli sur
+# l'interpréteur courant (cas install bare-metal dans le même venv, déconseillé).
+_LOCAL_OCR_VENV_PYTHON = "/opt/ocr-venv/bin/python"
+LOCAL_OCR_PYTHON = os.getenv("LOCAL_OCR_PYTHON", "")
+_LOCAL_OCR_AVAILABLE: Optional[bool] = None  # cache résolu une fois
+
+
+def _local_ocr_python() -> str:
+    """Interpréteur à utiliser pour `ocr_local.py` (venv Docling si présent)."""
+    if LOCAL_OCR_PYTHON:
+        return LOCAL_OCR_PYTHON
+    if os.path.exists(_LOCAL_OCR_VENV_PYTHON):
+        return _LOCAL_OCR_VENV_PYTHON
+    return sys.executable
 
 
 # ============================================================================
@@ -1404,6 +1435,93 @@ def _extract_text_with_openai(
     )
 
 
+def _local_ocr_available() -> bool:
+    """
+    True si le moteur OCR local (Docling par défaut) est utilisable (Lot 4).
+
+    Docling étant isolé dans un venv dédié, on délègue la détection à
+    `ocr_local.py --check`, exécuté avec l'interpréteur du venv. Ce `--check`
+    fait un simple `find_spec` (n'importe PAS torch). Résultat mis en cache.
+    Le subprocess garantit qu'on teste le bon environnement, pas le process
+    FastAPI courant.
+    """
+    global _LOCAL_OCR_AVAILABLE
+    if _LOCAL_OCR_AVAILABLE is not None:
+        return _LOCAL_OCR_AVAILABLE
+    if not os.path.exists(_LOCAL_OCR_SCRIPT):
+        _LOCAL_OCR_AVAILABLE = False
+        return False
+    try:
+        proc = subprocess.run(
+            [_local_ocr_python(), _LOCAL_OCR_SCRIPT, "--check", "--engine", LOCAL_OCR_ENGINE],
+            capture_output=True, text=True, timeout=60,
+        )
+        _LOCAL_OCR_AVAILABLE = (proc.returncode == 0)
+    except Exception as exc:  # noqa: BLE001 — détection best-effort
+        logger.debug("Détection OCR local indisponible: %s", exc)
+        _LOCAL_OCR_AVAILABLE = False
+    return _LOCAL_OCR_AVAILABLE
+
+
+def _extract_text_with_local(pdf_path: str, max_pages: Optional[int] = None) -> str:
+    """
+    OCR via le moteur LOCAL, exécuté dans le subprocess isolé `ocr_local.py`.
+
+    Garde les dépendances lourdes (Docling → torch/easyocr) hors du process
+    FastAPI. Renvoie le markdown (+ `<!-- Page N -->`). Concurrence limitée par
+    `LOCAL_OCR_SEMAPHORE` (CPU/RAM-bound, ≠ rate-limit réseau).
+
+    Args:
+        pdf_path: Chemin du PDF.
+        max_pages: Cap de pages (sinon `LOCAL_OCR_MAX_PAGES`, 0 = aucun).
+
+    Returns:
+        Markdown extrait.
+
+    Raises:
+        OCRExtractionError: rc≠0, timeout, ou sortie vide.
+    """
+    import tempfile
+
+    tmp = tempfile.NamedTemporaryFile(prefix="ragpy_localocr_", suffix=".md", delete=False)
+    tmp.close()
+    cmd = [
+        _local_ocr_python(), _LOCAL_OCR_SCRIPT,
+        "--input", pdf_path,
+        "--output", tmp.name,
+        "--engine", LOCAL_OCR_ENGINE,
+        "--device", LOCAL_OCR_DEVICE,
+    ]
+    eff_max = max_pages if (max_pages and max_pages > 0) else (LOCAL_OCR_MAX_PAGES or 0)
+    if eff_max and eff_max > 0:
+        cmd += ["--max-pages", str(eff_max)]
+
+    try:
+        with LOCAL_OCR_SEMAPHORE:
+            logger.debug("OCR local: %s", " ".join(cmd))
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=LOCAL_OCR_TIMEOUT)
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()[-300:]
+            raise OCRExtractionError(
+                f"OCR local ({LOCAL_OCR_ENGINE}) échec rc={proc.returncode} pour "
+                f"{os.path.basename(pdf_path)}: {stderr}"
+            )
+        with open(tmp.name, encoding="utf-8") as fh:
+            text = fh.read().strip()
+        if not text:
+            raise OCRExtractionError(
+                f"OCR local ({LOCAL_OCR_ENGINE}) : sortie vide pour {os.path.basename(pdf_path)}"
+            )
+        return text
+    except subprocess.TimeoutExpired as exc:
+        raise OCRExtractionError(
+            f"OCR local ({LOCAL_OCR_ENGINE}) timeout ({LOCAL_OCR_TIMEOUT}s) pour "
+            f"{os.path.basename(pdf_path)}"
+        ) from exc
+    finally:
+        _safe_unlink(tmp.name)
+
+
 def _finalize_ocr_result(
     text: str,
     provider: str,
@@ -1614,6 +1732,32 @@ def extract_text_with_ocr(
                     track_error('pdf_extraction', type(openai_error).__name__)
         elif not openai_key:
             logger.debug("OPENAI_API_KEY absente, OCR OpenAI ignoré pour %s", pdf_path)
+
+        # Lot 4 — OCR LOCAL (Docling), sans clé/cap, AVANT le dernier recours
+        # `legacy`. C'est la voie qui sauve les PDF scannés que legacy ne sait
+        # pas lire. Sauté proprement si le moteur n'est pas installé.
+        if OCR_ENABLE_LOCAL_FALLBACK and _local_ocr_available():
+            try:
+                logger.info("Tentative OCR local (%s) pour %s", LOCAL_OCR_ENGINE, pdf_path)
+                local_text = _extract_text_with_local(pdf_path, max_pages=max_pages)
+                local_pages = _pdf_page_count(pdf_path)
+                density_error = _ocr_density_warning(local_text, local_pages, pdf_path, LOCAL_OCR_ENGINE)
+                provider_used = LOCAL_OCR_ENGINE
+                extraction_success = True
+                return _finalize_ocr_result(
+                    local_text, LOCAL_OCR_ENGINE, return_details,
+                    partial=bool(density_error),
+                    pages_done=local_pages, pages_total=local_pages,
+                    error=density_error,
+                )
+            except Exception as local_error:
+                last_error = local_error
+                logger.warning(
+                    "Échec OCR local (%s) pour %s: %s",
+                    LOCAL_OCR_ENGINE, pdf_path, local_error,
+                )
+                if METRICS_AVAILABLE and track_error:
+                    track_error('pdf_extraction', type(local_error).__name__)
 
         if not MISTRAL_API_KEY and not openai_key:
             logger.error(

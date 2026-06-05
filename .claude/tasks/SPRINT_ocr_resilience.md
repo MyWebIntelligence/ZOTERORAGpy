@@ -66,7 +66,7 @@ Réutiliser l'existant comme implémentations : `_extract_text_with_mistral` →
 
 ### 4.2 Chaîne de fallback configurable
 ```bash
-OCR_PROVIDER_CHAIN=mistral,gemini,docling,legacy   # ordre d'essai
+OCR_PROVIDER_CHAIN=mistral,docling,legacy   # ordre d'essai
 ```
 - Itère la chaîne ; pour chaque provider `available()`, tente `extract()`.
 - **Ne descend au provider suivant que sur échec réel** (pas sur un partiel acceptable).
@@ -112,45 +112,24 @@ OCR_PROVIDER_CHAIN=mistral,gemini,docling,legacy   # ordre d'essai
 - Quand un provider plafonné (OpenAI, `OPENAI_OCR_MAX_PAGES=10`) traite un PDF dont `total_pages > pages_done`, marquer le résultat **`partial=True`** et :
   - logger un `WARNING` explicite (« OCR partiel : 10/284 pages »),
   - enregistrer dans `output_errors.json` + colonnes `texteocr_partial` / `texteocr_pages_done` / `texteocr_pages_total`,
-  - **continuer la chaîne** vers un provider non plafonné (local/Gemini) avant d'accepter le partiel.
+  - **continuer la chaîne** vers un provider non plafonné (OCR local) avant d'accepter le partiel.
 - Heuristique de sanité générique : si `len(texte)/total_pages` est anormalement bas (ex. < 500 car./page sur un doc texte), flaguer suspect.
 **Acceptation** : le cas « livre 284 p → 10 pages » ressort en partiel/échec visible (UI + errors.json), jamais en `success` silencieux.
 **Effort** : S-M.
 
-### Lot 3 — Fournisseur cloud économique : Gemini Flash **par lots de pages**
-**But** : un second fournisseur cloud bon marché capable de traiter un **livre entier**, contrairement à OpenAI (page-par-page).
-**Fichiers** : nouveau `GeminiProvider` (via API Google ou OpenRouter, client déjà présent côté repo).
-**Détails** :
-- Gemini ingère un PDF (≈ **258 tokens/page**, < limite ~1000 p / contexte ~1M) **mais la sortie est plafonnée** (~8 K tokens en 2.0 Flash, ~65 K en 2.5 Flash) → **impossible de transcrire un livre en un appel**.
-- → **Découpage par lots de pages** (ex. 20-40 p/appel), concaténation avec marqueurs `<!-- Page N -->` et **renumérotation cumulative** — réutiliser la logique de concat des « parts » Mistral (Lot G existant).
-- Routage OpenRouter haut débit si applicable : suffixe `:nitro` **ou** `extra_body={"provider":{"sort":"throughput","quantizations":["fp8","bf16"]}}` (éviter FP4 pour la qualité FR). Variable `OPENROUTER_PROVIDER_SORT`.
-- Variables : `GEMINI_API_KEY`, `GEMINI_OCR_MODEL`, `GEMINI_OCR_PAGES_PER_BATCH`.
-**Acceptation** : un livre de 400 p est OCRisé complètement via Gemini en lots, pagination continue 1→N, coût < OpenAI vision.
-**Effort** : M.
-
-### Lot 4 — OCR LOCAL (cœur de la demande) 🧩
-**But** : voie d'OCR **sans cap, sans coût marginal, hors-ligne**, idéale pour les gros livres et la confidentialité.
-**Fichiers** : nouveau `LocalProvider` (sous-process ou lib Python), trace `texteocr_provider="docling"` / `"mineru"` / `"marker"`.
-**Candidats** (ordre de recommandation pour PDF académique FR) :
-- **Docling (IBM)** — PDF→markdown/JSON, layout/tableaux, robuste, intégration Python propre. *Recommandé par défaut.*
-- **MinerU (OpenDataLab)** — excellent académique, formules + tableaux.
-- **Marker / Surya (Datalab)** — académique, équations, multilingue ; option API Datalab si pas d'hébergement.
-- (Option masse/GPU : **olmOCR** ; option VLM local : **Qwen2.5-VL**.)
-**Détails** :
-- Implémentation **subprocess** (binaire/script dédié) pour isoler les dépendances lourdes (torch, etc.) du process FastAPI ; sortie normalisée en markdown + `<!-- Page N -->`.
-- Détection `available()` = binaire/modèle présent ; sinon provider sauté silencieusement dans la chaîne.
-- Docker : service/option dédié (CPU par défaut, GPU si dispo) — documenter dans `docker-compose.yml` (section optionnelle commentée, comme Qdrant).
-- Variables : `LOCAL_OCR_ENGINE=docling|mineru|marker`, `LOCAL_OCR_DEVICE=cpu|cuda`, `LOCAL_OCR_MAX_PAGES`.
-**Acceptation** : avec `OCR_PROVIDER_CHAIN=...,docling,legacy`, un livre est OCRisé entièrement **sans aucune clé API**, qualité ≥ legacy PyMuPDF, pagination + structure markdown préservées.
-**Effort** : M-L (packaging des deps + perfs).
+### Lot 4 — OCR LOCAL (cœur de la demande) 🧩 → **sprint dédié : [SPRINT_ocr_local_docling.md](SPRINT_ocr_local_docling.md)**
+**But** : voie d'OCR **sans cap, sans coût marginal, hors-ligne**, idéale pour les gros livres scannés et la confidentialité — c'est elle qui sauverait les livres scannés que `legacy` ne sait pas lire quand Mistral est KO.
+**Résumé** : nouveau `LocalProvider` (moteur **Docling** par défaut) en **subprocess** isolé, sortie normalisée markdown + `<!-- Page N -->`, sélectionnable via `OCR_PROVIDER_CHAIN`. Effort : M-L.
+> Détail complet (Docling, packaging deps, subprocess, Docker, tests, plan en phases) dans **[SPRINT_ocr_local_docling.md](SPRINT_ocr_local_docling.md)**.
 
 ### Lot 5 — Chaîne de fallback configurable + abstraction provider
 **But** : remplacer la cascade codée en dur par la chaîne pilotable (§4).
-**Fichiers** : `scripts/rad_dataframe.py` (`extract_text_with_ocr` → boucle sur la chaîne), `app/core/credentials.py` (ajouter `gemini_api_key` au mapping/CREDENTIAL_KEYS, par-utilisateur).
+**Fichiers** : `scripts/rad_dataframe.py` (`extract_text_with_ocr` → boucle sur la chaîne).
 **Détails** :
-- `OCR_PROVIDER_CHAIN` (défaut rétro-compatible : `mistral,openai,legacy`).
-- Respecter le **modèle de sécurité par rôle** (clés par-utilisateur via `build_subprocess_env`), y compris la nouvelle clé Gemini.
+- `OCR_PROVIDER_CHAIN` (défaut rétro-compatible : `mistral,legacy` ; OpenAI opt-in, OCR local insérable : `mistral,docling,legacy`).
+- Respecter le **modèle de sécurité par rôle** (clés par-utilisateur via `build_subprocess_env`).
 **Acceptation** : changer l'ordre des fournisseurs = une variable d'env, sans toucher au code ; tests unitaires sur la sélection/fallback.
+**Dépendance** : Lot 4 fournit le `LocalProvider` que cette chaîne orchestre.
 **Effort** : M.
 
 ### Lot 6 — Observabilité OCR par document
@@ -160,9 +139,6 @@ OCR_PROVIDER_CHAIN=mistral,gemini,docling,legacy   # ordre d'essai
 **Acceptation** : on sait d'un coup d'œil quel doc est complet/partiel et par quel moteur.
 **Effort** : S.
 
-### Lot 7 (optionnel) — Réglage débit OpenRouter
-Centraliser le routage haut-débit (`:nitro` / `provider.sort=throughput` + filtre quantization) pour tous les appels VLM/LLM passant par OpenRouter (OCR Gemini/Qwen **et** génération de fiches). Variable `OPENROUTER_PROVIDER_SORT`. **Effort** : S.
-
 ---
 
 ## 6. Comparatif fournisseurs (synthèse, à revérifier — prix volatils)
@@ -170,7 +146,6 @@ Centraliser le routage haut-débit (`:nitro` / `provider.sort=throughput` + filt
 | Fournisseur | Type | Coût indicatif | Livre entier ? | FR | Note |
 |---|---|---|---|---|---|
 | **Mistral OCR** | Cloud dédié | ~1 $/1000 p | ✅ 1 appel | bon | Primaire ; fragile aux caps/glitches |
-| **Gemini 2.5 Flash** | Cloud VLM | souvent ≤ Mistral | ✅ **par lots** | bon | Meilleur secours cloud économique |
 | **Docling** | **Local** | compute | ✅ | bon | **Défaut local recommandé** |
 | **MinerU** | **Local** | compute | ✅ | bon | Fort académique (formules/tableaux) |
 | **Marker/Surya** | Local / API | compute / bas | ✅ | bon | API Datalab si pas d'hébergement |
@@ -181,9 +156,9 @@ Centraliser le routage haut-débit (`:nitro` / `provider.sort=throughput` + filt
 
 ## 7. Priorisation / phasage
 
-1. **Phase 1 (rapide, anti-régression)** : Lot 2 (garde-fou troncature) + Lot 1 (retry/diagnostic Mistral). → stoppe les CSV silencieusement faux et absorbe les 404 transitoires.
-2. **Phase 2 (résilience)** : Lot 5 (chaîne configurable) + Lot 4 (**OCR local**). → plus de point unique, voie sans cap/hors-ligne.
-3. **Phase 3 (économie cloud)** : Lot 3 (Gemini par lots) + Lot 7 (débit OpenRouter) + Lot 6 (observabilité).
+1. **Phase 1 (rapide, anti-régression)** : Lot 2 (garde-fou troncature) + Lot 1 (retry/diagnostic Mistral). ✅ **LIVRÉ**.
+2. **Phase 2 (résilience)** : Lot 5 (chaîne configurable) + Lot 4 (**OCR local** → sprint dédié `SPRINT_ocr_local_docling.md`). → plus de point unique, voie sans cap/hors-ligne.
+3. **Phase 3 (finitions)** : Lot 6 (observabilité OCR par document).
 
 ---
 
@@ -191,7 +166,6 @@ Centraliser le routage haut-débit (`:nitro` / `provider.sort=throughput` + filt
 
 - **Deps lourdes (Lot 4)** : docling/MinerU tirent torch & co. → **isoler en subprocess/service Docker**, ne pas alourdir l'image FastAPI principale. Risque perf CPU (prévoir GPU optionnel).
 - **Qualité FR variable** selon moteur → prévoir un **spot-check FR** (1 article + 1 livre) par fournisseur candidat avant adoption.
-- **Sécurité credentials** : toute nouvelle clé (Gemini) passe par le modèle par-rôle (`get_credential_or_env` / `build_subprocess_env`), jamais `os.getenv` direct.
 - **Contrat de sortie** : tous les providers DOIVENT émettre `<!-- Page N -->` + markdown, pagination **continue** (réutiliser la renumérotation des parts) pour ne pas casser chunking ni `book_note_generator` (qui détecte coarse pagination, etc.).
 - **Tests** : ajouter `tests/test_ocr_providers.py` (sélection/chaîne, partial flag, concat lots, normalisation pagination) sur le modèle des tests existants.
 
@@ -199,7 +173,7 @@ Centraliser le routage haut-débit (`:nitro` / `provider.sort=throughput` + filt
 
 ## 9. Définition de « terminé » (DoD du sprint)
 
-- [ ] Un livre OCRise **complètement** même si Mistral est KO (via local ou Gemini), pagination continue.
+- [ ] Un livre OCRise **complètement** même si Mistral est KO (via **OCR local**), pagination continue.
 - [ ] Un OCR incomplet n'est **jamais** `success` silencieux (flag `partial` + errors.json + UI).
 - [ ] Ordre des fournisseurs configurable par env, rétro-compatible par défaut.
 - [ ] Voie **100 % locale** documentée et testée (sans aucune clé API).
