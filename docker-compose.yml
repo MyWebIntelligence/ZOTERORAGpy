@@ -6,6 +6,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # OCR local (Docling) — mettre INSTALL_LOCAL_OCR=true dans .env pour
+        # installer les deps lourdes, puis `docker compose up -d --build`.
+        INSTALL_LOCAL_OCR: "${INSTALL_LOCAL_OCR:-false}"
     container_name: ragpy
     restart: unless-stopped
     # Limites ressources pour stabilité (P1-T2)
@@ -111,6 +115,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        INSTALL_LOCAL_OCR: "${INSTALL_LOCAL_OCR:-false}"
     container_name: ragpy-celery-worker
     restart: unless-stopped
     command: celery -A app.celery_app worker --loglevel=info --concurrency=4

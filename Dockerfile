@@ -30,6 +30,42 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
     playwright install --with-deps chromium
 
+# OCR LOCAL (Lot 4) — dépendances OPTIONNELLES et lourdes (Docling → torch).
+# Désactivé par défaut. Activer : INSTALL_LOCAL_OCR=true dans .env puis
+#   docker compose up -d --build
+#
+# ISOLATION : Docling est installé dans un VENV DÉDIÉ (/opt/ocr-venv), PAS dans
+# l'env principal — car Docling exige numpy 2.x / httpx 0.28 qui casseraient
+# spacy/thinc (numpy<2) et mistralai/weaviate (httpx<0.28) du pipeline. Le
+# subprocess scripts/ocr_local.py tourne avec /opt/ocr-venv/bin/python.
+# torch est installé en CPU-only (évite ~5 Go de libs CUDA en device=cpu).
+ARG INSTALL_LOCAL_OCR=false
+COPY scripts/requirements-ocr-local.txt /app/requirements-ocr-local.txt
+# Couche 1 (lourde, mise en cache) : venv dédié + Docling + torch CPU-only.
+RUN if [ "$INSTALL_LOCAL_OCR" = "true" ]; then \
+        python -m venv /opt/ocr-venv && \
+        /opt/ocr-venv/bin/pip install --no-cache-dir --upgrade pip && \
+        /opt/ocr-venv/bin/pip install --no-cache-dir \
+            torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+        /opt/ocr-venv/bin/pip install --no-cache-dir -r requirements-ocr-local.txt; \
+    else \
+        echo "OCR local non installé (INSTALL_LOCAL_OCR=false)"; \
+    fi
+# NB : le moteur OCR par défaut est Tesseract (ci-dessous). Le moteur RapidOCR
+# optionnel (LOCAL_OCR_ENGINE_OCR=rapidocr) nécessiterait `onnxruntime` + des
+# modèles téléchargés — non installé par défaut car, sur CPU ARM, RapidOCR s'est
+# révélé PLUS LENT que Tesseract (benchmark 2026-06-04 : 8,7 vs 5,1 s/page) et
+# dépend de modelscope.cn. À installer manuellement seulement sur serveur x86/GPU.
+#
+# Couche 2 (légère) : libs image + moteur OCR Tesseract FR/EN. Données de langue
+# installées via apt → AUCUN téléchargement de modèle au runtime (hors-ligne).
+RUN if [ "$INSTALL_LOCAL_OCR" = "true" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            libgl1 libglib2.0-0 \
+            tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Téléchargement du modèle spaCy français
 RUN python -m spacy download fr_core_news_md
 

@@ -1,0 +1,14 @@
+# OCR LOCAL (Lot 4 — SPRINT_ocr_local_docling) — dépendances OPTIONNELLES.
+# Lourdes (Docling tire torch ≈ plusieurs Go) ET INCOMPATIBLES avec l'env
+# principal (Docling exige numpy 2.x / httpx 0.28, qui cassent spacy/thinc et
+# mistralai/weaviate). → NE JAMAIS installer dans le même environnement.
+#
+# Installation recommandée = venv DÉDIÉ :
+#   python -m venv /opt/ocr-venv
+#   /opt/ocr-venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   /opt/ocr-venv/bin/pip install -r scripts/requirements-ocr-local.txt
+#   export LOCAL_OCR_PYTHON=/opt/ocr-venv/bin/python
+# En Docker, c'est automatique : INSTALL_LOCAL_OCR=true (.env) + docker compose up -d --build.
+#
+# Le subprocess scripts/ocr_local.py tourne avec le python de ce venv.
+docling>=2.0.0
