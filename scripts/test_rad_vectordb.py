@@ -371,11 +371,14 @@ class TestRadVectorDB(unittest.TestCase):
 
         with patch('os.path.exists') as mock_exists:
             mock_exists.return_value = True
-            inserted_count = rad_vectordb.insert_to_weaviate_hybrid(
+            result = rad_vectordb.insert_to_weaviate_hybrid(
                 "dummy.json", "fake_url", "fake_api_key", class_name="Article", tenant_name="alakel"
             )
 
-        self.assertEqual(inserted_count, 2) # Two valid chunks
+        # Lot 0.a : retour unifié en dict {status, message, inserted_count}.
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["inserted_count"], 2)  # Two valid chunks
+        self.assertEqual(result["status"], "success")
         
         # Check connect_to_weaviate_cloud call
         # The auth_credentials argument is an object, so using unittest.mock.ANY for it
@@ -475,11 +478,14 @@ class TestRadVectorDB(unittest.TestCase):
 
         with patch('os.path.exists') as mock_exists:
             mock_exists.return_value = True
-            inserted_count = rad_vectordb.insert_to_qdrant(
+            result = rad_vectordb.insert_to_qdrant(
                 "dummy.json", "new_collection", qdrant_url="http://fakeurl" # No API key for this test
             )
-        
-        self.assertEqual(inserted_count, 1)
+
+        # Lot 0.a : retour unifié en dict {status, message, inserted_count}.
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["inserted_count"], 1)
+        self.assertEqual(result["status"], "success")
         mock_qdrant_client_instance.create_collection.assert_called_once_with(
             collection_name="new_collection",
             vectors_config=rad_vectordb.models.VectorParams(size=10, distance=rad_vectordb.models.Distance.COSINE)

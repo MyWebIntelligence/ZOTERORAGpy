@@ -29,6 +29,20 @@ except ImportError:
     log_metrics_summary = None
     metrics_collector = None
 
+# Module de déduplication (Lot 1+). Stdlib uniquement : write-path (ici) et
+# read-path (rad_vectordb) partagent la MÊME normalisation/hash. Import robuste
+# au contexte package (Celery/tests) et CLI (python scripts/rad_chunk.py).
+try:
+    from scripts import rad_dedup
+except ImportError:
+    import rad_dedup
+
+# Cache/déterminisme du recodage (Lot 7). OFF par défaut → byte-identique.
+try:
+    from scripts import rad_recode_cache
+except ImportError:
+    import rad_recode_cache
+
 # Attempt to import RecursiveCharacterTextSplitter from langchain_text_splitters
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -152,17 +166,56 @@ RECODE_SKIP_PROVIDERS = ("mistral", "csv", "docling", "mineru", "marker")
 # PART 1: Découpage en CHUNKs assisté par gpt_recode
 # ----------------------------------------------------------------------
 
-def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3, max_tokens=8000):
+# Prompt de recodage extrait en constantes : le fingerprint du prompt (Lot 7) en
+# dérive, donc toute édition d'un octet du system/template/instruction invalide
+# automatiquement le cache (MISS). NE PAS reformuler sans intention.
+_RECODE_SYSTEM = "Assistant spécialisé en recodage de textes académiques."
+_RECODE_TEMPLATE = "Instructions : {instructions}\n\nTexte à recoder :\n{chunk}\n\nTexte recodé :"
+_RECODE_INSTRUCTIONS = (
+    "ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, "
+    "des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence par une phrase complète et se "
+    "termine par un point. Supprime le bruit d'OCR et les imperfections en conservant le sens original. Ne echange "
+    "ni ajoute aucun mot du texte d'origine. C'est une correction et un nettoyage de texte (suppression des erreurs) "
+    "pas une réécriture"
+)
+
+
+def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3, max_tokens=8000, recode_cfg=None):
     """
     Recoder un lot de textes selon des instructions précises en parallèle,
     puis retenter séquentiellement en cas d'erreur.
 
     Args:
         model: Nom du modèle (ex: "gpt-4o-mini" pour OpenAI, "google/gemini-2.5-flash" pour OpenRouter)
-               Si le modèle contient "/" → utilise OpenRouter, sinon OpenAI
+               Si le modèle contient "/" → utilise OpenRouter, sinon OpenAI.
+        recode_cfg: RecodeConfig optionnel (Lot 7). Si ``harden_enabled``, force
+               temp/top_p/seed/max_tokens/modèle snapshot et le routage OpenAI vs
+               OpenRouter pinné. Sinon comportement historique (temp 0.3).
+
+    Returns:
+        tuple[list[str], list[str]]: ``(recoded_texts, statuses)`` index-alignés à
+        ``chunks``. ``status`` ∈ {``'recoded'`` (succès finish_reason=stop, non vide),
+        ``'fallback_truncated'`` (length/content_filter → texte RAW), ``'fallback_raw'``
+        (exception/vide → texte RAW)}. Les deux fallbacks NE sont jamais cachés ni
+        (par contrat Lot 7.d) upsertés.
     """
-    # Auto-detect which client to use based on model format
-    use_openrouter = "/" in model  # OpenRouter models have format "provider/model"
+    # --- Durcissement décodage optionnel (Lot 7.a) ---
+    top_p = None
+    seed = None
+    if recode_cfg is not None and recode_cfg.harden_enabled:
+        model = recode_cfg.model
+        temperature = recode_cfg.temperature
+        max_tokens = recode_cfg.max_tokens
+        top_p = recode_cfg.top_p
+        seed = recode_cfg.seed
+        # OpenAI direct (seed honoré) sauf si OpenRouter explicitement préféré ET pinné.
+        if recode_cfg.prefer_openai or not recode_cfg.openrouter_provider:
+            use_openrouter = False
+        else:
+            use_openrouter = ("/" in model) and (openrouter_client is not None)
+    else:
+        use_openrouter = "/" in model  # OpenRouter models have format "provider/model"
+
     active_client = openrouter_client if (use_openrouter and openrouter_client) else client
 
     if use_openrouter and not openrouter_client:
@@ -170,67 +223,137 @@ def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3,
         print("Falling back to OpenAI gpt-4o-mini")
         model = "gpt-4o-mini"
         active_client = client
+        use_openrouter = False
 
     print(f"Using {'OpenRouter' if (use_openrouter and openrouter_client) else 'OpenAI'} with model: {model}")
 
+    def _create(msgs, mdl=model):
+        kwargs = {"model": mdl, "messages": msgs, "temperature": temperature, "max_tokens": max_tokens}
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        if seed is not None and not use_openrouter:  # seed honoré côté OpenAI seul
+            kwargs["seed"] = seed
+        if use_openrouter and recode_cfg is not None and recode_cfg.openrouter_provider:
+            kwargs["extra_body"] = {"provider": {"order": [recode_cfg.openrouter_provider], "allow_fallbacks": False}}
+        return active_client.chat.completions.create(**kwargs)
+
+    def _extract(resp):
+        """Renvoie (text|None, status). Truncation/échec → texte RAW en aval."""
+        choice = resp.choices[0]
+        text = (choice.message.content or "").strip()
+        finish = getattr(choice, "finish_reason", None)
+        if finish in ("length", "content_filter"):
+            return None, "fallback_truncated"  # jamais caché (Lot 7.c), RAW stocké
+        if not text:
+            return None, "fallback_raw"
+        return text, "recoded"
+
     messages_list = []
     for chunk in chunks:
-        prompt = (
-            f"Instructions : {instructions}\n\n"
-            f"Texte à recoder :\n{chunk}\n\n"
-            "Texte recodé :"
-        )
+        prompt = _RECODE_TEMPLATE.format(instructions=instructions, chunk=chunk)
         messages_list.append([
-            {"role": "system", "content": "Assistant spécialisé en recodage de textes académiques."},
+            {"role": "system", "content": _RECODE_SYSTEM},
             {"role": "user",   "content": prompt}
         ])
 
     recoded = [None] * len(chunks)
+    statuses = [None] * len(chunks)
     # Use DEFAULT_MAX_WORKERS for the ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=DEFAULT_MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(
-                lambda msgs, mdl=model: active_client.chat.completions.create(
-                    model=mdl,
-                    messages=msgs,
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                ),
-                msgs
-            ): idx
-            for idx, msgs in enumerate(messages_list)
-        }
+        futures = {executor.submit(_create, msgs): idx for idx, msgs in enumerate(messages_list)}
         for future in as_completed(futures):
             idx = futures[future]
             try:
-                resp = future.result()
-                recoded[idx] = resp.choices[0].message.content.strip()
+                recoded[idx], statuses[idx] = _extract(future.result())
             except Exception as e:
                 print(f"Erreur chunk #{idx+1} (1ʳᵉ passe) : {e}")
+                statuses[idx] = None  # retry en 2ᵉ passe
 
-    # Deuxième passe séquentielle pour les None
-    for i, text in enumerate(recoded):
-        if text is None: # Check if recoding failed in the first pass
+    # Deuxième passe séquentielle pour les chunks ayant levé en 1ʳᵉ passe (status None).
+    # Une troncature (fallback_truncated) n'est PAS réessayée dans le run (retentée au
+    # run suivant) — c'est un échec déterministe, pas un glitch transitoire.
+    for i in range(len(chunks)):
+        if statuses[i] is None:
             print(f"Tentative de 2ᵉ passe pour le chunk #{i+1}")
             try:
-                time.sleep(2) # Wait before retrying
-                resp = active_client.chat.completions.create(
-                    model=model,
-                    messages=messages_list[i],
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                )
-                recoded[i] = resp.choices[0].message.content.strip()
-                print(f"Chunk #{i+1} recodé avec succès en 2ᵉ passe.")
+                time.sleep(2)  # Wait before retrying
+                recoded[i], statuses[i] = _extract(_create(messages_list[i]))
+                print(f"Chunk #{i+1} : 2ᵉ passe statut={statuses[i]}.")
             except Exception as e:
                 print(f"Échec chunk #{i+1} après 2ᵉ passe : {e}")
-                recoded[i] = chunks[i] # Fallback to original chunk if 2nd pass fails
+                statuses[i] = "fallback_raw"
 
-    return recoded
+    # Matérialiser le texte RAW pour tout fallback (et garde-fou final).
+    for i in range(len(chunks)):
+        if statuses[i] in ("fallback_raw", "fallback_truncated") or recoded[i] is None:
+            recoded[i] = chunks[i]
+            if statuses[i] not in ("fallback_raw", "fallback_truncated"):
+                statuses[i] = "fallback_raw"
+
+    return recoded, statuses
+
+
+def recode_batch_cached(raw_batch, instructions, model):
+    """Wrapper cache (Lot 7.b) autour de ``gpt_recode_batch``. Renvoie
+    ``(texts, statuses)`` (statuts incluant ``'cached'``).
+
+    Clés sur le ``content_hash`` du texte BRUT (calculé inconditionnellement de
+    ``DEDUP_ENABLED`` ; un chunk normalisé vide est **non-cacheable**). On ne cache
+    QUE les succès (``status == 'recoded'``). HIT → 0 appel LLM, valeur canonique
+    réutilisée → texte stocké byte-identique entre runs.
+    """
+    cfg = rad_recode_cache.RecodeConfig.from_env()
+    n = len(raw_batch)
+    if not cfg.cache_enabled:
+        # Cache off : recode direct (durcissement éventuel si harden_enabled).
+        return gpt_recode_batch(raw_batch, instructions, model=model, recode_cfg=cfg)
+
+    eff_model = cfg.model if cfg.harden_enabled else model
+    provider = "openrouter" if (("/" in eff_model) and not cfg.prefer_openai) else "openai"
+    pv = rad_recode_cache.prompt_fingerprint(_RECODE_SYSTEM, _RECODE_TEMPLATE, instructions)
+    dp = cfg.decode_params_json()
+
+    keys = []
+    for raw in raw_batch:
+        norm = rad_dedup.normalize_text_for_hash(raw)
+        if not norm:  # normalisé vide → non-cacheable (sinon collapse de clé)
+            keys.append(None)
+        else:
+            keys.append(rad_recode_cache.recode_key(rad_dedup.content_hash(raw), eff_model, provider, pv, dp))
+
+    texts = [None] * n
+    statuses = [None] * n
+    miss_idx = []
+    for i, key in enumerate(keys):
+        hit = rad_recode_cache.get_recode(cfg, key) if key else None
+        if hit is not None:
+            texts[i], statuses[i] = hit, "cached"
+        else:
+            miss_idx.append(i)
+
+    if miss_idx:
+        sub_texts, sub_statuses = gpt_recode_batch(
+            [raw_batch[i] for i in miss_idx], instructions, model=model, recode_cfg=cfg
+        )
+        for j, i in enumerate(miss_idx):
+            txt, st = sub_texts[j], sub_statuses[j]
+            statuses[i] = st
+            if st == "recoded" and keys[i]:
+                # PUT puis valeur canonique (convergence de MISS concurrents).
+                txt = rad_recode_cache.put_recode(cfg, keys[i], txt)
+            texts[i] = txt
+
+    return texts, statuses
 
 def save_raw_chunks_to_json_incrementally(chunks_to_add, json_file):
     """
     Sauvegarde les nouveaux chunks dans `json_file` de manière incrémentale et thread-safe.
+
+    Quand ``DEDUP_ENABLED`` est actif, le merge est **dédupliqué par ``id``** : les
+    ids éligibles étant adressés par contenu (``content_hash``), un même texte
+    ré-ingéré ne s'empile plus (idempotence cross-run/cross-session). Les chunks
+    inéligibles (ids aléatoires uniques) ne collisionnent jamais → tous conservés.
+    Quand OFF : concaténation simple, sortie **byte-identique** à avant.
     """
     with SAVE_LOCK:
         existing_chunks = []
@@ -241,8 +364,21 @@ def save_raw_chunks_to_json_incrementally(chunks_to_add, json_file):
             except json.JSONDecodeError:
                 print(f"Fichier JSON '{json_file}' corrompu ou vide. On repart d'une liste vide.")
                 existing_chunks = []
-        
-        merged_chunks = existing_chunks + chunks_to_add
+
+        if rad_dedup.DedupConfig.from_env().enabled:
+            merged_chunks = []
+            seen_ids = set()
+            for chunk in existing_chunks + chunks_to_add:
+                cid = chunk.get("id")
+                # 1re occurrence gagne (existing avant nouveaux) ; idempotent au ré-ingest.
+                if cid is not None and cid in seen_ids:
+                    continue
+                if cid is not None:
+                    seen_ids.add(cid)
+                merged_chunks.append(chunk)
+        else:
+            merged_chunks = existing_chunks + chunks_to_add
+
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(merged_chunks, f, ensure_ascii=False, indent=2)
 
@@ -274,6 +410,17 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model=
     # local Docling/MinerU/Marker) ou source CSV déjà propre.
     recode_required = provider not in RECODE_SKIP_PROVIDERS
 
+    # Lot 1 — config dédup lue par document (respecte un DEDUP_ENABLED posé avant
+    # l'appel). Quand OFF : aucun champ content_hash écrit, id aléatoire conservé
+    # → JSON byte-identique à avant.
+    dedup_cfg = rad_dedup.DedupConfig.from_env()
+    # Lot 7 — observabilité recodage : on ne pose le champ recode_status QUE si le
+    # cache ou le durcissement est actif (sinon JSON byte-identique à avant).
+    recode_cfg = rad_recode_cache.RecodeConfig.from_env()
+    _emit_recode_status = recode_cfg.cache_enabled or recode_cfg.harden_enabled
+
+    # doc_id reste ALÉATOIRE (traçabilité au journal uniquement) ; il n'est JAMAIS
+    # une clé de dédup. La clé est l'id adressé par contenu (cf. boucle ci-dessous).
     doc_id = str(random.randint(10**11, 10**12 - 1))
     text_chunks = TEXT_SPLITTER.split_text(text)
     
@@ -287,25 +434,29 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model=
 
         if recode_required:
             print(f"  Lot {start_index // DEFAULT_BATCH_SIZE_GPT + 1} / {total_batches} en recodage...")
-            cleaned_batch = gpt_recode_batch(
+            # Lot 7 : passe par le wrapper cache (no-op si RECODE_CACHE_ENABLED=0 →
+            # recode direct, durcissement éventuel). Renvoie (textes, statuts).
+            cleaned_batch, recode_statuses = recode_batch_cached(
                 batch_to_recode,
-                instructions="ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence par une phrase complète et se termine par un point. Supprime le bruit d'OCR et les imperfections en conservant le sens original. Ne echange ni ajoute aucun mot du texte d'origine. C'est une correction et un nettoyage de texte (suppression des erreurs) pas une réécriture",
+                instructions=_RECODE_INSTRUCTIONS,
                 model=model,
-                temperature=0.3,
-                max_tokens=8000
             )
         else:
             if start_index == 0:
                 print("  OCR Mistral détecté → recodage GPT sauté (chunks utilisés tels quels).")
             cleaned_batch = batch_to_recode
+            recode_statuses = ["skipped"] * len(batch_to_recode)
 
         for i, cleaned_text in enumerate(cleaned_batch):
             original_chunk_index = start_index + i + 1
-            
+            # Texte BRUT pré-recodage (clé de hash) : aligné index-à-index avec
+            # cleaned_batch. Repli défensif si gpt_recode_batch désalignait la liste.
+            raw_chunk_text = batch_to_recode[i] if i < len(batch_to_recode) else cleaned_text
+
             # Sanitize metadata values, especially for NaN or other non-JSON-friendly types
             # Convert pandas.NA or numpy.nan to empty strings or None
             # Pinecone metadata values should be string, number, boolean, or list of strings.
-            
+
             def sanitize_metadata_value(value, default=""):
                 if pd.isna(value):
                     return default
@@ -326,13 +477,41 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model=
 
             # Injecter toutes les métadonnées source (sauf texteocr qui est dans "text")
             for key, value in row_data.items():
-                # Exclure les champs déjà gérés ou trop volumineux
-                if key not in ("texteocr", "text", "id", "doc_id", "chunk_index", "total_chunks"):
+                # Exclure les champs déjà gérés ou trop volumineux (content_hash /
+                # dedup_eligible protégés : ils sont posés par la dédup ci-dessous).
+                if key not in ("texteocr", "text", "id", "doc_id", "chunk_index",
+                               "total_chunks", "content_hash", "dedup_eligible"):
                     chunk_metadata[key] = sanitize_metadata_value(value, "")
 
             # S'assurer que ocr_provider est présent (backward compatibility)
             if "ocr_provider" not in chunk_metadata and "texteocr_provider" not in chunk_metadata:
                 chunk_metadata["ocr_provider"] = sanitize_metadata_value(provider, "")
+
+            # Lot 1 — Tier 0 : content_hash sur le texte BRUT pré-recodage. Raison
+            # décisive : gpt_recode_batch tourne à temperature>0 → texte recodé NON
+            # déterministe ; hacher le brut couvre TOUT le corpus (recodé inclus).
+            # Posé en DERNIER pour ne pas être écrasé par l'injection row_data.
+            if dedup_cfg.enabled:
+                chash, eligible, cid = rad_dedup.compute_dedup_fields(
+                    raw_chunk_text, original_chunk_index, dedup_cfg.min_chars
+                )
+                chunk_metadata["content_hash"] = chash
+                chunk_metadata["dedup_eligible"] = eligible
+                # ID adressé par contenu SEULEMENT si éligible : un chunk inéligible
+                # (court : '', 'Références', bruit OCR) garde son id aléatoire unique
+                # pour éviter une collision inter-documents au même chunk_index.
+                if eligible:
+                    chunk_metadata["id"] = cid
+
+            # Lot 7.f — statut de recodage (cached|recoded|fallback_raw|
+            # fallback_truncated|skipped) pour l'observabilité + le contrat 7.d
+            # (les fallbacks ne sont pas upsertés). Gated → byte-identique quand OFF.
+            if _emit_recode_status:
+                chunk_metadata["recode_status"] = (
+                    recode_statuses[i] if i < len(recode_statuses) else "recoded"
+                )
+                chunk_metadata["recode_model"] = recode_cfg.model if recode_cfg.harden_enabled else model
+
             all_processed_chunks.append(chunk_metadata)
 
     if all_processed_chunks:
@@ -480,14 +659,43 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
             logging.error(f"Single embedding failed, returning zero vector")
             return [[0.0] * 3072]
 
+def _embed_with_cache(texts, recode_cfg, model="text-embedding-3-large"):
+    """Lot 7.e — cache de vecteurs denses clé par sha256(texte recodé)·model·params.
+    HIT → 0 appel embedding. Ferme l'axe vecteur (texte identique → vecteur
+    byte-identique). MISS → appel groupé puis PUT. Advisory (erreur cache → recalcul).
+    """
+    embed_params = json.dumps({"model": model}, sort_keys=True)
+    keys = [rad_recode_cache.embed_key(t, model, embed_params) if t else None for t in texts]
+    out = [None] * len(texts)
+    miss_idx = []
+    for i, key in enumerate(keys):
+        hit = rad_recode_cache.get_embed(recode_cfg, key) if key else None
+        if hit is not None:
+            out[i] = hit
+        else:
+            miss_idx.append(i)
+    if miss_idx:
+        sub = get_embeddings_batch([texts[i] for i in miss_idx], model=model)
+        for j, i in enumerate(miss_idx):
+            vec = sub[j]
+            out[i] = vec
+            if vec is not None and keys[i]:
+                rad_recode_cache.put_embed(recode_cfg, keys[i], vec)
+    return out
+
+
 def process_chunks_for_embedding(chunks_batch):
     """
     Traite un lot de chunks pour y ajouter les embeddings denses.
     Modifie les dictionnaires de chunks en place.
     """
     texts_to_embed = [chunk.get("text", "") for chunk in chunks_batch]
-    embeddings = get_embeddings_batch(texts_to_embed)
-    
+    recode_cfg = rad_recode_cache.RecodeConfig.from_env()
+    if recode_cfg.embed_cache_enabled:
+        embeddings = _embed_with_cache(texts_to_embed, recode_cfg)
+    else:
+        embeddings = get_embeddings_batch(texts_to_embed)
+
     for i, embedding in enumerate(embeddings):
         if embedding is not None:
             chunks_batch[i]["embedding"] = embedding

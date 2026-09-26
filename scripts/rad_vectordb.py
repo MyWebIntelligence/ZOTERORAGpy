@@ -21,6 +21,13 @@ try:
 except ImportError as exc:  # pragma: no cover - only triggered when dependency missing
     Pinecone = None
     _pinecone_import_error = exc
+
+# Module de déduplication partagé (Lot 2/3/4). Stdlib seul ; même normalisation/hash
+# que le write-path rad_chunk. Import robuste contexte package (Celery/tests) vs CLI.
+try:
+    from scripts import rad_dedup
+except ImportError:
+    import rad_dedup
 # ----------------------------------------------------------------------
 # Environment variable helper with validation
 # ----------------------------------------------------------------------
@@ -73,7 +80,7 @@ def upsert_batch_to_pinecone(index, vectors_batch, namespace=None):
             print(f"Échec après nouvelle tentative d'upsert: {e_retry}")
             return False
 
-def prepare_vectors_for_pinecone(chunks):
+def prepare_vectors_for_pinecone(chunks, include_sparse=True):
     """
     Prépare les vecteurs au format attendu par Pinecone, incluant les données de vecteurs sparse si disponibles.
     Chaque 'chunk' d'entrée est supposé être un dictionnaire.
@@ -82,6 +89,14 @@ def prepare_vectors_for_pinecone(chunks):
       sous la forme d'un dictionnaire {"indices": [...], "values": [...]}.
     - 'id': l'identifiant unique du vecteur.
     - Autres clés: utilisées comme métadonnées.
+
+    Args:
+        chunks (list[dict]): Chunks à préparer.
+        include_sparse (bool): Si False, les ``sparse_values`` sont omis. Pinecone
+            n'accepte les vecteurs sparse que sur les index ``metric=dotproduct`` ;
+            sur un index ``cosine``/``euclidean`` l'upsert d'un vecteur portant des
+            ``sparse_values`` est rejeté (HTTP 400). Mettre ce flag à False permet un
+            upsert dense uniquement sur ces index. Défaut True (rétro-compatibilité).
     """
     vectors = []
     for chunk in chunks:
@@ -108,8 +123,10 @@ def prepare_vectors_for_pinecone(chunks):
             }
             
             # Vérifier et ajouter les données du vecteur sparse si elles existent
+            # (uniquement si l'index cible le supporte — cf. include_sparse)
             sparse_embedding_data = chunk.get("sparse_embedding")
-            if sparse_embedding_data and \
+            if include_sparse and \
+               sparse_embedding_data and \
                isinstance(sparse_embedding_data, dict) and \
                "indices" in sparse_embedding_data and \
                "values" in sparse_embedding_data:
@@ -118,11 +135,18 @@ def prepare_vectors_for_pinecone(chunks):
                 try:
                     sparse_indices = [int(i) for i in sparse_embedding_data["indices"]]
                     sparse_values_float = [float(v) for v in sparse_embedding_data["values"]]
-                    
-                    vector_data["sparse_values"] = {
-                        "indices": sparse_indices,
-                        "values": sparse_values_float
-                    }
+
+                    # Pinecone rejette un sparse_values vide (HTTP 400 "Sparse vector
+                    # must contain at least one value") et tout le lot échoue. Certains
+                    # chunks (texte = stopwords/ponctuation, très courts) n'ont aucune
+                    # feature sparse → on les laisse en dense uniquement (valide sur un
+                    # index dotproduct). On exige aussi indices/valeurs de même longueur.
+                    if sparse_indices and sparse_values_float and \
+                       len(sparse_indices) == len(sparse_values_float):
+                        vector_data["sparse_values"] = {
+                            "indices": sparse_indices,
+                            "values": sparse_values_float
+                        }
                 except (ValueError, TypeError) as e:
                     print(f"Avertissement: Erreur de formatage des données sparse pour le chunk ID {chunk.get('id', 'ID inconnu')}: {e}. Vecteur sparse ignoré.")
 
@@ -269,6 +293,21 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
         print(msg)
         traceback.print_exc()
         return {"status": "error", "message": msg, "inserted_count": 0}
+
+    # Pinecone n'accepte les vecteurs sparse que sur les index metric=dotproduct.
+    # Sur un index cosine/euclidean, un upsert portant des sparse_values est rejeté
+    # (HTTP 400) → tous les lots échouent silencieusement. On détecte le metric une
+    # fois et on bascule en upsert dense uniquement si l'index n'est pas dotproduct.
+    index_metric = None
+    try:
+        index_metric = pc.describe_index(index_name).metric
+    except Exception as e:
+        print(f"Avertissement: describe_index('{index_name}') a échoué ({e}); "
+              f"vecteurs sparse désactivés par sécurité.")
+    include_sparse = (index_metric == "dotproduct")
+    if not include_sparse:
+        print(f"Index '{index_name}' metric={index_metric!r} (non-dotproduct): "
+              f"vecteurs sparse omis, upsert dense uniquement.")
     
     all_chunks = []
     try:
@@ -286,9 +325,18 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
         traceback.print_exc()
         return {"status": "error", "message": msg, "inserted_count": 0}
         
+    # Déduplication (Lot 2/3) sur la liste PLATE, AVANT le regroupement par doc :
+    # batche l'existence À TRAVERS les documents (chunks_by_doc n'existe que pour
+    # l'ordre d'upsert). Réutilise index_metric déjà calculé. No-op si DEDUP_ENABLED=0.
+    _dedup_adapter = _PineconeDedupAdapter(index, namespace=namespace, metric=index_metric)
+    all_chunks, dedup_skipped, dedup_journal = _run_dedup(
+        all_chunks, _dedup_adapter, embeddings_json_file,
+        target_desc=f"{index_name}/{namespace or 'default'}",
+    )
+
     chunks_by_doc = {}
     for chunk_data in all_chunks: # Renamed 'chunk' to 'chunk_data' to avoid conflict if 'chunk' is a key in the dict
-        doc_id = chunk_data.get("doc_id", "unknown_document") 
+        doc_id = chunk_data.get("doc_id", "unknown_document")
         if doc_id not in chunks_by_doc:
             chunks_by_doc[doc_id] = []
         chunks_by_doc[doc_id].append(chunk_data)
@@ -302,7 +350,7 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
         
         for i in range(0, len(doc_chunks), PINECONE_BATCH_SIZE):
             batch_chunks = doc_chunks[i:i+PINECONE_BATCH_SIZE]
-            vectors_to_upsert = prepare_vectors_for_pinecone(batch_chunks)
+            vectors_to_upsert = prepare_vectors_for_pinecone(batch_chunks, include_sparse=include_sparse)
             total_processed_chunks += len(batch_chunks) 
             
             if vectors_to_upsert:
@@ -327,14 +375,18 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
     final_message = " ".join(final_message_parts)
     print(f"\n{final_message}")
 
+    # Note (sémantique de comptage) : la dédup a filtré all_chunks AVANT le
+    # regroupement, donc total_processed_chunks ne compte QUE les chunks conservés →
+    # un ré-ingest entièrement dédupliqué puis inséré reste 'success' (pas
+    # 'success_partial_data'). dedup_skipped est surfacé séparément.
     if any_batch_failed:
-        return {"status": "partial_error", "message": f"{final_message} Au moins un lot n'a pas pu être inséré.", "inserted_count": total_inserted_count}
+        return _vectordb_result("partial_error", f"{final_message} Au moins un lot n'a pas pu être inséré.", inserted_count=total_inserted_count, skipped_count=dedup_skipped, journal_path=dedup_journal)
     elif total_inserted_count == 0 and len(all_chunks) > 0: # Processed chunks but none inserted
-         return {"status": "error", "message": f"{final_message} Aucun chunk n'a été inséré.", "inserted_count": total_inserted_count}
+         return _vectordb_result("error", f"{final_message} Aucun chunk n'a été inséré.", inserted_count=total_inserted_count, skipped_count=dedup_skipped, journal_path=dedup_journal)
     elif total_inserted_count < total_processed_chunks and not any_batch_failed: # Some chunks were invalid but all valid upserted
-        return {"status": "success_partial_data", "message": f"{final_message} Certains chunks étaient invalides et n'ont pas été préparés pour l'insertion.", "inserted_count": total_inserted_count}
-    
-    return {"status": "success", "message": final_message, "inserted_count": total_inserted_count}
+        return _vectordb_result("success_partial_data", f"{final_message} Certains chunks étaient invalides et n'ont pas été préparés pour l'insertion.", inserted_count=total_inserted_count, skipped_count=dedup_skipped, journal_path=dedup_journal)
+
+    return _vectordb_result("success", final_message, inserted_count=total_inserted_count, skipped_count=dedup_skipped, journal_path=dedup_journal)
 
     
     # IMPORTANT: Décommentez et configurez les lignes suivantes pour exécuter l'insertion
@@ -375,10 +427,13 @@ import re
 try:
     import weaviate
     from weaviate.classes.init import Auth
+    from weaviate.classes.query import Filter as WeaviateFilter, MetadataQuery as WeaviateMetadataQuery
     _weaviate_import_error = None
 except ImportError as exc:  # pragma: no cover - optional dependency
     weaviate = None
     Auth = None
+    WeaviateFilter = None
+    WeaviateMetadataQuery = None
     _weaviate_import_error = exc
 
 try:
@@ -393,6 +448,233 @@ except ImportError as exc:  # pragma: no cover - optional dependency
 # Configuration des tailles de lots
 WEAVIATE_BATCH_SIZE = get_env_int('WEAVIATE_BATCH_SIZE', 100)
 QDRANT_BATCH_SIZE = get_env_int('QDRANT_BATCH_SIZE', 100)  # Taille de lot pour Qdrant
+
+
+# ======================================================================
+# Déduplication (Lot 2/3/4) — adapters concrets + wiring
+# ======================================================================
+#
+# Choix d'implémentation : l'existence Tier 2 se fait par **ID adressé par contenu**
+# pour les 3 bases (Pinecone `fetch`, Weaviate `fetch_objects(by_id)`, Qdrant
+# `retrieve`) — l'ID/UUID encode déjà (content_hash, chunk_index). C'est uniforme,
+# métrique-indépendant, schéma-agnostique (robuste à un schéma Weaviate Article figé,
+# pas besoin que content_hash soit une propriété filtrable) et sans risque de
+# starvation de `limit` qu'aurait un filtre `content_hash` contains_any/MatchAny sur
+# un hash « chaud ». Pinecone N'utilise JAMAIS query+$in (tronqué à top_k sur
+# serverless → present-set incomplet → fuite de doublons). Le refus exige toujours
+# une corroboration métadonnée (titre) côté rad_dedup.dedup_filter.
+
+class _PineconeDedupAdapter:
+    """Existence via ``index.fetch(ids=content_ids, namespace=ns)`` (lookup-clé,
+    pas de query+$in). ``nearest`` (Tier 3) via ``index.query`` filtré titre."""
+
+    db_name = "pinecone"
+
+    def __init__(self, index, namespace=None, metric=None):
+        """Mémorise l'index Pinecone, le namespace (optionnel) et la métrique de
+        l'index (sens du seuil Tier 3)."""
+        self._index = index
+        self._namespace = namespace
+        self.metric = metric
+
+    def existing(self, chunks_batch):
+        """Tier 2 : ``index.fetch`` des IDs adressés par contenu du lot. Renvoie
+        ``{content_hash: [meta, ...]}`` pour les vecteurs déjà présents (``id`` et
+        ``content_hash`` ajoutés à la métadonnée s'ils manquent)."""
+        id_to_hash = {
+            rad_dedup.content_id(c["content_hash"], c["chunk_index"]): c["content_hash"]
+            for c in chunks_batch
+        }
+        kwargs = {"ids": list(id_to_hash.keys())}
+        if self._namespace:
+            kwargs["namespace"] = self._namespace
+        resp = self._index.fetch(**kwargs)
+        vectors = getattr(resp, "vectors", None)
+        if vectors is None and isinstance(resp, dict):
+            vectors = resp.get("vectors", {})
+        out = {}
+        for vid, vec in (vectors or {}).items():
+            meta = getattr(vec, "metadata", None)
+            if meta is None and isinstance(vec, dict):
+                meta = vec.get("metadata", {})
+            meta = dict(meta or {})
+            meta.setdefault("id", vid)
+            chash = id_to_hash.get(vid)
+            if chash:
+                meta.setdefault("content_hash", chash)
+                out.setdefault(chash, []).append(meta)
+        return out
+
+    def nearest(self, embedding, meta_filter):
+        """Tier 3 : ``index.query`` top-3 avec métadonnées, filtré par égalité sur les
+        champs non vides de ``meta_filter``. Renvoie ``[{"score", "meta", "text"}]``."""
+        flt = {k: {"$eq": v} for k, v in (meta_filter or {}).items() if v not in (None, "")}
+        kwargs = {"vector": list(embedding), "top_k": 3, "include_metadata": True}
+        if self._namespace:
+            kwargs["namespace"] = self._namespace
+        if flt:
+            kwargs["filter"] = flt
+        resp = self._index.query(**kwargs)
+        matches = getattr(resp, "matches", None)
+        if matches is None and isinstance(resp, dict):
+            matches = resp.get("matches", [])
+        out = []
+        for m in (matches or []):
+            meta = getattr(m, "metadata", None)
+            if meta is None and isinstance(m, dict):
+                meta = m.get("metadata", {})
+            meta = dict(meta or {})
+            score = getattr(m, "score", None)
+            if score is None and isinstance(m, dict):
+                score = m.get("score")
+            out.append({"score": score, "meta": meta, "text": meta.get("text", "")})
+        return out
+
+
+class _WeaviateDedupAdapter:
+    """Existence via ``fetch_objects(filters=Filter.by_id().contains_any(uuids))`` —
+    l'UUID = ``generate_uuid(content_id)`` est adressé par contenu. ``text`` EXCLU des
+    ``return_properties`` (egress). ``near_vector`` renvoie une DISTANCE → metric."""
+
+    db_name = "weaviate"
+    metric = "distance"
+
+    def __init__(self, collection_with_tenant):
+        """Mémorise la collection Weaviate déjà scopée sur le tenant."""
+        self._col = collection_with_tenant
+
+    def existing(self, chunks_batch):
+        """Tier 2 : ``fetch_objects`` filtré sur les UUID (``generate_uuid(id)``) du
+        lot, sans la propriété ``text``. Renvoie ``{content_hash: [props, ...]}`` pour
+        les objets déjà présents."""
+        uuid_to_hash = {generate_uuid(c["id"]): c["content_hash"] for c in chunks_batch}
+        resp = self._col.query.fetch_objects(
+            filters=WeaviateFilter.by_id().contains_any(list(uuid_to_hash.keys())),
+            return_properties=["content_hash", "title", "authors", "chunk_index"],
+            limit=len(uuid_to_hash) + 1,
+        )
+        out = {}
+        for obj in getattr(resp, "objects", []) or []:
+            props = dict(obj.properties or {})
+            chash = uuid_to_hash.get(str(obj.uuid))
+            if chash:
+                props.setdefault("content_hash", chash)
+                props.setdefault("id", str(obj.uuid))
+                out.setdefault(chash, []).append(props)
+        return out
+
+    def nearest(self, embedding, meta_filter):
+        """Tier 3 : ``near_vector`` top-3, filtré sur ``title`` s'il est fourni.
+        Renvoie ``[{"score", "meta", "text"}]`` où ``score`` est une DISTANCE."""
+        title = (meta_filter or {}).get("title")
+        filters = WeaviateFilter.by_property("title").equal(title) if title not in (None, "") else None
+        resp = self._col.query.near_vector(
+            near_vector=list(embedding),
+            limit=3,
+            filters=filters,
+            return_properties=["content_hash", "title", "authors", "chunk_index", "text"],
+            return_metadata=WeaviateMetadataQuery(distance=True),
+        )
+        out = []
+        for obj in getattr(resp, "objects", []) or []:
+            props = dict(obj.properties or {})
+            md = getattr(obj, "metadata", None)
+            dist = getattr(md, "distance", None) if md is not None else None
+            out.append({"score": dist, "meta": props, "text": props.get("text", "")})
+        return out
+
+
+class _QdrantDedupAdapter:
+    """Existence via ``client.retrieve(ids=uuids)`` — UUID adressé par contenu, pas
+    de payload index requis. Qdrant COSINE : score ∈ [0,1], plus haut = plus proche."""
+
+    db_name = "qdrant"
+    metric = "cosine"
+
+    def __init__(self, client, collection_name):
+        """Mémorise le client Qdrant et le nom de la collection cible."""
+        self._client = client
+        self._collection = collection_name
+
+    def existing(self, chunks_batch):
+        """Tier 2 : ``client.retrieve`` des UUID (``generate_uuid(id)``) du lot, payload
+        restreint et sans vecteurs. Renvoie ``{content_hash: [payload, ...]}`` pour les
+        points déjà présents."""
+        id_to_hash = {generate_uuid(c["id"]): c["content_hash"] for c in chunks_batch}
+        points = self._client.retrieve(
+            collection_name=self._collection,
+            ids=list(id_to_hash.keys()),
+            with_payload=["content_hash", "title", "authors", "chunk_index"],
+            with_vectors=False,
+        )
+        out = {}
+        for p in points or []:
+            payload = dict(getattr(p, "payload", None) or {})
+            chash = id_to_hash.get(str(p.id))
+            if chash:
+                payload.setdefault("content_hash", chash)
+                payload.setdefault("id", str(p.id))
+                out.setdefault(chash, []).append(payload)
+        return out
+
+    def nearest(self, embedding, meta_filter):
+        """Tier 3 : ``query_points`` top-3, filtré sur ``title`` s'il est fourni.
+        Renvoie ``[{"score", "meta", "text"}]`` (score cosinus)."""
+        title = (meta_filter or {}).get("title")
+        flt = None
+        if title not in (None, ""):
+            flt = models.Filter(must=[models.FieldCondition(key="title", match=models.MatchValue(value=title))])
+        res = self._client.query_points(
+            collection_name=self._collection,
+            query=list(embedding),
+            limit=3,
+            query_filter=flt,
+            with_payload=True,
+            with_vectors=False,
+        )
+        points = getattr(res, "points", res) or []
+        out = []
+        for p in points:
+            payload = dict(getattr(p, "payload", None) or {})
+            out.append({"score": getattr(p, "score", None), "meta": payload, "text": payload.get("text", "")})
+        return out
+
+
+def _run_dedup(all_chunks, adapter, embeddings_json_file, target_desc):
+    """Wrapper commun aux 3 connecteurs : lit ``DedupConfig.from_env()``, place le
+    journal à côté du JSON d'embeddings, lance ``rad_dedup.dedup_filter``.
+
+    Returns:
+        tuple: ``(kept_chunks, skipped_count, journal_path|None)``. No-op vrai
+        (renvoie ``(all_chunks, 0, None)`` sans toucher l'adapter) si ``DEDUP_ENABLED``
+        est faux.
+    """
+    cfg = rad_dedup.DedupConfig.from_env()
+    if not cfg.enabled:
+        return all_chunks, 0, None
+    journal_dir = cfg.journal_dir or os.path.dirname(os.path.abspath(embeddings_json_file))
+
+    # Lot 7.d : ne PAS upserter les chunks au recodage échoué (RAW stocké) — sinon la
+    # dédup exact-hash refuserait au run suivant la version propre et la base garderait
+    # le RAW à jamais. Exclus AVANT le filtre dédup (le content_hash, sur le brut, est
+    # inchangé : la clé de décision n'est pas affectée). Champ absent si Lot 7 OFF.
+    _fallback = {"fallback_raw", "fallback_truncated"}
+    dedup_input = [c for c in all_chunks if c.get("recode_status") not in _fallback]
+    fallback_count = len(all_chunks) - len(dedup_input)
+    if fallback_count:
+        print(f"Déduplication ({target_desc}) : {fallback_count} chunk(s) au recodage échoué "
+              f"(fallback) exclus de l'upsert (Lot 7.d).")
+
+    kept, rejections = rad_dedup.dedup_filter(
+        dedup_input, adapter, cfg, journal_dir=journal_dir, target_desc=target_desc
+    )
+    skipped = len(rejections)
+    journal_path = rad_dedup.journal_path_for(journal_dir) if rejections else None
+    if skipped:
+        print(f"Déduplication ({target_desc}) : {skipped} chunk(s) refusé(s) sur {len(all_chunks)} ; "
+              f"{len(kept)} conservé(s). Journal : {journal_path}")
+    return kept, skipped, journal_path
+
 
 def generate_uuid(identifier):
     """Generates a stable UUID version 5 from a given string identifier.
@@ -445,6 +727,19 @@ def normalize_date_to_rfc3339(date_str):
         return "1970-01-01T00:00:00Z"
 
 
+def _vectordb_result(status, message, inserted_count=0, skipped_count=0, journal_path=None):
+    """Retour unifié des connecteurs (Lot 0.a). Mirrors la forme Pinecone
+    ``{status, message, inserted_count}`` et porte optionnellement les compteurs
+    de dédup (Lot 3) ``skipped_count`` / ``journal_path``.
+    """
+    res = {"status": status, "message": message, "inserted_count": inserted_count}
+    if skipped_count:
+        res["skipped_count"] = skipped_count
+    if journal_path:
+        res["journal_path"] = journal_path
+    return res
+
+
 def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Article", tenant_name="alakel"):
     """Inserts embeddings from a JSON file into a Weaviate collection with multi-tenancy.
 
@@ -463,8 +758,11 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
         tenant_name (str, optional): The name of the tenant to use. Defaults to "alakel".
 
     Returns:
-        int: The total number of chunks successfully inserted into Weaviate.
-             Returns 0 if the file doesn't exist or a major error occurs during setup.
+        dict: ``{"status", "message", "inserted_count"}`` (+ optionnellement
+            ``"skipped_count"``/``"journal_path"`` si la dédup est active). ``status``
+            ∈ {"success", "success_partial_data", "error"}. Forme unifiée (Lot 0.a)
+            avec ``insert_to_pinecone`` pour que le dispatch CLI et l'appelant Celery
+            soient homogènes.
     """
     if weaviate is None or Auth is None:
         raise ImportError(
@@ -473,7 +771,7 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
 
     if not os.path.exists(embeddings_json_file):
         print(f"Le fichier {embeddings_json_file} n'existe pas.")
-        return 0
+        return _vectordb_result("error", f"Le fichier {embeddings_json_file} n'existe pas.")
 
     client = None  # Initialiser client à None
     
@@ -492,7 +790,7 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
         if not client.is_ready():
             print("Le serveur Weaviate n'est pas prêt.")
             if client: client.close()
-            return 0
+            return _vectordb_result("error", "Le serveur Weaviate n'est pas prêt.")
             
         print("Connexion réussie à Weaviate Cloud")
         
@@ -526,7 +824,7 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
             except Exception as e_create:
                 print(f"Impossible de créer le tenant '{tenant_name}' même en fallback: {e_create}")
                 if client: client.close()
-                return 0
+                return _vectordb_result("error", f"Impossible de créer le tenant '{tenant_name}': {e_create}")
         
         # Charger les chunks avec embeddings
         print(f"Chargement des embeddings depuis {embeddings_json_file}")
@@ -540,6 +838,14 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
         
         # Utiliser la collection spécifique au tenant pour le batching
         collection_with_tenant = collection.with_tenant(tenant_name)
+
+        # Déduplication (Lot 2/3) — requête la cible EXACTE (tenant résolu), avant la
+        # boucle d'insertion. No-op si DEDUP_ENABLED=0.
+        _dedup_adapter = _WeaviateDedupAdapter(collection_with_tenant)
+        all_chunks, dedup_skipped, dedup_journal = _run_dedup(
+            all_chunks, _dedup_adapter, embeddings_json_file,
+            target_desc=f"{class_name}/{tenant_name}",
+        )
 
         for i in range(0, len(all_chunks), WEAVIATE_BATCH_SIZE):
             batch_data_objects = [] # Liste pour stocker les objets à insérer dans ce lot
@@ -602,17 +908,26 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
 
         print(f"Insertion terminée. {total_inserted}/{len(all_chunks)} chunks insérés avec succès dans Weaviate (tenant: {tenant_name}).")
         if client: client.close()
-        return total_inserted
-        
+        msg = f"Insertion Weaviate terminée (tenant: {tenant_name}). {total_inserted}/{len(all_chunks)} chunks insérés."
+        if total_inserted == 0 and len(all_chunks) > 0:
+            return _vectordb_result("error", msg + " Aucun chunk inséré.", inserted_count=0, skipped_count=dedup_skipped, journal_path=dedup_journal)
+        if total_inserted < len(all_chunks):
+            return _vectordb_result(
+                "success_partial_data",
+                msg + " Certains chunks sans embedding (ou en échec de lot) n'ont pas été insérés.",
+                inserted_count=total_inserted, skipped_count=dedup_skipped, journal_path=dedup_journal,
+            )
+        return _vectordb_result("success", msg, inserted_count=total_inserted, skipped_count=dedup_skipped, journal_path=dedup_journal)
+
     except Exception as e:
         print(f"Erreur globale lors du traitement Weaviate: {e}")
         traceback.print_exc() # Imprime le traceback complet
-        if client: 
+        if client:
             try:
                 client.close()
             except:
                 pass
-        return 0
+        return _vectordb_result("error", f"Erreur globale Weaviate: {e}")
 
 
 ## BASE VECTORIELLE Qdrant
@@ -739,9 +1054,10 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
                                         Defaults to None.
 
     Returns:
-        int: The total number of points successfully inserted/updated in Qdrant.
-             Returns 0 if the file doesn't exist, URL is missing, or a major
-             error occurs during setup or processing.
+        dict: ``{"status", "message", "inserted_count"}`` (+ optionnellement
+            ``"skipped_count"``/``"journal_path"`` si la dédup est active). ``status``
+            ∈ {"success", "success_partial_data", "error"}. Forme unifiée (Lot 0.a)
+            avec ``insert_to_pinecone``.
     """
     if qdrant_client is None or models is None:
         raise ImportError(
@@ -750,7 +1066,7 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
 
     if not os.path.exists(embeddings_json_file):
         print(f"Le fichier {embeddings_json_file} n'existe pas.")
-        return 0
+        return _vectordb_result("error", f"Le fichier {embeddings_json_file} n'existe pas.")
 
     if not qdrant_url:
         raise ValueError("Qdrant URL (qdrant_url) is required.")
@@ -771,7 +1087,7 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
         print(f"Erreur lors de la connexion à Qdrant: {e}")
         traceback.print_exc()
         if client: client.close()
-        return 0
+        return _vectordb_result("error", f"Erreur lors de la connexion à Qdrant: {e}")
 
     # Vérifier si la collection existe, la créer si nécessaire
     try:
@@ -801,7 +1117,7 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
             if vector_size is None:
                  print("Erreur: Impossible de déterminer la taille du vecteur à partir du fichier JSON.")
                  if client: client.close()
-                 return 0
+                 return _vectordb_result("error", "Impossible de déterminer la taille du vecteur depuis le JSON.")
 
             print(f"Création de la collection '{collection_name}' avec des vecteurs de taille {vector_size} et distance Cosine.")
             client.create_collection(
@@ -815,7 +1131,7 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
             print(f"Erreur lors de la création de la collection '{collection_name}': {e_create}")
             traceback.print_exc()
             if client: client.close()
-            return 0
+            return _vectordb_result("error", f"Erreur lors de la création de la collection '{collection_name}': {e_create}")
 
     # Charger les chunks avec embeddings
     print(f"Chargement des embeddings depuis {embeddings_json_file}")
@@ -826,9 +1142,16 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
         print(f"Erreur lors du chargement du fichier {embeddings_json_file}: {e}")
         traceback.print_exc()
         if client: client.close()
-        return 0
-        
+        return _vectordb_result("error", f"Erreur lors du chargement du fichier {embeddings_json_file}: {e}")
+
     print(f"Chargement de {len(all_chunks)} chunks avec embeddings")
+
+    # Déduplication (Lot 2/3) avant la boucle d'insertion. No-op si DEDUP_ENABLED=0.
+    _dedup_adapter = _QdrantDedupAdapter(client, collection_name)
+    all_chunks, dedup_skipped, dedup_journal = _run_dedup(
+        all_chunks, _dedup_adapter, embeddings_json_file,
+        target_desc=collection_name,
+    )
 
     total_inserted_count = 0
     total_processed_chunks = 0
@@ -854,7 +1177,16 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
     print(f"Total de points effectivement insérés/mis à jour dans Qdrant: {total_inserted_count} (sur {len(all_chunks)} chunks initialement chargés si tous étaient valides).")
 
     if client: client.close()
-    return total_inserted_count
+    msg = f"Insertion Qdrant terminée (collection: {collection_name}). {total_inserted_count}/{len(all_chunks)} points insérés."
+    if total_inserted_count == 0 and len(all_chunks) > 0:
+        return _vectordb_result("error", msg + " Aucun point inséré.", inserted_count=0, skipped_count=dedup_skipped, journal_path=dedup_journal)
+    if total_inserted_count < len(all_chunks):
+        return _vectordb_result(
+            "success_partial_data",
+            msg + " Certains chunks sans embedding (ou en échec de lot) n'ont pas été insérés.",
+            inserted_count=total_inserted_count, skipped_count=dedup_skipped, journal_path=dedup_journal,
+        )
+    return _vectordb_result("success", msg, inserted_count=total_inserted_count, skipped_count=dedup_skipped, journal_path=dedup_journal)
 
 
 # ----------------------------------------------------------------------
@@ -978,8 +1310,19 @@ if __name__ == "__main__":
     if isinstance(result, dict):
         print(f"Status: {result.get('status', 'unknown')}")
         print(f"Message: {result.get('message', '')}")
+        # Ligne canonique 'Inserted: N' — ancre du parser app/routes/processing.py
+        # (Lot 0.c). Émise pour les 3 bases depuis l'unification des retours (Lot 0.a).
         print(f"Inserted: {result.get('inserted_count', 0)}")
-        exit(0 if result.get('status') == 'success' else 1)
+        # Marqueurs dédup (Lot 3) — toujours émis (0 par défaut) pour un format
+        # stdout stable et parsable ; 'Dedup journal' seulement si un journal existe.
+        print(f"Skipped (dedup): {result.get('skipped_count', 0)}")
+        if result.get('journal_path'):
+            print(f"Dedup journal: {result['journal_path']}")
+        # success_partial_data = tous les chunks *valides* insérés, certains chunks
+        # d'entrée n'avaient pas d'embedding → succès non-fatal. Seuls partial_error
+        # (échec d'upsert réel) et error doivent faire échouer (exit 1).
+        exit(0 if result.get('status') in ('success', 'success_partial_data') else 1)
     else:
-        print(f"Inserted count: {result}")
+        # Repli défensif : depuis le Lot 0.a, les 3 connecteurs renvoient un dict.
+        print(f"Inserted: {result if isinstance(result, int) else 0}")
         exit(0 if result and result > 0 else 1)

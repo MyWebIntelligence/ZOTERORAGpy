@@ -148,30 +148,54 @@ def upload_to_vectordb_task(
             raise ValueError(f"Unknown database: {db_choice}")
 
         duration = (datetime.utcnow() - start_time).total_seconds()
-        inserted_count = result.get('inserted_count', 0)
 
-        # Update session to COMPLETED
+        # Depuis le Lot 0.a les 3 connecteurs renvoient un dict homogène.
+        # Repli défensif si un connecteur renvoyait encore un int.
+        if isinstance(result, dict):
+            inserted_count = result.get('inserted_count', 0)
+            db_status = result.get('status', 'success')
+            skipped_count = result.get('skipped_count', 0)
+            journal_path = result.get('journal_path')
+            db_message = result.get('message', '')
+        else:
+            inserted_count = result or 0
+            db_status = 'success' if inserted_count else 'error'
+            skipped_count = 0
+            journal_path = None
+            db_message = ''
+
+        ok = db_status in ('success', 'success_partial_data')
+
+        # Refléter le VRAI statut du connecteur : un dict d'erreur (ex. fichier
+        # introuvable) ne lève pas d'exception → ne JAMAIS marquer COMPLETED à tort.
         _update_session_status(
             session_id,
-            'COMPLETED',
+            'COMPLETED' if ok else 'ERROR',
             vector_db=db_choice,
-            index_name=pinecone_index_name or weaviate_class_name or qdrant_collection_name
+            index_name=pinecone_index_name or weaviate_class_name or qdrant_collection_name,
+            error_message=None if ok else (db_message or 'Vector DB upload error'),
         )
 
         # Update metrics
         _update_vectordb_metrics(inserted_count, db_choice)
 
         logger.info(
-            f"VectorDB upload completed: {inserted_count} vectors "
-            f"to {db_choice} in {duration:.1f}s"
+            f"VectorDB upload {db_status}: {inserted_count} vectors "
+            f"(skipped dedup: {skipped_count}) to {db_choice} in {duration:.1f}s"
         )
 
-        return {
-            "status": "success",
+        response = {
+            "status": "success" if ok else "error",
+            "db_status": db_status,
             "inserted_count": inserted_count,
             "database": db_choice,
-            "duration_seconds": duration
+            "duration_seconds": duration,
         }
+        if skipped_count:
+            response["skipped_count"] = skipped_count
+        if journal_path:
+            response["journal_path"] = journal_path
+        return response
 
     except Exception as e:
         logger.error(f"VectorDB upload task failed: {e}", exc_info=True)
@@ -207,12 +231,14 @@ def _upload_to_pinecone(
     if not api_key:
         raise ValueError("PINECONE_API_KEY not configured")
 
+    # NB (Lot 0.b) : aucun des connecteurs rad_vectordb n'accepte `progress_callback`
+    # (signature `insert_to_pinecone(embeddings_json_file, index_name, pinecone_api_key,
+    # namespace)`). Le passer levait un TypeError → le passage est supprimé ici.
     result = insert_to_pinecone(
         embeddings_json_file=input_file,
         index_name=index_name,
         namespace=namespace,
-        pinecone_api_key=api_key,
-        progress_callback=progress_callback
+        pinecone_api_key=api_key
     )
 
     return result
@@ -242,11 +268,20 @@ def _upload_to_weaviate(
         logger.error(f"Failed to import rad_vectordb: {e}")
         raise
 
+    # Lot 0.b : `url` et `api_key` sont REQUIS (positionnels) par le connecteur et
+    # étaient totalement omis ici → ValueError immédiat. Le worker Celery lit les
+    # credentials depuis l'environnement du process (comme le chemin Pinecone).
+    url = os.getenv('WEAVIATE_URL')
+    api_key = os.getenv('WEAVIATE_API_KEY')
+    if not url or not api_key:
+        raise ValueError("WEAVIATE_URL et WEAVIATE_API_KEY doivent être configurés")
+
     result = insert_to_weaviate_hybrid(
         embeddings_json_file=input_file,
+        url=url,
+        api_key=api_key,
         class_name=class_name,
-        tenant_name=tenant_name,
-        progress_callback=progress_callback
+        tenant_name=tenant_name
     )
 
     return result
@@ -274,10 +309,18 @@ def _upload_to_qdrant(
         logger.error(f"Failed to import rad_vectordb: {e}")
         raise
 
+    # Lot 0.b : `qdrant_url` était omis (ValueError immédiat) et `progress_callback`
+    # non supporté (TypeError). Credentials lus depuis l'environnement du worker.
+    qdrant_url = os.getenv('QDRANT_URL')
+    qdrant_api_key = os.getenv('QDRANT_API_KEY')  # None toléré (instance locale non sécurisée)
+    if not qdrant_url:
+        raise ValueError("QDRANT_URL doit être configuré")
+
     result = insert_to_qdrant(
         embeddings_json_file=input_file,
         collection_name=collection_name,
-        progress_callback=progress_callback
+        qdrant_url=qdrant_url,
+        qdrant_api_key=qdrant_api_key
     )
 
     return result

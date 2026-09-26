@@ -856,31 +856,51 @@ async def upload_db(
         )
 
         if result.returncode != 0:
-            logger.error(f"Vector DB upload failed: {result.stderr}")
+            # rad_vectordb.py écrit le vrai diagnostic (erreurs Pinecone, bloc
+            # "=== Result ===") sur stdout ; stderr ne contient que la barre tqdm.
+            # On privilégie donc le tail de stdout, avec repli sur stderr.
+            stdout_tail = (result.stdout or "")[-2000:]
+            stderr_tail = (result.stderr or "")[-2000:]
+            details = stdout_tail.strip() or stderr_tail.strip()
+            logger.error(f"Vector DB upload failed (rc={result.returncode}): {details}")
             return JSONResponse(status_code=500, content={
                 "error": "Vector DB upload failed",
-                "details": result.stderr[:1000]
+                "details": details[:1000]
             })
         
-        # Try to parse output for count
+        # Parse the connector's canonical "=== Result ===" markers from stdout.
+        # ANCHORED (^... + MULTILINE) : l'ancien re.search(r'(\d+)') non ancré
+        # capturait la 1re suite de chiffres (ex. un "2026" de date/log) et corrompait
+        # le compte ; un marqueur dédup l'aurait aussi avalé. rad_vectordb imprime ses
+        # diagnostics sur stdout (stderr = barre tqdm). Seul le bloc Result émet ces
+        # lignes en début de ligne.
+        import re
+        stdout = result.stdout or ""
         inserted_count = None
-        try:
-            # Look for patterns like "Inserted X vectors" in stdout
-            if "inserted" in result.stdout.lower():
-                import re
-                match = re.search(r'(\d+)', result.stdout)
-                if match:
-                    inserted_count = int(match.group(1))
-        except:
-            pass
-        
+        skipped_count = None
+        journal_path = None
+
+        m = re.search(r'^Inserted:\s*(\d+)', stdout, re.MULTILINE)
+        if m:
+            inserted_count = int(m.group(1))
+        m = re.search(r'^Skipped \(dedup\):\s*(\d+)', stdout, re.MULTILINE)
+        if m:
+            skipped_count = int(m.group(1))
+        m = re.search(r'^Dedup journal:\s*(\S+)', stdout, re.MULTILINE)
+        if m:
+            journal_path = m.group(1)
+
         response = {
             "status": "success",
             "message": f"Uploaded to {db_choice}"
         }
-        if inserted_count:
+        if inserted_count is not None:
             response["inserted_count"] = inserted_count
-        
+        if skipped_count:
+            response["skipped_count"] = skipped_count
+        if journal_path:
+            response["journal_path"] = journal_path
+
         return JSONResponse(response)
     except subprocess.TimeoutExpired:
         return JSONResponse(status_code=500, content={"error": "Upload timed out (1h limit)"})
