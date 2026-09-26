@@ -172,6 +172,8 @@ QDRANT_API_KEY=...
 ZOTERO_API_KEY=...
 ```
 
+**Option souveraine : API Albert (DINUM).** RAGpy peut confier ses quatre usages externes (recodage, notes et filtre de citations ; OCR ; embeddings `bge-m3` en 1024 dimensions ; collections vectorielles privées) à l'API Albert de la DINUM, hébergée en France. L'intégration est optionnelle et désactivée par défaut (`ALBERT_ENABLED=0` : comportement strictement identique) ; elle s'active par capacité (`OCR_ENABLE_ALBERT`, `EMBEDDING_PROVIDER=albert`, modèles `albert/<modèle>`, cible `albert`) avec une clé Albert personnelle. Quotas, échéances des modèles, RGPD, sécurité et déploiement : voir [.claude/docs/albert.md](.claude/docs/albert.md) et le bloc ALBERT de `.env.example`.
+
 ---
 
 ## B — Le Pipeline en 5 étapes
