@@ -364,6 +364,67 @@ def _local_ocr_python() -> str:
     return sys.executable
 
 
+# Albert lot 4 — OCR souverain (DINUM) en tête de chaîne, OFF par défaut.
+# Constantes de script CLI lues à l'import (patchables, forcées à OFF par le
+# conftest racine) ; aucun appel réseau à l'import. Seule la configuration
+# (stdlib) est importée ici : le client, httpx et `rad_albert.ocr` ne sont
+# chargés que par le maillon actif (import paresseux dans `_try_albert_ocr`).
+# Import double : paquet (app, Celery, tests) ou CLI (`scripts/` sur sys.path).
+try:
+    from scripts.rad_albert.config import AlbertConfig as _AlbertConfig
+    _ALBERT_PACKAGE = "scripts.rad_albert"
+except ImportError:
+    from rad_albert.config import AlbertConfig as _AlbertConfig
+    _ALBERT_PACKAGE = "rad_albert"
+
+
+def _load_albert_config() -> Tuple[Any, Optional[str]]:
+    """
+    Read the Albert configuration once, at import (`AlbertConfig.from_env()`).
+
+    `from_env` never reads `ALBERT_API_KEY`. With Albert ON, a refused
+    `ALBERT_BASE_URL` raises: the error is kept (second item) instead of
+    crashing the import, and the Albert OCR link is then disabled for the
+    process with a traced fallback (never a silent one).
+
+    Returns:
+        `(config, error message or None)`.
+    """
+    try:
+        return _AlbertConfig.from_env(), None
+    except ValueError as exc:
+        return (
+            _AlbertConfig(enabled=True, ocr_enabled=_truthy_env(os.getenv("OCR_ENABLE_ALBERT"), False)),
+            str(exc),
+        )
+
+
+ALBERT_CONFIG, _ALBERT_CONFIG_ERROR = _load_albert_config()
+# Maillon Albert : exige ALBERT_ENABLED=1 ET OCR_ENABLE_ALBERT=1 (et une clé).
+OCR_ENABLE_ALBERT = bool(ALBERT_CONFIG.enabled and ALBERT_CONFIG.ocr_enabled)
+# Clé lue à la frontière du script (la bibliothèque ne lit jamais l'env).
+ALBERT_API_KEY = (os.getenv("ALBERT_API_KEY") or "").strip() or None
+# Sémaphore OCR Albert, distinct de MISTRAL_SEMAPHORE ; tenu pendant l'envoi seulement.
+ALBERT_OCR_SEMAPHORE = threading.Semaphore(max(1, int(ALBERT_CONFIG.ocr_concurrency)))
+# Accès à /v1/ocr (D3) : None = inconnu, False = refusé (mémorisé), True = établi.
+_ALBERT_V1_OCR_AVAILABLE: Optional[bool] = None
+# Sonde d'accès à /v1/ocr en cours : les autres fils attendent sa réponse.
+_ALBERT_V1_PROBE_LOCK = threading.Lock()
+# Modèle LightOnOCR inutilisable (404, 422, 403) : (configuration, raison) ; ne
+# vaut que pour la configuration sous laquelle il a été constaté.
+_ALBERT_CHAT_OCR_UNUSABLE: Optional[Tuple[Any, str]] = None
+# Erreur de compte ou de quota mémorisée, ou plus aucune voie Albert utilisable :
+# le maillon est sauté, sans appel.
+_ALBERT_ACCOUNT_DISABLED: Optional[str] = None
+# Transport httpx injectable (tests : FakeAlbert.transport) ; None = réseau réel.
+_ALBERT_OCR_TRANSPORT: Any = None
+_ALBERT_OCR_LEDGER: Any = None
+# Alias de modèles OCR résolus en ids épinglés par /v1/models (une fois par processus).
+_ALBERT_OCR_MODEL_IDS: Dict[str, str] = {}
+_ALBERT_STATE_LOCK = threading.Lock()
+_ALBERT_WARNED: Set[str] = set()
+
+
 # ============================================================================
 # PROGRESS TRACKING & INCREMENTAL SAVE UTILITIES
 # ============================================================================
@@ -579,6 +640,12 @@ class OCRResult(NamedTuple):
     pages than the document holds, or a result whose character density is
     suspiciously low. `pages_done`/`pages_total` quantify the coverage and
     `error` carries a human-readable explanation for errors.json / the UI.
+
+    `fallback_from` (Albert, lot 4) names the sovereign Albert OCR provider
+    that was selected but did not serve the text (`albert_lightonocr`,
+    `albert_mistral_ocr`): the fallback to the next link of the chain is then
+    traced (`OCR_PROVIDER_FALLBACK` entry in errors.json). Always None when
+    Albert is disabled. Fields are read by name, never unpacked by position.
     """
     text: str
     provider: str
@@ -586,6 +653,7 @@ class OCRResult(NamedTuple):
     pages_done: int = 0
     pages_total: int = 0
     error: Optional[str] = None
+    fallback_from: Optional[str] = None
 
 
 class _PagedOcr(NamedTuple):
@@ -960,16 +1028,7 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
             # downstream chapter slicing (book_note_generator). Renumber by
             # adding a cumulative offset = sum of pages in previous parts.
             if page_offset > 0:
-                def _shift_page(m: "re.Match[str]", offset: int = page_offset) -> str:
-                    try:
-                        return f"<!-- Page {int(m.group(1)) + offset} -->"
-                    except (TypeError, ValueError):
-                        return m.group(0)
-                part_text = re.sub(
-                    r"<!--\s*Page\s+(\d+)\s*-->",
-                    _shift_page,
-                    part_text,
-                )
+                part_text = _renumber_page_markers(part_text, page_offset)
 
             markdown_blocks.append(
                 f"<!-- Part {idx}/{len(parts)} (pages {part_range}) -->\n{part_text}"
@@ -1188,6 +1247,108 @@ def _mistral_upload_and_ocr(pdf_path: str, max_pages: Optional[int] = None) -> s
     )
 
 
+def _ocr_pages_payload_to_markdown(payload: Any, page_offset: int = 0) -> str:
+    """
+    Convert an OCR API payload (Mistral `/v1/ocr` shape) into markdown.
+
+    Pure helper extracted from `_mistral_upload_and_ocr_once` (byte-identical
+    output for `page_offset=0`); also used by the Albert `/v1/ocr` path, whose
+    parts carry 0-indexed page indices relative to the part.
+
+    Order of preference:
+      1. the `pages[]` array: one `<!-- Page N -->` block per page with text,
+         where N = `index` + 1 + `page_offset` (or the 1-based position in the
+         array + `page_offset` when `index` is not an int); `markdown` wins
+         over `text`, blank pages are skipped;
+      2. a top-level `markdown` / `text` string (no page boundaries);
+      3. an `output[]` array of blocks (`markdown`, `text` or `content`).
+
+    Args:
+        payload: Decoded JSON body of the OCR response (any type).
+        page_offset: Number added to every page number (pages of the parts
+            already processed).
+
+    Returns:
+        The stripped markdown, or "" when the payload holds no text.
+    """
+    markdown_text = ""
+    if isinstance(payload, dict):
+        # Prefer the API-provided `pages` array, since it carries indices.
+        pages = payload.get("pages")
+        if isinstance(pages, list) and pages:
+            page_blocks: List[str] = []
+            for fallback_idx, page in enumerate(pages, start=1):
+                if not isinstance(page, dict):
+                    continue
+                # Mistral returns a 0-indexed `index`; normalise to
+                # 1-indexed page numbers. Fallback to enumerate order.
+                raw_idx = page.get("index")
+                if isinstance(raw_idx, int):
+                    page_num = raw_idx + 1 + page_offset
+                else:
+                    page_num = fallback_idx + page_offset
+                page_md = ""
+                for key in ("markdown", "text"):
+                    value = page.get(key)
+                    if isinstance(value, str) and value.strip():
+                        page_md = value.strip()
+                        break
+                if page_md:
+                    page_blocks.append(f"<!-- Page {page_num} -->\n{page_md}")
+            if page_blocks:
+                markdown_text = "\n\n".join(page_blocks)
+
+        if not markdown_text:
+            # Top-level markdown (older API shape) — no page boundaries.
+            for key in ("markdown", "text"):
+                candidate = payload.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    markdown_text = candidate.strip()
+                    break
+
+        if not markdown_text:
+            # Final fallback: outputs[] array (rare).
+            outputs = payload.get("output")
+            if isinstance(outputs, list):
+                blocks: List[str] = []
+                for block in outputs:
+                    if isinstance(block, dict):
+                        for key in ("markdown", "text", "content"):
+                            value = block.get(key)
+                            if isinstance(value, str) and value.strip():
+                                blocks.append(value.strip())
+                                break
+                markdown_text = "\n\n".join(blocks)
+
+    return markdown_text.strip()
+
+
+def _renumber_page_markers(text: str, offset: int) -> str:
+    """
+    Shift every `<!-- Page N -->` marker of `text` by `offset` (Lot G).
+
+    Pure helper extracted from the split loop of `_extract_text_with_mistral`:
+    Mistral numbers the pages of each part from 1, so the part's markers are
+    shifted by the number of pages of the previous parts. A marker whose
+    number cannot be parsed is left untouched.
+
+    Args:
+        text: Markdown of one part.
+        offset: Number of pages before this part.
+
+    Returns:
+        The markdown with renumbered page markers.
+    """
+    def _shift_page(m: "re.Match[str]") -> str:
+        """Return the marker `m` with its page number shifted by `offset`."""
+        try:
+            return f"<!-- Page {int(m.group(1)) + offset} -->"
+        except (TypeError, ValueError):
+            return m.group(0)
+
+    return re.sub(r"<!--\s*Page\s+(\d+)\s*-->", _shift_page, text)
+
+
 def _mistral_upload_and_ocr_once(pdf_path: str, max_pages: Optional[int] = None) -> str:
     """
     Single Mistral upload+OCR attempt (no retry). Internal helper used by
@@ -1279,56 +1440,7 @@ def _mistral_upload_and_ocr_once(pdf_path: str, max_pages: Optional[int] = None)
 
             # Build markdown with explicit `<!-- Page N -->` markers so
             # downstream consumers (book mode, chunker) can split by page.
-            # Prefer the API-provided `pages` array, since it carries indices.
-            markdown_text = ""
-            if isinstance(response_payload, dict):
-                pages = response_payload.get("pages")
-                if isinstance(pages, list) and pages:
-                    page_blocks: List[str] = []
-                    for fallback_idx, page in enumerate(pages, start=1):
-                        if not isinstance(page, dict):
-                            continue
-                        # Mistral returns a 0-indexed `index`; normalise to
-                        # 1-indexed page numbers. Fallback to enumerate order.
-                        raw_idx = page.get("index")
-                        if isinstance(raw_idx, int):
-                            page_num = raw_idx + 1
-                        else:
-                            page_num = fallback_idx
-                        page_md = ""
-                        for key in ("markdown", "text"):
-                            value = page.get(key)
-                            if isinstance(value, str) and value.strip():
-                                page_md = value.strip()
-                                break
-                        if page_md:
-                            page_blocks.append(f"<!-- Page {page_num} -->\n{page_md}")
-                    if page_blocks:
-                        markdown_text = "\n\n".join(page_blocks)
-
-                if not markdown_text:
-                    # Top-level markdown (older API shape) — no page boundaries.
-                    for key in ("markdown", "text"):
-                        candidate = response_payload.get(key)
-                        if isinstance(candidate, str) and candidate.strip():
-                            markdown_text = candidate.strip()
-                            break
-
-                if not markdown_text:
-                    # Final fallback: outputs[] array (rare).
-                    outputs = response_payload.get("output")
-                    if isinstance(outputs, list):
-                        blocks: List[str] = []
-                        for block in outputs:
-                            if isinstance(block, dict):
-                                for key in ("markdown", "text", "content"):
-                                    value = block.get(key)
-                                    if isinstance(value, str) and value.strip():
-                                        blocks.append(value.strip())
-                                        break
-                        markdown_text = "\n\n".join(blocks)
-
-            markdown_text = markdown_text.strip()
+            markdown_text = _ocr_pages_payload_to_markdown(response_payload)
             if not markdown_text:
                 logger.warning(
                     "Réponse OCR Mistral vide pour %s (keys=%s)",
@@ -1537,6 +1649,7 @@ def _finalize_ocr_result(
     pages_done: int = 0,
     pages_total: int = 0,
     error: Optional[str] = None,
+    fallback_from: Optional[str] = None,
 ):
     """
     Format the OCR result based on the return_details flag.
@@ -1549,6 +1662,8 @@ def _finalize_ocr_result(
         pages_done: Number of pages actually transcribed.
         pages_total: Total page count of the source document.
         error: Human-readable explanation when partial/suspect.
+        fallback_from: Albert (lot 4) — selected Albert OCR provider that did
+            not serve the text (traced fallback); None when Albert is off.
 
     Returns:
         OCRResult namedtuple if return_details is True, else string
@@ -1561,6 +1676,7 @@ def _finalize_ocr_result(
             pages_done=pages_done,
             pages_total=pages_total,
             error=error,
+            fallback_from=fallback_from,
         )
     return text
 
@@ -1603,6 +1719,568 @@ def _ocr_density_warning(
     return None
 
 
+# ============================================================================
+# Albert lot 4 — maillon OCR souverain (avant Mistral), OFF par défaut
+# ============================================================================
+
+class _AlbertOcrLinkError(OCRExtractionError):
+    """Internal: the Albert OCR link failed or was skipped (traced fallback).
+
+    `provider` names the Albert provider that did not serve the document
+    (`albert_lightonocr` or `albert_mistral_ocr`); it becomes the
+    `fallback_from` of the result served by the next link of the chain.
+    """
+
+    def __init__(self, message: str, provider: str) -> None:
+        """Store the message and the Albert provider label."""
+        self.provider = provider
+        super().__init__(message)
+
+
+def _albert_module(name: str) -> Any:
+    """Lazy import of `rad_albert.<name>` from the same package as the config.
+
+    Keeps exception classes identical between the config, the client and
+    `rad_albert.ocr` (never a `scripts.rad_albert` / `rad_albert` mix).
+    """
+    import importlib
+
+    return importlib.import_module(f"{_ALBERT_PACKAGE}.{name}")
+
+
+def _albert_warn_once(key: str, message: str, *args: Any) -> None:
+    """Log `message` as a WARNING once per process (keyed by `key`)."""
+    with _ALBERT_STATE_LOCK:
+        if key in _ALBERT_WARNED:
+            return
+        _ALBERT_WARNED.add(key)
+    logger.warning(message, *args)
+
+
+def _albert_ocr_ledger() -> Any:
+    """Process-wide Albert usage ledger of the OCR link (created on first use)."""
+    global _ALBERT_OCR_LEDGER
+    with _ALBERT_STATE_LOCK:
+        if _ALBERT_OCR_LEDGER is None:
+            _ALBERT_OCR_LEDGER = _albert_module("usage").UsageLedger()
+        return _ALBERT_OCR_LEDGER
+
+
+def _albert_ocr_client() -> Any:
+    """
+    Build the Albert client of the OCR link (one per document, closed after use).
+
+    The key comes from the script boundary (`ALBERT_API_KEY` constant); the
+    library never reads the environment. Test seam: patch this function, or
+    set `_ALBERT_OCR_TRANSPORT` (e.g. `FakeAlbert().transport`).
+
+    Returns:
+        An `AlbertClient` sharing the process usage ledger.
+    """
+    client_mod = _albert_module("client")
+    kwargs: Dict[str, Any] = {"ledger": _albert_ocr_ledger()}
+    if _ALBERT_OCR_TRANSPORT is not None:
+        kwargs["transport"] = _ALBERT_OCR_TRANSPORT
+    return client_mod.AlbertClient(ALBERT_CONFIG, ALBERT_API_KEY, **kwargs)
+
+
+def _disable_albert_ocr(reason: str) -> None:
+    """
+    Memoise that the Albert OCR link cannot serve for the whole process (decision 22).
+
+    Account-level failure (key, account, quota), refused configuration, or
+    configured stages all memoised as unusable (`_albert_disable_if_no_stage`).
+    Sets `_ALBERT_ACCOUNT_DISABLED` and logs a single WARNING; the following
+    documents skip the Albert link without any call (traced fallback).
+    """
+    global _ALBERT_ACCOUNT_DISABLED
+    with _ALBERT_STATE_LOCK:
+        if _ALBERT_ACCOUNT_DISABLED:
+            return
+        _ALBERT_ACCOUNT_DISABLED = reason or "erreur de compte Albert"
+    logger.warning(
+        "OCR Albert désactivé pour la suite du traitement : %s. Les documents "
+        "suivants passent au maillon suivant sans appel Albert (repli tracé).",
+        reason,
+    )
+
+
+def _albert_chat_ocr_unusable() -> Optional[str]:
+    """
+    Reason why LightOnOCR is memoised as unusable, or None.
+
+    The memo only holds for the configuration it was recorded under (the
+    `ALBERT_CONFIG` object): a replaced configuration (another model) starts
+    afresh.
+    """
+    memo = _ALBERT_CHAT_OCR_UNUSABLE
+    if memo is not None and memo[0] is ALBERT_CONFIG:
+        return memo[1]
+    return None
+
+
+def _albert_disable_if_no_stage(reason: str) -> bool:
+    """
+    Disable the whole Albert OCR link when none of its stages can serve any more.
+
+    Stages of `ALBERT_OCR_MODE`: `/v1/ocr` (modes `ocr`, `auto`) unless its
+    access is memoised as refused; LightOnOCR (modes `chat`, `auto`) unless
+    its model is memoised as unusable. With no stage left, the link is
+    disabled for the process (`_disable_albert_ocr`, single WARNING).
+
+    Args:
+        reason: French explanation recorded in `_ALBERT_ACCOUNT_DISABLED`.
+
+    Returns:
+        True when the link was (or already is) disabled.
+    """
+    mode = ALBERT_CONFIG.ocr_mode
+    v1_left = mode in ("ocr", "auto") and _ALBERT_V1_OCR_AVAILABLE is not False
+    chat_left = mode in ("chat", "auto") and _albert_chat_ocr_unusable() is None
+    if v1_left or chat_left:
+        return False
+    _disable_albert_ocr(reason)
+    return True
+
+
+def _remember_v1_ocr_unavailable(error: BaseException) -> None:
+    """
+    Memoise that `/v1/ocr` is not accessible on this account (D3), logged once.
+
+    When LightOnOCR cannot take over (`ALBERT_OCR_MODE=ocr`, or its model is
+    memoised as unusable), the whole link is disabled instead.
+    """
+    global _ALBERT_V1_OCR_AVAILABLE
+    with _ALBERT_STATE_LOCK:
+        first = _ALBERT_V1_OCR_AVAILABLE is not False
+        _ALBERT_V1_OCR_AVAILABLE = False
+    if not first:
+        return
+    if _albert_disable_if_no_stage(f"accès à /v1/ocr refusé ({error})"):
+        return
+    logger.warning(
+        "Accès à /v1/ocr indisponible pour ce compte Albert (%s) : mémorisé pour "
+        "le processus, OCR Albert par LightOnOCR.",
+        error,
+    )
+
+
+def _is_albert_chat_model_error(error: BaseException) -> bool:
+    """
+    True if `error` means the LightOnOCR model itself cannot be used.
+
+    Model missing (404, or absent from `/v1/models`), wrong model type (422,
+    or the check at resolution time) or access refused (403): every page and
+    every document would fail the same way. A `/v1/ocr` access refusal is not
+    a LightOnOCR error.
+    """
+    errors_mod = _albert_module("errors")
+    ocr_mod = _albert_module("ocr")
+    return (
+        isinstance(error, errors_mod.AlbertPermanentError)
+        and getattr(error, "reason", None) in ocr_mod.ABORT_PERMANENT_REASONS
+        and not errors_mod.is_ocr_access_denied(error)
+    )
+
+
+def _remember_albert_chat_ocr_unusable(error: BaseException) -> None:
+    """
+    Memoise for the process that the LightOnOCR model is unusable, logged once.
+
+    Later documents make no LightOnOCR call: `/v1/ocr` is still tried when its
+    access is not refused, otherwise the fallback to the next link is traced.
+    When no Albert stage remains (`ALBERT_OCR_MODE=chat`, or `/v1/ocr`
+    refused), the whole link is disabled (`_albert_disable_if_no_stage`).
+    """
+    global _ALBERT_CHAT_OCR_UNUSABLE
+    reason = f"modèle LightOnOCR {ALBERT_CONFIG.ocr_chat_model} inutilisable ({error})"
+    with _ALBERT_STATE_LOCK:
+        if _albert_chat_ocr_unusable() is not None:
+            return
+        _ALBERT_CHAT_OCR_UNUSABLE = (ALBERT_CONFIG, reason)
+    if _albert_disable_if_no_stage(reason):
+        return
+    logger.warning(
+        "OCR Albert : %s — mémorisé pour le processus : LightOnOCR n'est plus appelé "
+        "(/v1/ocr reste essayé ; repli tracé sur le maillon suivant s'il échoue).",
+        reason,
+    )
+
+
+def _probe_albert_v1_ocr_access(client: Any, cfg: Any) -> Optional[bool]:
+    """
+    Cheap check of the account's access to `/v1/ocr` (D3), once per process, before any upload.
+
+    Same pattern as `_local_ocr_available`: the answer is cached
+    (`_ALBERT_V1_OCR_AVAILABLE`). `GET /v1/models/{ALBERT_OCR_DOC_MODEL}`
+    (alias resolved first) tells whether the restricted model is served to
+    this account with an OCR type. A missing model (404, the measured account),
+    a refused access (403) or a wrong type memoise the refusal: LightOnOCR from
+    the first document on, nothing compressed, split or uploaded. A served
+    model establishes the access. Threads arriving while the probe runs wait
+    for its answer (dedicated lock, never held with `_ALBERT_STATE_LOCK` during
+    network I/O). Any other failure leaves the access undetermined: the
+    document attempt decides, `errors.is_ocr_access_denied` staying the
+    backstop.
+
+    Args:
+        client: `AlbertClient` of the current document.
+        cfg: Albert configuration (`ocr_doc_model`).
+
+    Returns:
+        False (refused, memoised), True (established) or None (undetermined).
+
+    Raises:
+        AlbertAuthError: account error (memoised by the caller).
+    """
+    global _ALBERT_V1_OCR_AVAILABLE
+    known = _ALBERT_V1_OCR_AVAILABLE
+    if known is not None:
+        return known
+    errors_mod = _albert_module("errors")
+    catalog_mod = _albert_module("catalog")
+    ocr_mod = _albert_module("ocr")
+    with _ALBERT_V1_PROBE_LOCK:
+        known = _ALBERT_V1_OCR_AVAILABLE
+        if known is not None:
+            return known
+        try:
+            ocr_mod.ensure_pinned_models(client, [cfg.ocr_doc_model], cache=_ALBERT_OCR_MODEL_IDS)
+            info = client.model_info(cfg.ocr_doc_model)
+            entry = info if isinstance(info, dict) else {}
+            ident = entry.get("id") or client.wire_model(cfg.ocr_doc_model)
+            catalog_mod.check_endpoint_type(ident, "ocr", listing=[entry] if entry else None)
+        except errors_mod.AlbertAuthError:
+            raise
+        except errors_mod.AlbertPermanentError as probe_error:
+            if getattr(probe_error, "reason", None) in ocr_mod.ABORT_PERMANENT_REASONS:
+                _remember_v1_ocr_unavailable(probe_error)
+                return False
+            logger.debug("Sonde d'accès à /v1/ocr indéterminée (%s) : le document décidera.", probe_error)
+            return None
+        except Exception as probe_error:  # noqa: BLE001 — sonde best-effort
+            logger.debug("Sonde d'accès à /v1/ocr indéterminée (%s) : le document décidera.", probe_error)
+            return None
+        with _ALBERT_STATE_LOCK:
+            if _ALBERT_V1_OCR_AVAILABLE is None:
+                _ALBERT_V1_OCR_AVAILABLE = True
+            return _ALBERT_V1_OCR_AVAILABLE
+
+
+def _albert_chat_recovery(pdf_path: str, client: Any, cfg: Any) -> Optional[Any]:
+    """
+    Page-by-page LightOnOCR recovery of failed `/v1/ocr` parts, or None.
+
+    None when LightOnOCR is memoised as unusable. The returned callable takes
+    0-based page indices of `pdf_path`, resolves the configured chat model to
+    its pinned id (once per process) and OCRs those pages
+    (`ocr.ocr_pages_lightonocr`); a LightOnOCR model error is memoised
+    (`_remember_albert_chat_ocr_unusable`) before being re-raised.
+
+    Args:
+        pdf_path: Path to the PDF file (whole document numbering).
+        client: `AlbertClient` of the current document.
+        cfg: Albert configuration.
+
+    Returns:
+        `recover(indices) -> {index: PageResult}`, or None.
+    """
+    if _albert_chat_ocr_unusable() is not None:
+        return None
+    ocr_mod = _albert_module("ocr")
+
+    def recover(indices: List[int]) -> Dict[int, Any]:
+        """LightOnOCR of the pages `indices` (0-based) of the document; `{}` once memoised unusable."""
+        if _albert_chat_ocr_unusable() is not None:
+            return {}
+        try:
+            ocr_mod.ensure_pinned_models(client, [cfg.ocr_chat_model], cache=_ALBERT_OCR_MODEL_IDS)
+            return ocr_mod.ocr_pages_lightonocr(
+                pdf_path, client, indices, cfg=cfg, semaphore=ALBERT_OCR_SEMAPHORE
+            )
+        except Exception as recover_error:
+            if _is_albert_chat_model_error(recover_error):
+                _remember_albert_chat_ocr_unusable(recover_error)
+            raise
+
+    return recover
+
+
+def _albert_primary_label() -> str:
+    """Albert OCR provider the link would use first (mode and memoised `/v1/ocr` access)."""
+    ocr_mod = _albert_module("ocr")
+    mode = ALBERT_CONFIG.ocr_mode
+    if mode == "ocr" or (mode == "auto" and _ALBERT_V1_OCR_AVAILABLE is True):
+        return ocr_mod.PROVIDER_MISTRAL_OCR
+    return ocr_mod.PROVIDER_LIGHTONOCR
+
+
+def _albert_skipped_label(pdf_path: str) -> str:
+    """
+    Albert link selected (`OCR_ENABLE_ALBERT=1`) but inactive: log and return the trace label.
+
+    Inactive means no Albert key, or an account/configuration error memoised
+    by an earlier document. The fallback to the next link stays traced.
+    """
+    if not ALBERT_API_KEY:
+        _albert_warn_once(
+            "missing_key",
+            "OCR_ENABLE_ALBERT=1 mais aucune clé Albert (identifiant albert_api_key) : "
+            "maillon OCR Albert sauté, repli tracé sur le maillon suivant.",
+        )
+    else:
+        logger.info(
+            "Maillon OCR Albert sauté pour %s (%s) : maillon suivant, repli tracé.",
+            pdf_path, _ALBERT_ACCOUNT_DISABLED,
+        )
+    return _albert_primary_label()
+
+
+def _albert_fallback_message(ocr_payload: Any) -> Optional[str]:
+    """
+    Traced-fallback message of an OCR result, or None (always None when Albert is off).
+
+    Set when the sovereign Albert OCR link was selected but another provider
+    served the text (`fallback_from`). Every entry point that stores the text
+    logs it as one WARNING per document, including the documents that skip a
+    link memoised as unusable (whose skip is only logged at INFO).
+    """
+    fallback_from = getattr(ocr_payload, "fallback_from", None)
+    if not fallback_from:
+        return None
+    return (
+        f"OCR Albert ({fallback_from}) en échec ou indisponible : "
+        f"texte fourni par {getattr(ocr_payload, 'provider', None)} (repli tracé)."
+    )
+
+
+def _albert_final_error_suffix(fallback_from: Optional[str]) -> str:
+    """Albert part of the final chain error message (only when the link is selected)."""
+    if not ALBERT_API_KEY:
+        reason = "clé Albert absente"
+    else:
+        reason = _ALBERT_ACCOUNT_DISABLED or "échec du maillon"
+    return (
+        f" L'OCR souverain Albert (OCR_ENABLE_ALBERT=1, {fallback_from or 'albert'}) "
+        f"n'a pas abouti non plus ({reason}) : vérifiez la clé Albert (Paramètres > "
+        "Mes Identifiants) et logs/pdf_processing.log."
+    )
+
+
+def _try_albert_ocr(pdf_path: str, max_pages: Optional[int] = None) -> OCRResult:
+    """
+    Albert OCR link, tried BEFORE Mistral when `OCR_ENABLE_ALBERT=1` (lot 4).
+
+    `ALBERT_OCR_MODE`: `auto` tries `/v1/ocr` (`albert_mistral_ocr`) unless
+    its access was memoised as refused, then LightOnOCR (`albert_lightonocr`);
+    `chat` uses LightOnOCR only; `ocr` uses `/v1/ocr` only. The access to
+    `/v1/ocr` is first checked by a cheap cached probe
+    (`_probe_albert_v1_ocr_access`, no document upload); a refused access
+    (probe, then 403 or 404 "Model … not found" on `/v1/ocr` as backstop, D3)
+    is memoised for the process. In `auto` mode, the pages of a failed
+    `/v1/ocr` part are recovered page by page by LightOnOCR. A LightOnOCR
+    model error (404, 422, 403) is memoised too: later documents make no
+    LightOnOCR call, and the link is disabled once no stage is left.
+    Configured model aliases are resolved to pinned ids through `/v1/models`
+    (once per process) so that no alias is ever sent. The density guard
+    applies to LightOnOCR only; the cap `ALBERT_OCR_MAX_PAGES` (> 0) follows
+    the capped-provider logic (a longer uncapped legacy extraction wins,
+    otherwise the text is flagged partial).
+
+    Args:
+        pdf_path: Path to the PDF file.
+        max_pages: Optional cap requested by the caller.
+
+    Returns:
+        `OCRResult` (provider `albert_*`, or `legacy` when the cap made the
+        Albert text shorter than the legacy one; `fallback_from` set when a
+        fallback happened).
+
+    Raises:
+        _AlbertOcrLinkError: the link failed (next link of the chain, traced);
+            an account or quota error is memoised first (`_ALBERT_ACCOUNT_DISABLED`),
+            a LightOnOCR model error too (`_ALBERT_CHAT_OCR_UNUSABLE`).
+    """
+    global _ALBERT_V1_OCR_AVAILABLE
+    ocr_mod = _albert_module("ocr")
+    errors_mod = _albert_module("errors")
+    catalog_mod = _albert_module("catalog")
+    stage = _albert_primary_label()
+    if _ALBERT_CONFIG_ERROR:
+        _disable_albert_ocr(f"configuration Albert refusée ({_ALBERT_CONFIG_ERROR})")
+        raise _AlbertOcrLinkError(f"OCR Albert indisponible : {_ALBERT_CONFIG_ERROR}", stage)
+
+    client = None
+    v1_fallback: Optional[str] = None
+    try:
+        client = _albert_ocr_client()
+        cfg = getattr(client, "cfg", None) or ALBERT_CONFIG
+        mode = cfg.ocr_mode
+        total = _pdf_page_count(pdf_path)
+        scope = min(total, max_pages) if (max_pages and max_pages > 0) else total
+        cap = int(getattr(cfg, "ocr_max_pages", 0) or 0)
+        limit = min(scope, cap) if cap > 0 else scope
+        capped = cap > 0 and limit < scope
+        requested = limit if 0 < limit < total else None
+
+        outcome = None
+        v1_failure: Optional[str] = None
+        chat_attempted = False
+        if mode in ("ocr", "auto") and _ALBERT_V1_OCR_AVAILABLE is not False:
+            stage = ocr_mod.PROVIDER_MISTRAL_OCR
+            # Sonde d'accès peu coûteuse et mise en cache (D3) : rien n'est
+            # compressé, découpé ni envoyé quand /v1/ocr est refusé au compte.
+            if _probe_albert_v1_ocr_access(client, cfg) is not False:
+                try:
+                    ocr_mod.ensure_pinned_models(client, [cfg.ocr_doc_model], cache=_ALBERT_OCR_MODEL_IDS)
+                    outcome = ocr_mod.ocr_pdf_v1(
+                        pdf_path, client,
+                        split_fn=_split_pdf_for_ocr,
+                        unlink_fn=_safe_unlink,
+                        parse_fn=_ocr_pages_payload_to_markdown,
+                        compress_fn=_compress_pdf_for_ocr,
+                        max_pages=requested,
+                        cfg=cfg,
+                        semaphore=ALBERT_OCR_SEMAPHORE,
+                        recover_fn=_albert_chat_recovery(pdf_path, client, cfg) if mode == "auto" else None,
+                    )
+                    _ALBERT_V1_OCR_AVAILABLE = True
+                except errors_mod.AlbertAuthError:
+                    raise
+                except Exception as v1_error:  # noqa: BLE001 — bascule tracée ci-dessous
+                    access_denied = errors_mod.is_ocr_access_denied(v1_error) or isinstance(
+                        v1_error, catalog_mod.ModelNotFoundError
+                    )
+                    if access_denied:
+                        _remember_v1_ocr_unavailable(v1_error)
+                    if mode == "ocr":
+                        raise
+                    # Pages en échec déjà reprises par LightOnOCR : pas de second passage.
+                    chat_attempted = bool(getattr(v1_error, "chat_attempted", False))
+                    if not access_denied:
+                        v1_fallback = ocr_mod.PROVIDER_MISTRAL_OCR
+                        v1_failure = str(v1_error)
+                        if not chat_attempted and _albert_chat_ocr_unusable() is None:
+                            logger.warning(
+                                "OCR Albert /v1/ocr en échec pour %s (%s) : bascule sur LightOnOCR.",
+                                pdf_path, v1_error,
+                            )
+        if outcome is None and mode == "ocr":
+            raise _AlbertOcrLinkError(
+                "OCR Albert : accès à /v1/ocr refusé (mémorisé) avec ALBERT_OCR_MODE=ocr.", stage
+            )
+        if outcome is None:
+            chat_unusable = _albert_chat_ocr_unusable()
+            if chat_unusable or chat_attempted:
+                # Aucun appel LightOnOCR : repli tracé sur le maillon suivant.
+                why = (
+                    f"LightOnOCR inutilisable (mémorisé : {chat_unusable})" if chat_unusable
+                    else "pages en échec déjà reprises par LightOnOCR"
+                )
+                detail = f"/v1/ocr en échec ({v1_failure}) ; " if v1_failure else ""
+                raise _AlbertOcrLinkError(
+                    f"OCR Albert : {detail}{why}.", v1_fallback or ocr_mod.PROVIDER_LIGHTONOCR
+                )
+            stage = ocr_mod.PROVIDER_LIGHTONOCR
+            ocr_mod.ensure_pinned_models(client, [cfg.ocr_chat_model], cache=_ALBERT_OCR_MODEL_IDS)
+            outcome = ocr_mod.ocr_pdf_lightonocr(
+                pdf_path, client, max_pages=requested, cfg=cfg, semaphore=ALBERT_OCR_SEMAPHORE
+            )
+    except _AlbertOcrLinkError:
+        raise
+    except errors_mod.AlbertAuthError as auth_error:
+        # Compte, clé ou quota : arrêt du maillon pour tout le processus.
+        _disable_albert_ocr(str(auth_error))
+        raise _AlbertOcrLinkError(str(auth_error), stage) from auth_error
+    except Exception as link_error:  # noqa: BLE001 — maillon suivant, repli tracé
+        if stage == ocr_mod.PROVIDER_LIGHTONOCR and _is_albert_chat_model_error(link_error):
+            # Modèle LightOnOCR retiré, de mauvais type ou refusé : mémorisé pour le processus.
+            _remember_albert_chat_ocr_unusable(link_error)
+        raise _AlbertOcrLinkError(str(link_error), getattr(link_error, "provider", None) or stage) from link_error
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception as close_error:  # noqa: BLE001 — fermeture best-effort
+                logger.debug("Fermeture du client Albert impossible : %s", close_error)
+
+    text = outcome.text
+    provider = outcome.provider
+    partial = bool(outcome.partial)
+    notes: List[str] = [outcome.error] if outcome.error else []
+    if provider == ocr_mod.PROVIDER_LIGHTONOCR:
+        # Garde de densité (Lot 2) : LightOnOCR seulement, jamais /v1/ocr.
+        density_error = _ocr_density_warning(
+            text, int(outcome.pages_attempted or limit), pdf_path, provider
+        )
+        if density_error:
+            partial = True
+            notes.append(density_error)
+    if capped:
+        # Plafond ALBERT_OCR_MAX_PAGES : jamais de succès silencieux (logique
+        # du fournisseur plafonné) ; un moteur non plafonné plus complet gagne.
+        logger.warning(
+            "OCR PARTIEL Albert pour %s : %d/%d pages transcrites (plafond "
+            "ALBERT_OCR_MAX_PAGES=%d). Tentative d'un moteur non plafonné avant "
+            "d'accepter le résultat partiel.",
+            pdf_path, limit, scope, cap,
+        )
+        legacy_text = _extract_text_with_legacy_pdf(pdf_path, max_pages=max_pages)
+        if legacy_text.strip() and len(legacy_text) > len(text):
+            logger.info(
+                "Moteur legacy plus complet que l'OCR Albert plafonné pour %s "
+                "(%d > %d caractères) — adoption de legacy.",
+                pdf_path, len(legacy_text), len(text),
+            )
+            return OCRResult(
+                text=legacy_text,
+                provider="legacy",
+                partial=False,
+                pages_done=total,
+                pages_total=total,
+                error=None,
+                fallback_from=provider,
+            )
+        partial = True
+        notes.append(f"OCR plafonné Albert : {limit}/{scope} pages (ALBERT_OCR_MAX_PAGES={cap})")
+    return OCRResult(
+        text=text,
+        provider=provider,
+        partial=partial,
+        pages_done=int(outcome.pages_done),
+        pages_total=int(outcome.pages_total),
+        error=" ; ".join(notes) if notes else None,
+        fallback_from=v1_fallback,
+    )
+
+
+def _write_albert_ocr_usage(output_path: str) -> Optional[str]:
+    """
+    Write the Albert usage ledger of the OCR link next to `output_path`.
+
+    Nothing happens (no file, no log) unless Albert was actually called in
+    this process; `ALBERT_USAGE_LOG=0` keeps the summary log line only.
+
+    Args:
+        output_path: Output CSV path (the ledger goes to its directory).
+
+    Returns:
+        Path of the written `albert_usage.jsonl`, or None.
+    """
+    ledger = _ALBERT_OCR_LEDGER
+    if ledger is None or not ledger.called:
+        return None
+    written = None
+    if ALBERT_CONFIG.usage_log:
+        folder = os.path.dirname(os.path.abspath(output_path))
+        try:
+            written = ledger.write_jsonl(folder)
+        except OSError as exc:
+            logger.warning("Ledger d'usage Albert non écrit dans %s : %s", folder, exc)
+    logger.info("%s", ledger.summary_line())
+    return written
+
+
 def extract_text_with_ocr(
     pdf_path: str,
     max_pages: Optional[int] = None,
@@ -1621,6 +2299,12 @@ def extract_text_with_ocr(
     books. When explicitly re-enabled, it is tried between Mistral and legacy
     with the Lot 2 partial/truncation guards.
 
+    Albert (lot 4, OFF by default): with `OCR_ENABLE_ALBERT=1` (which requires
+    `ALBERT_ENABLED=1`) and an Albert key, the sovereign Albert link is tried
+    FIRST (`/v1/ocr` if the account has access, else LightOnOCR). When it fails
+    or is skipped, the next links run as usual and the result carries
+    `fallback_from` (traced fallback, never a silent one).
+
     Args:
         pdf_path: Path to the PDF file to process
         max_pages: Optional maximum number of pages to process
@@ -1638,8 +2322,36 @@ def extract_text_with_ocr(
     extraction_success = False
 
     last_error: Optional[Exception] = None
+    albert_fallback_from: Optional[str] = None
 
     try:
+        if OCR_ENABLE_ALBERT and ALBERT_API_KEY and not _ALBERT_ACCOUNT_DISABLED:
+            try:
+                logger.debug("Tentative d'OCR Albert pour %s", pdf_path)
+                albert_result = _try_albert_ocr(pdf_path, max_pages=max_pages)
+                provider_used = albert_result.provider
+                extraction_success = True
+                return _finalize_ocr_result(
+                    albert_result.text, albert_result.provider, return_details,
+                    partial=albert_result.partial,
+                    pages_done=albert_result.pages_done,
+                    pages_total=albert_result.pages_total,
+                    error=albert_result.error,
+                    fallback_from=albert_result.fallback_from,
+                )
+            except Exception as albert_error:
+                last_error = albert_error
+                albert_fallback_from = getattr(albert_error, "provider", None) or "albert"
+                logger.warning(
+                    "Échec OCR Albert pour %s: %s — maillon suivant (repli tracé).",
+                    pdf_path,
+                    albert_error,
+                )
+                if METRICS_AVAILABLE and track_error:
+                    track_error('pdf_extraction', type(albert_error).__name__)
+        elif OCR_ENABLE_ALBERT:
+            albert_fallback_from = _albert_skipped_label(pdf_path)
+
         if MISTRAL_API_KEY:
             try:
                 logger.debug("Tentative d'OCR Mistral pour %s", pdf_path)
@@ -1654,6 +2366,7 @@ def extract_text_with_ocr(
                     pages_done=mistral_outcome.pages_done,
                     pages_total=mistral_outcome.pages_total,
                     error=mistral_outcome.error,
+                    fallback_from=albert_fallback_from,
                 )
             except Exception as mistral_error:
                 last_error = mistral_error
@@ -1707,6 +2420,7 @@ def extract_text_with_ocr(
                         return _finalize_ocr_result(
                             legacy_text, "legacy", return_details,
                             pages_done=pages_total, pages_total=pages_total,
+                            fallback_from=albert_fallback_from,
                         )
                     provider_used = "openai"
                     extraction_success = True
@@ -1714,6 +2428,7 @@ def extract_text_with_ocr(
                         openai_text, "openai", return_details,
                         partial=True, pages_done=pages_done, pages_total=pages_total,
                         error=f"OCR plafonné OpenAI : {pages_done}/{pages_total} pages",
+                        fallback_from=albert_fallback_from,
                     )
 
                 # Full OpenAI result — generic density sanity check (Lot 2).
@@ -1725,6 +2440,7 @@ def extract_text_with_ocr(
                     partial=bool(density_error),
                     pages_done=pages_done, pages_total=pages_total,
                     error=density_error,
+                    fallback_from=albert_fallback_from,
                 )
             except Exception as openai_error:
                 last_error = openai_error
@@ -1755,6 +2471,7 @@ def extract_text_with_ocr(
                     partial=bool(density_error),
                     pages_done=local_pages, pages_total=local_pages,
                     error=density_error,
+                    fallback_from=albert_fallback_from,
                 )
             except Exception as local_error:
                 last_error = local_error
@@ -1765,7 +2482,7 @@ def extract_text_with_ocr(
                 if METRICS_AVAILABLE and track_error:
                     track_error('pdf_extraction', type(local_error).__name__)
 
-        if not MISTRAL_API_KEY and not openai_key:
+        if not MISTRAL_API_KEY and not openai_key and not (OCR_ENABLE_ALBERT and ALBERT_API_KEY):
             logger.error(
                 "Aucune clé API OCR configurée (MISTRAL_API_KEY ou OPENAI_API_KEY). "
                 "Basculer sur l'extraction locale peut dégrader la qualité du texte."
@@ -1787,6 +2504,7 @@ def extract_text_with_ocr(
                 partial=bool(density_error),
                 pages_done=legacy_pages, pages_total=legacy_pages,
                 error=density_error,
+                fallback_from=albert_fallback_from,
             )
 
     finally:
@@ -1810,6 +2528,9 @@ def extract_text_with_ocr(
         "pour activer l'OCR Markdown (le fallback OpenAI est désactivé par défaut ; "
         "activez OCR_ENABLE_OPENAI_FALLBACK=1 pour l'autoriser)."
     )
+    if OCR_ENABLE_ALBERT:
+        # Complété seulement quand le maillon Albert est sélectionné (OFF : inchangé).
+        error_message += _albert_final_error_suffix(albert_fallback_from)
     raise OCRExtractionError(error_message)
 
 
@@ -2112,6 +2833,24 @@ def _process_single_zotero_item(
                     })
                 else:
                     logger.info(f"[{item_index}] ✓ Extraction success for {item_key} ({ocr_payload.provider})")
+
+                # Albert lot 4 — the sovereign OCR link was selected but another
+                # provider served the text: traced fallback (never set when
+                # Albert is disabled, so this block is inert by default).
+                ocr_fallback_from = getattr(ocr_payload, "fallback_from", None)
+                fallback_msg = _albert_fallback_message(ocr_payload)
+                if fallback_msg:
+                    logger.warning(f"[{item_index}] ⚠ REPLI OCR pour {item_key} : {fallback_msg}")
+                    errors.append({
+                        "itemKey": item_key,
+                        "title": metadata.get("title", ""),
+                        "error_type": "OCR_PROVIDER_FALLBACK",
+                        "error_message": fallback_msg,
+                        "provider": ocr_payload.provider,
+                        "fallback_from": ocr_fallback_from,
+                        "pdf_path": actual_path,
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                    })
 
             except OCRExtractionError as ocr_error:
                 logger.error(f"[{item_index}] OCR failed for {actual_path}: {ocr_error}")
@@ -2519,6 +3258,13 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
                         "texteocr_pages_done": int(getattr(ocr_payload, "pages_done", 0) or 0),
                         "texteocr_pages_total": int(getattr(ocr_payload, "pages_total", 0) or 0),
                     })
+                    # Albert lot 4 — repli tracé par document (inerte quand Albert est désactivé).
+                    fallback_msg = _albert_fallback_message(ocr_payload)
+                    if fallback_msg:
+                        logger.warning(
+                            "⚠ REPLI OCR pour %s (%s) : %s",
+                            metadata.get("itemKey", ""), actual_path, fallback_msg,
+                        )
             except Exception as item_error:
                 logger.error(f"Error processing item: {item_error}")
                 continue
@@ -2581,6 +3327,10 @@ def extract_pdf_metadata_to_dataframe(pdf_directory: str) -> pd.DataFrame:
                     "texteocr_pages_done": int(getattr(ocr_payload, "pages_done", 0) or 0),
                     "texteocr_pages_total": int(getattr(ocr_payload, "pages_total", 0) or 0),
                 })
+                # Albert lot 4 — repli tracé par document (inerte quand Albert est désactivé).
+                fallback_msg = _albert_fallback_message(ocr_payload)
+                if fallback_msg:
+                    logger.warning("⚠ REPLI OCR pour %s : %s", full_path, fallback_msg)
         except Exception as e:
             logger.error(f"Failed to process {filename}: {e}")
             continue
@@ -2677,3 +3427,6 @@ if __name__ == "__main__":
         else:
             logger.warning("No data processed from Zotero JSON. Output CSV will not be created.")
             print("No data processed. Output CSV not created.")
+
+    # Albert lot 4 — ledger d'usage écrit seulement si Albert a été appelé (OFF : rien).
+    _write_albert_ocr_usage(args.output)
