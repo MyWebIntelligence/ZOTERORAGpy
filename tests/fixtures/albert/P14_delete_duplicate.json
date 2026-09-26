@@ -1,0 +1,11 @@
+{
+  "request": {
+    "method": "DELETE",
+    "path": "/v1/collections/302361",
+    "body_summary": null
+  },
+  "status": 204,
+  "headers": {},
+  "body": null,
+  "synthetic": false
+}

@@ -1,0 +1,197 @@
+{
+  "delete_failure_is_ignored": [],
+  "empty_payload_falls_back_to_legacy": [
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Réponse OCR Mistral vide pour <TMP>/empty_payload_falls_back_to_legacy/document.pdf (keys=[])"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Échec Mistral OCR pour <TMP>/empty_payload_falls_back_to_legacy/document.pdf: La réponse Mistral est vide."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Retour au processus OCR historique pour <TMP>/empty_payload_falls_back_to_legacy/document.pdf"
+    ]
+  ],
+  "max_pages_fast_path": [],
+  "non_dict_payload_falls_back_to_legacy": [
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Réponse OCR Mistral vide pour <TMP>/non_dict_payload_falls_back_to_legacy/document.pdf (keys=<class 'list'>)"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Échec Mistral OCR pour <TMP>/non_dict_payload_falls_back_to_legacy/document.pdf: La réponse Mistral est vide."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Retour au processus OCR historique pour <TMP>/non_dict_payload_falls_back_to_legacy/document.pdf"
+    ]
+  ],
+  "ocr_429_retry_after_then_success": [
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Appel Mistral OCR échoué (429) pour <TMP>/ocr_429_retry_after_then_success/document.pdf: rate limited"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 1/5) pour <TMP>/ocr_429_retry_after_then_success/document.pdf: Mistral OCR erreur transitoire 429 pour document.pdf: rate limited — nouvel essai dans 7.0s (Retry-After serveur)"
+    ]
+  ],
+  "ocr_http_401_falls_back_to_legacy": [
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Appel Mistral OCR échoué (401) pour <TMP>/ocr_http_401_falls_back_to_legacy/document.pdf: {\"message\":\"Unauthorized\"}"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Échec Mistral OCR pour <TMP>/ocr_http_401_falls_back_to_legacy/document.pdf: OCR Mistral refusé (401) : clé API invalide OU plafond de dépense mensuel du workspace atteint (console.mistral.ai → Limits/Usage). Vérifiez le plafond AVANT de régénérer une clé — la même clé refonctionne une fois le plafond relevé."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Retour au processus OCR historique pour <TMP>/ocr_http_401_falls_back_to_legacy/document.pdf"
+    ]
+  ],
+  "ocr_http_422_falls_back_to_legacy": [
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Appel Mistral OCR échoué (422) pour <TMP>/ocr_http_422_falls_back_to_legacy/document.pdf: {\"detail\":[{\"type\":\"extra_forbidden\",\"loc\":[\"body\",\"page_ranges\"]}]}"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Échec Mistral OCR pour <TMP>/ocr_http_422_falls_back_to_legacy/document.pdf: Erreur Mistral (422) pour document.pdf: {\"detail\":[{\"type\":\"extra_forbidden\",\"loc\":[\"body\",\"page_ranges\"]}]}"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Retour au processus OCR historique pour <TMP>/ocr_http_422_falls_back_to_legacy/document.pdf"
+    ]
+  ],
+  "output_array_shape": [],
+  "pages_blank_top_level_markdown": [],
+  "pages_index_markdown": [],
+  "pages_mixed_shapes": [],
+  "split_max_pages_http": [
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "PDF <TMP>/split_max_pages_http/document.pdf = 0.0 MB / 3 pages > seuils Mistral (45.0 MB / 2 pages) — bascule sur le mode large-file."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Découpage PDF document.pdf en 3 parts (cible ≤ 30.0 MB / ≤ 1 pages chacune)."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Cap max_pages atteint, parts restantes ignorées."
+    ]
+  ],
+  "split_salvage_http": [
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "PDF <TMP>/split_salvage_http/document.pdf = 0.0 MB / 3 pages > seuils Mistral (45.0 MB / 2 pages) — bascule sur le mode large-file."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Découpage PDF document.pdf en 3 parts (cible ≤ 30.0 MB / ≤ 1 pages chacune)."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Appel Mistral OCR échoué (503) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: upstream unavailable"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 1/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: upstream unavailable — nouvel essai dans 3.0s"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Appel Mistral OCR échoué (503) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: upstream unavailable"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 2/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: upstream unavailable — nouvel essai dans 6.0s"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Appel Mistral OCR échoué (503) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: upstream unavailable"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 3/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: upstream unavailable — nouvel essai dans 12.0s"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Appel Mistral OCR échoué (503) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: upstream unavailable"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 4/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: upstream unavailable — nouvel essai dans 24.0s"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Appel Mistral OCR échoué (503) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: upstream unavailable"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "ERROR",
+      "OCR Mistral: échec après 5 tentatives pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: upstream unavailable"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "ERROR",
+      "Échec OCR Mistral sur la part 2/3 (pages 2-2): OCR Mistral échoué après 5 tentatives pour ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: upstream unavailable — part ignorée, OCR partiel."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral partiel : 1/3 parts en échec (2/3 (pages 2-2)). pour <TMP>/split_salvage_http/document.pdf"
+    ]
+  ],
+  "top_level_text_no_pages": [],
+  "upload_503_then_retry_success": [
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 1/5) pour <TMP>/upload_503_then_retry_success/document.pdf: Mistral OCR erreur transitoire 503 pour document.pdf: upstream unavailable — nouvel essai dans 3.0s"
+    ]
+  ],
+  "upload_without_id_falls_back_to_legacy": [
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "Échec Mistral OCR pour <TMP>/upload_without_id_falls_back_to_legacy/document.pdf: La réponse Mistral ne contient pas d'identifiant de fichier pour l'OCR."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Retour au processus OCR historique pour <TMP>/upload_without_id_falls_back_to_legacy/document.pdf"
+    ]
+  ]
+}

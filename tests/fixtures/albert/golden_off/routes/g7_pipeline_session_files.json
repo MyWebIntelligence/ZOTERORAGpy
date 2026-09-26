@@ -1,0 +1,126 @@
+{
+  "route": "GET /api/pipeline/sessions/{session_folder}/files",
+  "fingerprint_legend": {},
+  "cases": [
+    {
+      "case": "owner",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "GET",
+        "path": "/api/pipeline/sessions/gsess-full/files"
+      },
+      "status": 200,
+      "body": {
+        "session_id": 1,
+        "session_folder": "gsess-full",
+        "project_id": 1,
+        "current_stage": "destination",
+        "files": {
+          "upload": {
+            "completed": true,
+            "files": [
+              "output.csv",
+              "output_chunks.json",
+              "output_chunks_with_embeddings.json",
+              "output_chunks_with_embeddings_sparse.json"
+            ]
+          },
+          "extraction": {
+            "completed": true,
+            "file": "output.csv",
+            "exists": true,
+            "row_count": 2
+          },
+          "chunking": {
+            "completed": true,
+            "file": "output_chunks.json",
+            "exists": true,
+            "chunk_count": 3
+          },
+          "dense_embedding": {
+            "completed": true,
+            "file": "output_chunks_with_embeddings.json",
+            "exists": true,
+            "chunk_count": 3
+          },
+          "sparse_embedding": {
+            "completed": true,
+            "file": "output_chunks_with_embeddings_sparse.json",
+            "exists": true,
+            "chunk_count": 3
+          }
+        },
+        "session_status": "created"
+      },
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "admin_not_member",
+      "persona": "admin",
+      "request": {
+        "method": "GET",
+        "path": "/api/pipeline/sessions/gsess-full/files"
+      },
+      "status": 200,
+      "body": {
+        "session_id": 1,
+        "session_folder": "gsess-full",
+        "project_id": 1,
+        "current_stage": "destination",
+        "files": {
+          "upload": {
+            "completed": true,
+            "files": [
+              "output.csv",
+              "output_chunks.json",
+              "output_chunks_with_embeddings.json",
+              "output_chunks_with_embeddings_sparse.json"
+            ]
+          },
+          "extraction": {
+            "completed": true,
+            "file": "output.csv",
+            "exists": true,
+            "row_count": 2
+          },
+          "chunking": {
+            "completed": true,
+            "file": "output_chunks.json",
+            "exists": true,
+            "chunk_count": 3
+          },
+          "dense_embedding": {
+            "completed": true,
+            "file": "output_chunks_with_embeddings.json",
+            "exists": true,
+            "chunk_count": 3
+          },
+          "sparse_embedding": {
+            "completed": true,
+            "file": "output_chunks_with_embeddings_sparse.json",
+            "exists": true,
+            "chunk_count": 3
+          }
+        },
+        "session_status": "created"
+      },
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "foreign_member",
+      "persona": "member_keys",
+      "request": {
+        "method": "GET",
+        "path": "/api/pipeline/sessions/gsess-full/files"
+      },
+      "status": 403,
+      "body": {
+        "detail": "Accès non autorisé à ce projet"
+      },
+      "server_exceptions": [],
+      "calls": []
+    }
+  ]
+}

@@ -1,0 +1,151 @@
+{
+  "scenario": "upload_503_then_retry_success",
+  "result_type": "OCRResult",
+  "result": {
+    "text": "<!-- Page 1 -->\nAprès reprise",
+    "provider": "mistral",
+    "partial": false,
+    "pages_done": 2,
+    "pages_total": 2,
+    "error": null
+  },
+  "exception": null,
+  "calls": [
+    [
+      "_extract_text_with_mistral",
+      "<TMP>/upload_503_then_retry_success/document.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<TMP>/upload_503_then_retry_success/document.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<TMP>/upload_503_then_retry_success/document.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<TMP>/upload_503_then_retry_success/document.pdf",
+      null
+    ]
+  ],
+  "sleeps": [
+    3.0
+  ],
+  "max_pages": null,
+  "http": {
+    "sessions": 2,
+    "requests": [
+      {
+        "session": 1,
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/files",
+        "kwargs": {
+          "data": {
+            "purpose": "ocr"
+          },
+          "files": {
+            "file": [
+              "document.pdf",
+              "application/pdf"
+            ]
+          },
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3"
+          },
+          "timeout": 300
+        },
+        "answer": {
+          "status": 503,
+          "text": "upstream unavailable"
+        }
+      },
+      {
+        "session": 2,
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/files",
+        "kwargs": {
+          "data": {
+            "purpose": "ocr"
+          },
+          "files": {
+            "file": [
+              "document.pdf",
+              "application/pdf"
+            ]
+          },
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3"
+          },
+          "timeout": 300
+        },
+        "answer": {
+          "status": 200,
+          "body": {
+            "id": "file-golden-k",
+            "object": "file",
+            "purpose": "ocr"
+          }
+        }
+      },
+      {
+        "session": 2,
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/ocr",
+        "kwargs": {
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3",
+            "Content-Type": "application/json"
+          },
+          "json": {
+            "model": "mistral-ocr-latest",
+            "document": {
+              "type": "file",
+              "file_id": "file-golden-k"
+            },
+            "include_image_base64": false
+          },
+          "timeout": 300
+        },
+        "answer": {
+          "status": 200,
+          "body": {
+            "pages": [
+              {
+                "index": 0,
+                "markdown": "Après reprise"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "session": 2,
+        "method": "DELETE",
+        "url": "https://api.mistral.ai/v1/files/file-golden-k",
+        "kwargs": {
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3"
+          },
+          "timeout": 15
+        },
+        "answer": {
+          "status": 200,
+          "body": {
+            "id": "file-golden-k",
+            "object": "file",
+            "deleted": true
+          }
+        }
+      }
+    ],
+    "unconsumed": {
+      "uploads": [],
+      "ocr": [],
+      "deletes": []
+    }
+  }
+}

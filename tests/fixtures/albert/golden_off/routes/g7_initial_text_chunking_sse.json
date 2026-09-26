@@ -1,0 +1,365 @@
+{
+  "route": "POST /initial_text_chunking_sse",
+  "fingerprint_legend": {
+    "fp:fc9778f2aa10": "server_env.OPENROUTER_API_KEY",
+    "fp:521014770215": "server_env.OPENROUTER_DEFAULT_MODEL",
+    "fp:51dfa8793650": "server_env.MISTRAL_API_KEY",
+    "fp:36bd200a1674": "server_env.MISTRAL_OCR_MODEL",
+    "fp:af36806dfb00": "server_env.MISTRAL_API_BASE_URL",
+    "fp:f6459adcb50e": "server_env.PINECONE_API_KEY",
+    "fp:4ee04614f91e": "server_env.PINECONE_ENV",
+    "fp:fc08dd1f1315": "server_env.WEAVIATE_API_KEY",
+    "fp:c71cd5754a97": "server_env.WEAVIATE_URL",
+    "fp:65eb30838bd5": "server_env.QDRANT_API_KEY",
+    "fp:023284cfdd83": "server_env.QDRANT_URL",
+    "fp:669b22cf2228": "server_env.ZOTERO_API_KEY",
+    "fp:cb7c9d34db28": "server_env.ZOTERO_USER_ID",
+    "fp:fba411cc5d41": "db.admin.openai_api_key",
+    "fp:a9908d50d22f": "db.member_keys.openai_api_key",
+    "fp:66565bd23150": "db.member_keys.mistral_api_key",
+    "fp:5914d90d87b1": "db.member_keys.pinecone_api_key",
+    "fp:f2859cefcc3f": "db.member_keys.zotero_api_key",
+    "fp:0aef06c7da78": "db.member_keys.zotero_user_id"
+  },
+  "cases": [
+    {
+      "case": "admin:default",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/initial_text_chunking_sse",
+        "form": {
+          "path": "gsess-full"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Found 2 documents to process\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing: doc_a.pdf\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing Zotero items: 1/2\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"message\": \"Document #1: 3 chunks generated\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 2, \"total\": 2, \"percent\": 100, \"message\": \"Processing: doc_b.pdf\"}",
+        "{\"type\": \"complete\", \"message\": \"Process completed successfully\", \"count\": 3}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_subprocess_with_sse",
+          "argv": [
+            "python3",
+            "-u",
+            "<RAGPY>/scripts/rad_chunk.py",
+            "--input",
+            "<TMP>/uploads/gsess-full/output.csv",
+            "--output",
+            "<TMP>/uploads/gsess-full",
+            "--phase",
+            "initial",
+            "--model",
+            "gpt-4o-mini"
+          ],
+          "session_folder": "gsess-full",
+          "timeout": 1800,
+          "error_keywords": "<default>",
+          "env": {
+            "OPENAI_API_KEY": "fp:fba411cc5d41",
+            "OPENROUTER_API_KEY": "fp:fc9778f2aa10",
+            "OPENROUTER_DEFAULT_MODEL": "fp:521014770215",
+            "MISTRAL_API_KEY": "fp:51dfa8793650",
+            "MISTRAL_OCR_MODEL": "fp:36bd200a1674",
+            "MISTRAL_API_BASE_URL": "fp:af36806dfb00",
+            "PINECONE_API_KEY": "fp:f6459adcb50e",
+            "PINECONE_ENV": "fp:4ee04614f91e",
+            "WEAVIATE_API_KEY": "fp:fc08dd1f1315",
+            "WEAVIATE_URL": "fp:c71cd5754a97",
+            "QDRANT_API_KEY": "fp:65eb30838bd5",
+            "QDRANT_URL": "fp:023284cfdd83",
+            "ZOTERO_API_KEY": "fp:669b22cf2228",
+            "ZOTERO_USER_ID": "fp:cb7c9d34db28",
+            "ZOTERO_GROUP_ID": null
+          }
+        }
+      ]
+    },
+    {
+      "case": "admin:gpt-4o-mini",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/initial_text_chunking_sse",
+        "form": {
+          "path": "gsess-full",
+          "model": "gpt-4o-mini"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Found 2 documents to process\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing: doc_a.pdf\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing Zotero items: 1/2\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"message\": \"Document #1: 3 chunks generated\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 2, \"total\": 2, \"percent\": 100, \"message\": \"Processing: doc_b.pdf\"}",
+        "{\"type\": \"complete\", \"message\": \"Process completed successfully\", \"count\": 3}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_subprocess_with_sse",
+          "argv": [
+            "python3",
+            "-u",
+            "<RAGPY>/scripts/rad_chunk.py",
+            "--input",
+            "<TMP>/uploads/gsess-full/output.csv",
+            "--output",
+            "<TMP>/uploads/gsess-full",
+            "--phase",
+            "initial",
+            "--model",
+            "gpt-4o-mini"
+          ],
+          "session_folder": "gsess-full",
+          "timeout": 1800,
+          "error_keywords": "<default>",
+          "env": {
+            "OPENAI_API_KEY": "fp:fba411cc5d41",
+            "OPENROUTER_API_KEY": "fp:fc9778f2aa10",
+            "OPENROUTER_DEFAULT_MODEL": "fp:521014770215",
+            "MISTRAL_API_KEY": "fp:51dfa8793650",
+            "MISTRAL_OCR_MODEL": "fp:36bd200a1674",
+            "MISTRAL_API_BASE_URL": "fp:af36806dfb00",
+            "PINECONE_API_KEY": "fp:f6459adcb50e",
+            "PINECONE_ENV": "fp:4ee04614f91e",
+            "WEAVIATE_API_KEY": "fp:fc08dd1f1315",
+            "WEAVIATE_URL": "fp:c71cd5754a97",
+            "QDRANT_API_KEY": "fp:65eb30838bd5",
+            "QDRANT_URL": "fp:023284cfdd83",
+            "ZOTERO_API_KEY": "fp:669b22cf2228",
+            "ZOTERO_USER_ID": "fp:cb7c9d34db28",
+            "ZOTERO_GROUP_ID": null
+          }
+        }
+      ]
+    },
+    {
+      "case": "admin:gemini_slug",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/initial_text_chunking_sse",
+        "form": {
+          "path": "gsess-full",
+          "model": "google/gemini-2.5-flash"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Found 2 documents to process\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing: doc_a.pdf\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing Zotero items: 1/2\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"message\": \"Document #1: 3 chunks generated\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 2, \"total\": 2, \"percent\": 100, \"message\": \"Processing: doc_b.pdf\"}",
+        "{\"type\": \"complete\", \"message\": \"Process completed successfully\", \"count\": 3}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_subprocess_with_sse",
+          "argv": [
+            "python3",
+            "-u",
+            "<RAGPY>/scripts/rad_chunk.py",
+            "--input",
+            "<TMP>/uploads/gsess-full/output.csv",
+            "--output",
+            "<TMP>/uploads/gsess-full",
+            "--phase",
+            "initial",
+            "--model",
+            "google/gemini-2.5-flash"
+          ],
+          "session_folder": "gsess-full",
+          "timeout": 1800,
+          "error_keywords": "<default>",
+          "env": {
+            "OPENAI_API_KEY": "fp:fba411cc5d41",
+            "OPENROUTER_API_KEY": "fp:fc9778f2aa10",
+            "OPENROUTER_DEFAULT_MODEL": "fp:521014770215",
+            "MISTRAL_API_KEY": "fp:51dfa8793650",
+            "MISTRAL_OCR_MODEL": "fp:36bd200a1674",
+            "MISTRAL_API_BASE_URL": "fp:af36806dfb00",
+            "PINECONE_API_KEY": "fp:f6459adcb50e",
+            "PINECONE_ENV": "fp:4ee04614f91e",
+            "WEAVIATE_API_KEY": "fp:fc08dd1f1315",
+            "WEAVIATE_URL": "fp:c71cd5754a97",
+            "QDRANT_API_KEY": "fp:65eb30838bd5",
+            "QDRANT_URL": "fp:023284cfdd83",
+            "ZOTERO_API_KEY": "fp:669b22cf2228",
+            "ZOTERO_USER_ID": "fp:cb7c9d34db28",
+            "ZOTERO_GROUP_ID": null
+          }
+        }
+      ]
+    },
+    {
+      "case": "member_keys:default",
+      "persona": "member_keys",
+      "request": {
+        "method": "POST",
+        "path": "/initial_text_chunking_sse",
+        "form": {
+          "path": "gsess-full"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Found 2 documents to process\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing: doc_a.pdf\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing Zotero items: 1/2\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"message\": \"Document #1: 3 chunks generated\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 2, \"total\": 2, \"percent\": 100, \"message\": \"Processing: doc_b.pdf\"}",
+        "{\"type\": \"complete\", \"message\": \"Process completed successfully\", \"count\": 3}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_subprocess_with_sse",
+          "argv": [
+            "python3",
+            "-u",
+            "<RAGPY>/scripts/rad_chunk.py",
+            "--input",
+            "<TMP>/uploads/gsess-full/output.csv",
+            "--output",
+            "<TMP>/uploads/gsess-full",
+            "--phase",
+            "initial",
+            "--model",
+            "gpt-4o-mini"
+          ],
+          "session_folder": "gsess-full",
+          "timeout": 1800,
+          "error_keywords": "<default>",
+          "env": {
+            "OPENAI_API_KEY": "fp:a9908d50d22f",
+            "OPENROUTER_API_KEY": null,
+            "OPENROUTER_DEFAULT_MODEL": null,
+            "MISTRAL_API_KEY": "fp:66565bd23150",
+            "MISTRAL_OCR_MODEL": null,
+            "MISTRAL_API_BASE_URL": null,
+            "PINECONE_API_KEY": "fp:5914d90d87b1",
+            "PINECONE_ENV": null,
+            "WEAVIATE_API_KEY": null,
+            "WEAVIATE_URL": null,
+            "QDRANT_API_KEY": null,
+            "QDRANT_URL": null,
+            "ZOTERO_API_KEY": "fp:f2859cefcc3f",
+            "ZOTERO_USER_ID": "fp:0aef06c7da78",
+            "ZOTERO_GROUP_ID": null
+          }
+        }
+      ]
+    },
+    {
+      "case": "member_keys:gpt-4o-mini",
+      "persona": "member_keys",
+      "request": {
+        "method": "POST",
+        "path": "/initial_text_chunking_sse",
+        "form": {
+          "path": "gsess-full",
+          "model": "gpt-4o-mini"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Found 2 documents to process\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing: doc_a.pdf\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing Zotero items: 1/2\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"message\": \"Document #1: 3 chunks generated\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 2, \"total\": 2, \"percent\": 100, \"message\": \"Processing: doc_b.pdf\"}",
+        "{\"type\": \"complete\", \"message\": \"Process completed successfully\", \"count\": 3}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_subprocess_with_sse",
+          "argv": [
+            "python3",
+            "-u",
+            "<RAGPY>/scripts/rad_chunk.py",
+            "--input",
+            "<TMP>/uploads/gsess-full/output.csv",
+            "--output",
+            "<TMP>/uploads/gsess-full",
+            "--phase",
+            "initial",
+            "--model",
+            "gpt-4o-mini"
+          ],
+          "session_folder": "gsess-full",
+          "timeout": 1800,
+          "error_keywords": "<default>",
+          "env": {
+            "OPENAI_API_KEY": "fp:a9908d50d22f",
+            "OPENROUTER_API_KEY": null,
+            "OPENROUTER_DEFAULT_MODEL": null,
+            "MISTRAL_API_KEY": "fp:66565bd23150",
+            "MISTRAL_OCR_MODEL": null,
+            "MISTRAL_API_BASE_URL": null,
+            "PINECONE_API_KEY": "fp:5914d90d87b1",
+            "PINECONE_ENV": null,
+            "WEAVIATE_API_KEY": null,
+            "WEAVIATE_URL": null,
+            "QDRANT_API_KEY": null,
+            "QDRANT_URL": null,
+            "ZOTERO_API_KEY": "fp:f2859cefcc3f",
+            "ZOTERO_USER_ID": "fp:0aef06c7da78",
+            "ZOTERO_GROUP_ID": null
+          }
+        }
+      ]
+    },
+    {
+      "case": "missing_dir",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/initial_text_chunking_sse",
+        "form": {
+          "path": "gsess-missing"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"Directory not found: gsess-missing\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "missing_output_csv",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/initial_text_chunking_sse",
+        "form": {
+          "path": "gsess-empty"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"output.csv not found. Complete extraction first.\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    }
+  ]
+}

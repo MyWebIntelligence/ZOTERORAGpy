@@ -1,0 +1,15 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/health",
+    "body_summary": null
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "status": "ok"
+  },
+  "synthetic": false
+}

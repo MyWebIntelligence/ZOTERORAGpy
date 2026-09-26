@@ -1,0 +1,510 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents/4934610/chunks",
+    "body_summary": {
+      "chunks": [
+        {
+          "content": "limite push_65 0",
+          "metadata": {
+            "title": "T",
+            "content_hash": "97b96f4f07cd8e083274abf51c230a7c5ff9e50324276da2fb71577829a5caf1"
+          }
+        },
+        {
+          "content": "limite push_65 1",
+          "metadata": {
+            "title": "T",
+            "content_hash": "5986c33b07019353a605047a1325ad9135e9e6de5eec675c144dc5e29b1d8420"
+          }
+        },
+        {
+          "content": "limite push_65 2",
+          "metadata": {
+            "title": "T",
+            "content_hash": "97b81060c0c5fed74b5c57a376f2401837d64922c2e5a53cb9cc18684606b662"
+          }
+        },
+        "… (+62 éléments, 65 au total)"
+      ]
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "too_long",
+        "loc": [
+          "body",
+          "chunks"
+        ],
+        "msg": "List should have at most 64 items after validation, not 65",
+        "input": [
+          {
+            "content": "limite push_65 0",
+            "metadata": {
+              "title": "T",
+              "content_hash": "97b96f4f07cd8e083274abf51c230a7c5ff9e50324276da2fb71577829a5caf1"
+            }
+          },
+          {
+            "content": "limite push_65 1",
+            "metadata": {
+              "title": "T",
+              "content_hash": "5986c33b07019353a605047a1325ad9135e9e6de5eec675c144dc5e29b1d8420"
+            }
+          },
+          {
+            "content": "limite push_65 2",
+            "metadata": {
+              "title": "T",
+              "content_hash": "97b81060c0c5fed74b5c57a376f2401837d64922c2e5a53cb9cc18684606b662"
+            }
+          },
+          {
+            "content": "limite push_65 3",
+            "metadata": {
+              "title": "T",
+              "content_hash": "b3b9cf4fdb750d78c2d390543aaddc0f483fe530faff8b932aed5ae159d9549c"
+            }
+          },
+          {
+            "content": "limite push_65 4",
+            "metadata": {
+              "title": "T",
+              "content_hash": "4d7c8a5f2b399626db6a666b007e2c456ceb866e4a654af6761ceb2b25ea0670"
+            }
+          },
+          {
+            "content": "limite push_65 5",
+            "metadata": {
+              "title": "T",
+              "content_hash": "2f0ba2182b2b154784829212e11162841d22a3d4337956ed16189468a4530033"
+            }
+          },
+          {
+            "content": "limite push_65 6",
+            "metadata": {
+              "title": "T",
+              "content_hash": "1872acab26382858eccfad54c43278e4b7c7d9368c1eb3db38c780cfb45a3690"
+            }
+          },
+          {
+            "content": "limite push_65 7",
+            "metadata": {
+              "title": "T",
+              "content_hash": "988c2352274f9ad891710eb4e1c3449a2f7338b9f2f2489dca434a8a0cde3589"
+            }
+          },
+          {
+            "content": "limite push_65 8",
+            "metadata": {
+              "title": "T",
+              "content_hash": "4b813116fd750619aefeb7fd46e4e277f092db0d70f3aaee83312f8d00d042e1"
+            }
+          },
+          {
+            "content": "limite push_65 9",
+            "metadata": {
+              "title": "T",
+              "content_hash": "8133fb1e73fd6cb8637b3d5f9e8f377c46ece83bb759cb1781abd53344334782"
+            }
+          },
+          {
+            "content": "limite push_65 10",
+            "metadata": {
+              "title": "T",
+              "content_hash": "33b31185bcd7f93e7cbce06a53027ea63f0a827924050e1cb3addc8b917e1b15"
+            }
+          },
+          {
+            "content": "limite push_65 11",
+            "metadata": {
+              "title": "T",
+              "content_hash": "c3b4f5e50f340eb16eaeaf3fc1cde1161633ba815f8f09ee1a041a228ae2645b"
+            }
+          },
+          {
+            "content": "limite push_65 12",
+            "metadata": {
+              "title": "T",
+              "content_hash": "8f0c005a53bd1f989e3b954ddb61138cbff7ef0767a2dcd2097cc6b6ede7ba69"
+            }
+          },
+          {
+            "content": "limite push_65 13",
+            "metadata": {
+              "title": "T",
+              "content_hash": "400be0df3fbbb1e2fa29ddb89243796510eb3d6cc7afa9a83884f0c7aee70800"
+            }
+          },
+          {
+            "content": "limite push_65 14",
+            "metadata": {
+              "title": "T",
+              "content_hash": "16edf510902c74c2c18613c442d331c470eda6aa3aac123e67362d928c68c6bf"
+            }
+          },
+          {
+            "content": "limite push_65 15",
+            "metadata": {
+              "title": "T",
+              "content_hash": "4397c10a18e8ab74f2e1ef851cbdc27c01d1c03832950bbe8aa4b574e582a0c8"
+            }
+          },
+          {
+            "content": "limite push_65 16",
+            "metadata": {
+              "title": "T",
+              "content_hash": "873c87a9c63da317880d29711003c2fbc59bd3f89d60aca879ebdd47b2914682"
+            }
+          },
+          {
+            "content": "limite push_65 17",
+            "metadata": {
+              "title": "T",
+              "content_hash": "1f53785577cde291a129f193e099289ba9a0e66a35d90259de7a408969298917"
+            }
+          },
+          {
+            "content": "limite push_65 18",
+            "metadata": {
+              "title": "T",
+              "content_hash": "ac16a9f45f17f94e4005598c00fbade3b2647874a9345ce1bc0d9ba1d959a7d5"
+            }
+          },
+          {
+            "content": "limite push_65 19",
+            "metadata": {
+              "title": "T",
+              "content_hash": "ee3212d8b0d758d6f43f2572ecc4f7cddef6e11c227f083dface4875dd970425"
+            }
+          },
+          {
+            "content": "limite push_65 20",
+            "metadata": {
+              "title": "T",
+              "content_hash": "cb34915750188982136d0458cf4ca8214e0227f87141a8707e1f8aec6302ac0e"
+            }
+          },
+          {
+            "content": "limite push_65 21",
+            "metadata": {
+              "title": "T",
+              "content_hash": "fe74ebd62ef19a376a325f4261a7a3fa43244f27c51ae9243a283cdb27ff51ec"
+            }
+          },
+          {
+            "content": "limite push_65 22",
+            "metadata": {
+              "title": "T",
+              "content_hash": "42fac3f7d35b35628f6b62ef4d5eb5fa5449fafd731c27616cb0d12d7e6ebda5"
+            }
+          },
+          {
+            "content": "limite push_65 23",
+            "metadata": {
+              "title": "T",
+              "content_hash": "f05b18eff20ecda7b45a0a6ef103887a945eb354995d8c11182454db4e7189f3"
+            }
+          },
+          {
+            "content": "limite push_65 24",
+            "metadata": {
+              "title": "T",
+              "content_hash": "af55b47b6c6c5a61b812b28c19516cefbdee0ec651620603c2f3fa64de490fdc"
+            }
+          },
+          {
+            "content": "limite push_65 25",
+            "metadata": {
+              "title": "T",
+              "content_hash": "c42899888284e56e4da2c1803841763de7e7df879711d01ccd901f75ee3c84a6"
+            }
+          },
+          {
+            "content": "limite push_65 26",
+            "metadata": {
+              "title": "T",
+              "content_hash": "8b322fb79f9ab21daa0d9e146569d682444592375765345f570f2a838bd133ea"
+            }
+          },
+          {
+            "content": "limite push_65 27",
+            "metadata": {
+              "title": "T",
+              "content_hash": "67a799b278777a145680e41fac80560fefade46e03d9cabbf04e743805882e0e"
+            }
+          },
+          {
+            "content": "limite push_65 28",
+            "metadata": {
+              "title": "T",
+              "content_hash": "5d45bb4fe610d14d0892efa37de19699b79922af956fa79f77cdbd63a5be71fd"
+            }
+          },
+          {
+            "content": "limite push_65 29",
+            "metadata": {
+              "title": "T",
+              "content_hash": "73bf8954696ffc7a64ee6506fb28bf596b5c766ead489b7a905d9cb92e79f09d"
+            }
+          },
+          {
+            "content": "limite push_65 30",
+            "metadata": {
+              "title": "T",
+              "content_hash": "2bd7cdf18da18081572e8ca92578cde1563d3e4768649ee36daa44fadcadb0e3"
+            }
+          },
+          {
+            "content": "limite push_65 31",
+            "metadata": {
+              "title": "T",
+              "content_hash": "0d0b5e943d7ed72591614f041eac4d06cdd508ad6405f84a4507824a7c243c2b"
+            }
+          },
+          {
+            "content": "limite push_65 32",
+            "metadata": {
+              "title": "T",
+              "content_hash": "4f5162141da1555ad69d35b83251c020a6573fe94c594b24eedf3555a6c71fbb"
+            }
+          },
+          {
+            "content": "limite push_65 33",
+            "metadata": {
+              "title": "T",
+              "content_hash": "95c887a796f32f7341559146f634b242d65d4bbb9c17d4c3eb2cee05f8820119"
+            }
+          },
+          {
+            "content": "limite push_65 34",
+            "metadata": {
+              "title": "T",
+              "content_hash": "01b3b13152210ce7a818e31c7016d4e60cfeccc65cc364f4ddcd2987f401a6a1"
+            }
+          },
+          {
+            "content": "limite push_65 35",
+            "metadata": {
+              "title": "T",
+              "content_hash": "bc0bcd2c568168ddf510a742ac6e00eaf7212301a5d0d69063a941d9db8860c7"
+            }
+          },
+          {
+            "content": "limite push_65 36",
+            "metadata": {
+              "title": "T",
+              "content_hash": "18955fb3d0b3d4e62d64223fc0ac08081efe47740ba8e86ca156ca2e2e7bcdb5"
+            }
+          },
+          {
+            "content": "limite push_65 37",
+            "metadata": {
+              "title": "T",
+              "content_hash": "ff456c6c507502f21277cc7439be155e3c5d2d344fa88dd6d4cf54a4a90ba26f"
+            }
+          },
+          {
+            "content": "limite push_65 38",
+            "metadata": {
+              "title": "T",
+              "content_hash": "05b9141b25dce91f887d0e41db90a2557eb593afae070801637478009ade3f53"
+            }
+          },
+          {
+            "content": "limite push_65 39",
+            "metadata": {
+              "title": "T",
+              "content_hash": "20a320907440d432e5bae9339445b86d5062f98213633957d49186d8290bbaef"
+            }
+          },
+          {
+            "content": "limite push_65 40",
+            "metadata": {
+              "title": "T",
+              "content_hash": "442c8e5540c30b5bac9463cbce43663a8a8c96fdebf96d08d95497babe2e0431"
+            }
+          },
+          {
+            "content": "limite push_65 41",
+            "metadata": {
+              "title": "T",
+              "content_hash": "d5d22c9707b53037e012d0ff5aade6108c818caaa516bcb3dba73e0e94f78f46"
+            }
+          },
+          {
+            "content": "limite push_65 42",
+            "metadata": {
+              "title": "T",
+              "content_hash": "23ea79d262fb5ec29f0961de9e8e1166e011cd396251f7fe28424c0d2aff720e"
+            }
+          },
+          {
+            "content": "limite push_65 43",
+            "metadata": {
+              "title": "T",
+              "content_hash": "eec4a0c1a0326ef9cab613208bd6bc825d3eb98d6abee7b7747e49db8c73354e"
+            }
+          },
+          {
+            "content": "limite push_65 44",
+            "metadata": {
+              "title": "T",
+              "content_hash": "57174bde2d11cee551ff9476c8dbaf796d5e51205ca982e1255d71c020fe8465"
+            }
+          },
+          {
+            "content": "limite push_65 45",
+            "metadata": {
+              "title": "T",
+              "content_hash": "6f77750ec97a65b93d3587e72d78e5c3de2ae93f18593d2bd7be2b42595e35bb"
+            }
+          },
+          {
+            "content": "limite push_65 46",
+            "metadata": {
+              "title": "T",
+              "content_hash": "68aa511846221638da3ce01ae1f7875e3be7795ef0298641d753b162e36db987"
+            }
+          },
+          {
+            "content": "limite push_65 47",
+            "metadata": {
+              "title": "T",
+              "content_hash": "9660f919e043b0b45a855d3bf83c81b124f96b7f41e328a653be397e4440a788"
+            }
+          },
+          {
+            "content": "limite push_65 48",
+            "metadata": {
+              "title": "T",
+              "content_hash": "c0651e253f49adf29eb26bc761192fb074425fa981a19f0667c4bf3f994aa065"
+            }
+          },
+          {
+            "content": "limite push_65 49",
+            "metadata": {
+              "title": "T",
+              "content_hash": "281a6e2dcc9a167a51eb90adf5411a6889923dd59d74c159f52957f263347f60"
+            }
+          },
+          {
+            "content": "limite push_65 50",
+            "metadata": {
+              "title": "T",
+              "content_hash": "a061574d92cb050eecb6b37b8e70613742ccd787bee77b22a0d6b9c3bb4352a6"
+            }
+          },
+          {
+            "content": "limite push_65 51",
+            "metadata": {
+              "title": "T",
+              "content_hash": "3ae45e27dd45df88336a0430e015a00f96d17e8f30559d53f5149774cf88ecbc"
+            }
+          },
+          {
+            "content": "limite push_65 52",
+            "metadata": {
+              "title": "T",
+              "content_hash": "e42e4949e110a7a2cf5497c5de697945abfece572c416928d2a6ac8a230105e6"
+            }
+          },
+          {
+            "content": "limite push_65 53",
+            "metadata": {
+              "title": "T",
+              "content_hash": "3d8b6df8e81bae87fea37e5f1e34d660a56b76bdf5feb5783a8c6ffeb4eb4c89"
+            }
+          },
+          {
+            "content": "limite push_65 54",
+            "metadata": {
+              "title": "T",
+              "content_hash": "b1585c4fa8baf52b7428f163bf9959350a64e28fa6efef7f0e03557b2c283a23"
+            }
+          },
+          {
+            "content": "limite push_65 55",
+            "metadata": {
+              "title": "T",
+              "content_hash": "d7f9ecd90093db38e85c578408fa677cdfea0418ae564e9c9af50fed3a7ff35e"
+            }
+          },
+          {
+            "content": "limite push_65 56",
+            "metadata": {
+              "title": "T",
+              "content_hash": "40a0772738c506de0b5aa564f94bbb2a0b1304d6685ef534b8e104bac1140c1b"
+            }
+          },
+          {
+            "content": "limite push_65 57",
+            "metadata": {
+              "title": "T",
+              "content_hash": "c807a4b938422084242102646ec9fc2e5beaa659a43a890ed0681b1c1ad137a8"
+            }
+          },
+          {
+            "content": "limite push_65 58",
+            "metadata": {
+              "title": "T",
+              "content_hash": "472f8e045db6999d00d53da15ef031702240e363cb89c59730588ab867e6e088"
+            }
+          },
+          {
+            "content": "limite push_65 59",
+            "metadata": {
+              "title": "T",
+              "content_hash": "454137a454e9b3391f85b2fe86b9739046da5e268d44390d9d422e216bb552e8"
+            }
+          },
+          {
+            "content": "limite push_65 60",
+            "metadata": {
+              "title": "T",
+              "content_hash": "45c6870bef9bca895821e4d00a48c12feb8dad121fcbf5d4ccb2ebb9e0d7f13f"
+            }
+          },
+          {
+            "content": "limite push_65 61",
+            "metadata": {
+              "title": "T",
+              "content_hash": "ebbf8eb22dd3c35568bb801cb1f5494685cfd15394a06c0491dfb28da23e51c8"
+            }
+          },
+          {
+            "content": "limite push_65 62",
+            "metadata": {
+              "title": "T",
+              "content_hash": "e601dd4273db02b58ccd9b11c60e41c4a673ac1ac3c71f750065b45ab07a0850"
+            }
+          },
+          {
+            "content": "limite push_65 63",
+            "metadata": {
+              "title": "T",
+              "content_hash": "3c702315c4681c16ca1c39edd2aacbb3c80eca4430063316f585cd69f9c8ef6a"
+            }
+          }
+        ],
+        "ctx": {
+          "field_type": "List",
+          "max_length": 64,
+          "actual_length": 65
+        }
+      }
+    ]
+  },
+  "synthetic": false,
+  "truncated": [
+    {
+      "chemin": "body.detail[].input",
+      "longueur_originale": 65
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/collections",
+    "body_summary": {
+      "name": "ragpy-probe-1790442018",
+      "description": "probe",
+      "visibility": "private"
+    }
+  },
+  "status": 201,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": 302360
+  },
+  "synthetic": false
+}

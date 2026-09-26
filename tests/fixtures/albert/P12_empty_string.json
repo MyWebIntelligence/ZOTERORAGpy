@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "body_summary": {
+      "model": "bge-m3",
+      "input": [
+        ""
+      ],
+      "encoding_format": "float"
+    }
+  },
+  "status": 400,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": "Input validation error: `inputs` cannot be empty"
+  },
+  "synthetic": false
+}

@@ -1,0 +1,75 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "ministral-3-8b-instruct-2512",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Écris 200 mots sur la Loire."
+        }
+      ],
+      "temperature": 0.1,
+      "max_completion_tokens": 5
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-9ff2e802aa801339",
+    "object": "chat.completion",
+    "created": 1790442014,
+    "model": "ministral-3-8b-instruct-2512",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "**La Loire, la",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "reasoning": null
+        },
+        "logprobs": null,
+        "finish_reason": "length",
+        "stop_reason": null,
+        "token_ids": null,
+        "routed_experts": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": "vllm-0.25.1-9e7220b0",
+    "usage": {
+      "prompt_tokens": 9,
+      "completion_tokens": 5,
+      "total_tokens": 14,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 7.855461550739793e-07,
+          "max": 7.855461550739793e-07
+        },
+        "kgCO2eq": {
+          "min": 3.991673525750022e-08,
+          "max": 3.991673525750022e-08
+        }
+      },
+      "impacts": {
+        "kWh": 7.855461550739793e-07,
+        "kgCO2eq": 3.991673525750022e-08
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "prompt_text": null,
+    "kv_transfer_params": null,
+    "metrics": null
+  },
+  "synthetic": false
+}

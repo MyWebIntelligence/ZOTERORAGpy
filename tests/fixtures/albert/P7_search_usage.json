@@ -1,0 +1,56 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/search",
+    "body_summary": {
+      "query": "loi",
+      "collection_ids": [
+        139226
+      ],
+      "method": "lexical",
+      "limit": 1
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "list",
+    "data": [
+      {
+        "method": "lexical",
+        "score": 9.186479,
+        "chunk": {
+          "object": "chunk",
+          "id": 0,
+          "collection_id": 139226,
+          "document_id": 3755256,
+          "content": "Loi du 30 décembre 1931 TENDANT A REPRIMER LA FRAUDE DANS LE COMMERCE DE L'ESSENCE DE TEREBENTHINE ET DES PRODUITS PROVENANT DES VEGETAUX RESINEUX - Article 2\nIl est interdit d'employer les dénominations d'essences de pins, de bois ou de résine, d'huiles de pins ou de résine, ainsi que toute dénomination contenant les mots \"terpène\" ou \"pinène\" et combinaisons, dérivés ou imitations de ces mots, chaque fois que leur emploi peut créer une confusion dans l'esprit de l'acheteur sur la nature de ces produits tels qu'ils seront déterminés par le décret prévu à l'article 4.",
+          "metadata": {
+            "category": "LOI",
+            "status": "VIGUEUR",
+            "start_date": "1932-01-01",
+            "end_date": "2999-01-01",
+            "number": "2",
+            "_doc_id": "LEGIARTI000006510643",
+            "_chunk_id": "LEGIARTI000006510643_1",
+            "_chunk_hash": "360685030c9b10a1"
+          },
+          "created": 1774194652
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "cost": 0.0,
+      "impacts": {
+        "kWh": 0.0,
+        "kgCO2eq": 0.0
+      }
+    }
+  },
+  "synthetic": false
+}

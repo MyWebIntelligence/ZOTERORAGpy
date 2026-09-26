@@ -1,0 +1,63 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/search",
+    "body_summary": {
+      "query": "txt",
+      "collection_ids": [
+        302360
+      ],
+      "method": "semantic",
+      "limit": 10,
+      "metadata_filters": {
+        "key": "content_hash",
+        "type": "eq",
+        "value": "9853edc0a8a434acd9842f2f9b8337f2a9443c1e4be017198da9f4722532c889"
+      }
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "list",
+    "data": [
+      {
+        "method": "semantic",
+        "score": 0.7630882,
+        "chunk": {
+          "object": "chunk",
+          "id": 7,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 7 : chunk de sonde RAGpy numéro 7.",
+          "metadata": {
+            "content_hash": "9853edc0a8a434acd9842f2f9b8337f2a9443c1e4be017198da9f4722532c889",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 7,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442020
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 1,
+      "completion_tokens": 0,
+      "total_tokens": 1,
+      "cost": 0.0,
+      "impacts": {
+        "kWh": 0.0,
+        "kgCO2eq": 0.0
+      }
+    }
+  },
+  "synthetic": false
+}

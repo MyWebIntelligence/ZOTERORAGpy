@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents",
+    "body_summary": {
+      "multipart": {
+        "name": "probe-doc-meta",
+        "collection_id": "302360",
+        "metadata": "{\"source\": \"probe\", \"annee\": 2026}"
+      }
+    }
+  },
+  "status": 201,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": 4934609
+  },
+  "synthetic": false
+}

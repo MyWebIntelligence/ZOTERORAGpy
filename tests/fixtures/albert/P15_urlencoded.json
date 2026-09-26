@@ -1,0 +1,20 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents",
+    "body_summary": {
+      "form": {
+        "name": "probe-doc-urlencoded",
+        "collection_id": "302360"
+      }
+    }
+  },
+  "status": 201,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": 4934608
+  },
+  "synthetic": false
+}

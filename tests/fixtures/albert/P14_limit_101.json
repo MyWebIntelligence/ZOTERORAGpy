@@ -1,0 +1,28 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/collections?limit=101",
+    "body_summary": null
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "less_than_equal",
+        "loc": [
+          "query",
+          "limit"
+        ],
+        "msg": "Input should be less than or equal to 100",
+        "input": "101",
+        "ctx": {
+          "le": 100
+        }
+      }
+    ]
+  },
+  "synthetic": false
+}

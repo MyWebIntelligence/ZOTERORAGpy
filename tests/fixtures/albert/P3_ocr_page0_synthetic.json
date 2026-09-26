@@ -1,0 +1,54 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/ocr",
+    "body_summary": {
+      "model": "mistral-ocr-2512",
+      "document": {
+        "type": "document_url",
+        "document_url": "data:application/pdf;base64,<PDF de 2 pages>"
+      },
+      "pages": [
+        0
+      ],
+      "include_image_base64": false
+    }
+  },
+  "status": 200,
+  "body": {
+    "id": "synthetic-ocr-0001",
+    "model": "mistral-ocr-2512",
+    "pages": [
+      {
+        "index": 0,
+        "markdown": "PAGE_ONE_7Q",
+        "images": [],
+        "dimensions": {
+          "dpi": 200,
+          "height": 2200,
+          "width": 1700
+        }
+      }
+    ],
+    "usage_info": {
+      "pages_processed": 1,
+      "doc_size_bytes": 1500
+    },
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "cost": 0.0,
+      "impacts": {
+        "kWh": 0.0,
+        "kgCO2eq": 0.0
+      },
+      "requests": 1
+    }
+  },
+  "source": "référence API Albert §9.2 (réponse /v1/ocr) et §3.3 (usage)",
+  "headers": {
+    "content-type": "application/json"
+  },
+  "synthetic": true
+}

@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/documents/4934607",
+    "body_summary": null
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "document",
+    "id": 4934607,
+    "name": "probe-doc",
+    "collection_id": 302360,
+    "created": 1790442020,
+    "chunks": 0,
+    "size": 960
+  },
+  "synthetic": false
+}

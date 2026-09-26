@@ -1,0 +1,215 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/search",
+    "body_summary": {
+      "query": "txt",
+      "collection_ids": [
+        302360
+      ],
+      "method": "semantic",
+      "limit": 10,
+      "metadata_filters": {
+        "operator": "or",
+        "filters": [
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "1fac5a92877517bf2ad67242305e9ff5c7a032c15fba472380e8dc70f4f69b79"
+          },
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "0248d1b92e5cd441c576cee5ed6e9e5319da5231a740506a35391070b33c6895"
+          },
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "266b60648681cc9bc35a5e2c22946d7381042f673a75c5b47def5c0c06018b79"
+          },
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "c9459d951ea5dea239b8ffaf035ef384f0cddaa345093d2c87d057bdf4fc9b3b"
+          },
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "0760ae52b2bec1676fa456a4e668bec654c2e700b666a6bd626993b2f5a8c7d4"
+          }
+        ]
+      }
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "missing",
+        "loc": [
+          "body",
+          "metadata_filters",
+          "ComparisonFilter",
+          "key"
+        ],
+        "msg": "Field required",
+        "input": {
+          "operator": "or",
+          "filters": [
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "1fac5a92877517bf2ad67242305e9ff5c7a032c15fba472380e8dc70f4f69b79"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "0248d1b92e5cd441c576cee5ed6e9e5319da5231a740506a35391070b33c6895"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "266b60648681cc9bc35a5e2c22946d7381042f673a75c5b47def5c0c06018b79"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "c9459d951ea5dea239b8ffaf035ef384f0cddaa345093d2c87d057bdf4fc9b3b"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "0760ae52b2bec1676fa456a4e668bec654c2e700b666a6bd626993b2f5a8c7d4"
+            }
+          ]
+        }
+      },
+      {
+        "type": "missing",
+        "loc": [
+          "body",
+          "metadata_filters",
+          "ComparisonFilter",
+          "type"
+        ],
+        "msg": "Field required",
+        "input": {
+          "operator": "or",
+          "filters": [
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "1fac5a92877517bf2ad67242305e9ff5c7a032c15fba472380e8dc70f4f69b79"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "0248d1b92e5cd441c576cee5ed6e9e5319da5231a740506a35391070b33c6895"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "266b60648681cc9bc35a5e2c22946d7381042f673a75c5b47def5c0c06018b79"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "c9459d951ea5dea239b8ffaf035ef384f0cddaa345093d2c87d057bdf4fc9b3b"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "0760ae52b2bec1676fa456a4e668bec654c2e700b666a6bd626993b2f5a8c7d4"
+            }
+          ]
+        }
+      },
+      {
+        "type": "missing",
+        "loc": [
+          "body",
+          "metadata_filters",
+          "ComparisonFilter",
+          "value"
+        ],
+        "msg": "Field required",
+        "input": {
+          "operator": "or",
+          "filters": [
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "1fac5a92877517bf2ad67242305e9ff5c7a032c15fba472380e8dc70f4f69b79"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "0248d1b92e5cd441c576cee5ed6e9e5319da5231a740506a35391070b33c6895"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "266b60648681cc9bc35a5e2c22946d7381042f673a75c5b47def5c0c06018b79"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "c9459d951ea5dea239b8ffaf035ef384f0cddaa345093d2c87d057bdf4fc9b3b"
+            },
+            {
+              "key": "content_hash",
+              "type": "eq",
+              "value": "0760ae52b2bec1676fa456a4e668bec654c2e700b666a6bd626993b2f5a8c7d4"
+            }
+          ]
+        }
+      },
+      {
+        "type": "too_long",
+        "loc": [
+          "body",
+          "metadata_filters",
+          "CompoundFilter",
+          "filters"
+        ],
+        "msg": "List should have at most 4 items after validation, not 5",
+        "input": [
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "1fac5a92877517bf2ad67242305e9ff5c7a032c15fba472380e8dc70f4f69b79"
+          },
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "0248d1b92e5cd441c576cee5ed6e9e5319da5231a740506a35391070b33c6895"
+          },
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "266b60648681cc9bc35a5e2c22946d7381042f673a75c5b47def5c0c06018b79"
+          },
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "c9459d951ea5dea239b8ffaf035ef384f0cddaa345093d2c87d057bdf4fc9b3b"
+          },
+          {
+            "key": "content_hash",
+            "type": "eq",
+            "value": "0760ae52b2bec1676fa456a4e668bec654c2e700b666a6bd626993b2f5a8c7d4"
+          }
+        ],
+        "ctx": {
+          "field_type": "List",
+          "max_length": 4,
+          "actual_length": 5
+        }
+      }
+    ]
+  },
+  "synthetic": false
+}

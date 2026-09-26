@@ -1,0 +1,714 @@
+{
+  "route": "POST /generate_zotero_notes_sse",
+  "fingerprint_legend": {
+    "fp:fc9778f2aa10": "server_env.OPENROUTER_API_KEY",
+    "fp:669b22cf2228": "server_env.ZOTERO_API_KEY",
+    "fp:cb7c9d34db28": "server_env.ZOTERO_USER_ID",
+    "fp:fba411cc5d41": "db.admin.openai_api_key",
+    "fp:a9908d50d22f": "db.member_keys.openai_api_key",
+    "fp:f2859cefcc3f": "db.member_keys.zotero_api_key",
+    "fp:0aef06c7da78": "db.member_keys.zotero_user_id"
+  },
+  "cases": [
+    {
+      "case": "admin:extended:default_model",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/generate_zotero_notes_sse",
+        "form": {
+          "session": "gsess-full",
+          "note_mode": "extended"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Starting note generation (with Zotero sync)...\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"item\": \"Golden article A\", \"status\": \"created\", \"message\": \"Processed 1/2: Golden article A\"}",
+        "{\"type\": \"progress\", \"current\": 2, \"total\": 2, \"item\": \"Golden article B\", \"status\": \"created\", \"message\": \"Processed 2/2: Golden article B\"}",
+        "{\"type\": \"complete\", \"message\": \"Note generation completed\", \"summary\": {\"created\": 2, \"exists\": 0, \"skipped\": 0, \"errors\": 0, \"mode\": \"api\"}}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "verify_api_key",
+          "kwargs": {
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "build_note_html_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article A",
+              "authors": "Doe, J.",
+              "date": "2024",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description"
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:462a8a9415dc"
+            },
+            "model": "<default>",
+            "mode": "extended",
+            "use_llm": true,
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "check_note_exists",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMA001",
+            "sentinel": "<!-- ragpy-note:golden -->",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "create_child_note",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMA001",
+            "note_html": {
+              "len": 18,
+              "sha": "sha:e817b4c4c858"
+            },
+            "tags": [
+              "ragpy-generated"
+            ],
+            "api_key": "fp:669b22cf2228",
+            "library_version": null
+          }
+        },
+        {
+          "fn": "build_note_html_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article B",
+              "authors": "Roe, R.",
+              "date": "2023",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description"
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:390d1eb18c9a"
+            },
+            "model": "<default>",
+            "mode": "extended",
+            "use_llm": true,
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "check_note_exists",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMB002",
+            "sentinel": "<!-- ragpy-note:golden -->",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "create_child_note",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMB002",
+            "note_html": {
+              "len": 18,
+              "sha": "sha:e817b4c4c858"
+            },
+            "tags": [
+              "ragpy-generated"
+            ],
+            "api_key": "fp:669b22cf2228",
+            "library_version": 7
+          }
+        }
+      ]
+    },
+    {
+      "case": "admin:short:gemini_slug",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/generate_zotero_notes_sse",
+        "form": {
+          "session": "gsess-full",
+          "note_mode": "short",
+          "model": "google/gemini-2.5-flash"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Starting note generation (with Zotero sync)...\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"item\": \"Golden article A\", \"status\": \"created\", \"message\": \"Processed 1/2: Golden article A\"}",
+        "{\"type\": \"progress\", \"current\": 2, \"total\": 2, \"item\": \"Golden article B\", \"status\": \"created\", \"message\": \"Processed 2/2: Golden article B\"}",
+        "{\"type\": \"complete\", \"message\": \"Note generation completed\", \"summary\": {\"created\": 2, \"exists\": 0, \"skipped\": 0, \"errors\": 0, \"mode\": \"api\"}}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "verify_api_key",
+          "kwargs": {
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "build_abstract_text_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article A",
+              "authors": "Doe, J.",
+              "date": "2024",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description"
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:462a8a9415dc"
+            },
+            "model": "google/gemini-2.5-flash",
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "update_item_abstract",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMA001",
+            "new_abstract": "Golden abstract.",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "build_abstract_text_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article B",
+              "authors": "Roe, R.",
+              "date": "2023",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description"
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:390d1eb18c9a"
+            },
+            "model": "google/gemini-2.5-flash",
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "update_item_abstract",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMB002",
+            "new_abstract": "Golden abstract.",
+            "api_key": "fp:669b22cf2228"
+          }
+        }
+      ]
+    },
+    {
+      "case": "admin:book:default_model",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/generate_zotero_notes_sse",
+        "form": {
+          "session": "gsess-full",
+          "note_mode": "book"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Starting note generation (with Zotero sync)...\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"item\": \"Golden article A\", \"status\": \"created\", \"message\": \"Processed 1/2: Golden article A\"}",
+        "{\"type\": \"progress\", \"current\": 2, \"total\": 2, \"item\": \"Golden article B\", \"status\": \"created\", \"message\": \"Processed 2/2: Golden article B\"}",
+        "{\"type\": \"complete\", \"message\": \"Note generation completed\", \"summary\": {\"created\": 2, \"exists\": 0, \"skipped\": 0, \"errors\": 0, \"mode\": \"api\"}}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "verify_api_key",
+          "kwargs": {
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "build_book_note_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article A",
+              "authors": "Doe, J.",
+              "date": "2024",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description",
+              "publisher": "",
+              "itemType": "book",
+              "numPages": ""
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:462a8a9415dc"
+            },
+            "model": "<default>",
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "check_note_exists",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMA001",
+            "sentinel": "<!-- ragpy-book:golden -->",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "create_child_note",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMA001",
+            "note_html": {
+              "len": 23,
+              "sha": "sha:6eba1c237893"
+            },
+            "tags": [
+              "ragpy-generated"
+            ],
+            "api_key": "fp:669b22cf2228",
+            "library_version": null
+          }
+        },
+        {
+          "fn": "build_book_note_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article B",
+              "authors": "Roe, R.",
+              "date": "2023",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description",
+              "publisher": "",
+              "itemType": "book",
+              "numPages": ""
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:390d1eb18c9a"
+            },
+            "model": "<default>",
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "check_note_exists",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMB002",
+            "sentinel": "<!-- ragpy-book:golden -->",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "create_child_note",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMB002",
+            "note_html": {
+              "len": 23,
+              "sha": "sha:6eba1c237893"
+            },
+            "tags": [
+              "ragpy-generated"
+            ],
+            "api_key": "fp:669b22cf2228",
+            "library_version": 7
+          }
+        }
+      ]
+    },
+    {
+      "case": "admin:legacy_true_flag",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/generate_zotero_notes_sse",
+        "form": {
+          "session": "gsess-full",
+          "note_mode": "true",
+          "model": "gpt-4o-mini"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Starting note generation (with Zotero sync)...\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"item\": \"Golden article A\", \"status\": \"created\", \"message\": \"Processed 1/2: Golden article A\"}",
+        "{\"type\": \"progress\", \"current\": 2, \"total\": 2, \"item\": \"Golden article B\", \"status\": \"created\", \"message\": \"Processed 2/2: Golden article B\"}",
+        "{\"type\": \"complete\", \"message\": \"Note generation completed\", \"summary\": {\"created\": 2, \"exists\": 0, \"skipped\": 0, \"errors\": 0, \"mode\": \"api\"}}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "verify_api_key",
+          "kwargs": {
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "build_note_html_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article A",
+              "authors": "Doe, J.",
+              "date": "2024",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description"
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:462a8a9415dc"
+            },
+            "model": "gpt-4o-mini",
+            "mode": "extended",
+            "use_llm": true,
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "check_note_exists",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMA001",
+            "sentinel": "<!-- ragpy-note:golden -->",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "create_child_note",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMA001",
+            "note_html": {
+              "len": 18,
+              "sha": "sha:e817b4c4c858"
+            },
+            "tags": [
+              "ragpy-generated"
+            ],
+            "api_key": "fp:669b22cf2228",
+            "library_version": null
+          }
+        },
+        {
+          "fn": "build_note_html_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article B",
+              "authors": "Roe, R.",
+              "date": "2023",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description"
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:390d1eb18c9a"
+            },
+            "model": "gpt-4o-mini",
+            "mode": "extended",
+            "use_llm": true,
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "check_note_exists",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMB002",
+            "sentinel": "<!-- ragpy-note:golden -->",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "create_child_note",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_key": "ITEMB002",
+            "note_html": {
+              "len": 18,
+              "sha": "sha:e817b4c4c858"
+            },
+            "tags": [
+              "ragpy-generated"
+            ],
+            "api_key": "fp:669b22cf2228",
+            "library_version": 7
+          }
+        }
+      ]
+    },
+    {
+      "case": "member_keys:extended:gpt-4o-mini",
+      "persona": "member_keys",
+      "request": {
+        "method": "POST",
+        "path": "/generate_zotero_notes_sse",
+        "form": {
+          "session": "gsess-full",
+          "note_mode": "extended",
+          "model": "gpt-4o-mini"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Starting note generation (with Zotero sync)...\"}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"item\": \"Golden article A\", \"status\": \"created\", \"message\": \"Processed 1/2: Golden article A\"}",
+        "{\"type\": \"progress\", \"current\": 2, \"total\": 2, \"item\": \"Golden article B\", \"status\": \"created\", \"message\": \"Processed 2/2: Golden article B\"}",
+        "{\"type\": \"complete\", \"message\": \"Note generation completed\", \"summary\": {\"created\": 2, \"exists\": 0, \"skipped\": 0, \"errors\": 0, \"mode\": \"api\"}}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "verify_api_key",
+          "kwargs": {
+            "api_key": "fp:f2859cefcc3f"
+          }
+        },
+        {
+          "fn": "build_note_html_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article A",
+              "authors": "Doe, J.",
+              "date": "2024",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description"
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:462a8a9415dc"
+            },
+            "model": "gpt-4o-mini",
+            "mode": "extended",
+            "use_llm": true,
+            "openai_api_key": "fp:a9908d50d22f",
+            "openrouter_api_key": null
+          }
+        },
+        {
+          "fn": "check_note_exists",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:0aef06c7da78",
+            "item_key": "ITEMA001",
+            "sentinel": "<!-- ragpy-note:golden -->",
+            "api_key": "fp:f2859cefcc3f"
+          }
+        },
+        {
+          "fn": "create_child_note",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:0aef06c7da78",
+            "item_key": "ITEMA001",
+            "note_html": {
+              "len": 18,
+              "sha": "sha:e817b4c4c858"
+            },
+            "tags": [
+              "ragpy-generated"
+            ],
+            "api_key": "fp:f2859cefcc3f",
+            "library_version": null
+          }
+        },
+        {
+          "fn": "build_note_html_async",
+          "kwargs": {
+            "metadata": {
+              "title": "Golden article B",
+              "authors": "Roe, R.",
+              "date": "2023",
+              "abstract": "",
+              "doi": "",
+              "url": "",
+              "language": "fr",
+              "problematique": "Golden Project — Golden description"
+            },
+            "text_content": {
+              "len": 24,
+              "sha": "sha:390d1eb18c9a"
+            },
+            "model": "gpt-4o-mini",
+            "mode": "extended",
+            "use_llm": true,
+            "openai_api_key": "fp:a9908d50d22f",
+            "openrouter_api_key": null
+          }
+        },
+        {
+          "fn": "check_note_exists",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:0aef06c7da78",
+            "item_key": "ITEMB002",
+            "sentinel": "<!-- ragpy-note:golden -->",
+            "api_key": "fp:f2859cefcc3f"
+          }
+        },
+        {
+          "fn": "create_child_note",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:0aef06c7da78",
+            "item_key": "ITEMB002",
+            "note_html": {
+              "len": 18,
+              "sha": "sha:e817b4c4c858"
+            },
+            "tags": [
+              "ragpy-generated"
+            ],
+            "api_key": "fp:f2859cefcc3f",
+            "library_version": 7
+          }
+        }
+      ]
+    },
+    {
+      "case": "member_keys:extended:gemini_slug",
+      "persona": "member_keys",
+      "request": {
+        "method": "POST",
+        "path": "/generate_zotero_notes_sse",
+        "form": {
+          "session": "gsess-full",
+          "note_mode": "extended",
+          "model": "google/gemini-2.5-flash"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"Clé API OpenRouter requise pour ce modèle. Configurez-la dans Paramètres > Mes Identifiants.\", \"credential_required\": \"openrouter_api_key\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "member_nokeys:extended:default_model",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/generate_zotero_notes_sse",
+        "form": {
+          "session": "gsess-full",
+          "note_mode": "extended"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"Clé API OpenAI requise. Configurez-la dans Paramètres > Mes Identifiants.\", \"credential_required\": \"openai_api_key\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "member_nokeys:extended:gemini_slug",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/generate_zotero_notes_sse",
+        "form": {
+          "session": "gsess-full",
+          "note_mode": "extended",
+          "model": "google/gemini-2.5-flash"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"Clé API OpenRouter requise pour ce modèle. Configurez-la dans Paramètres > Mes Identifiants.\", \"credential_required\": \"openrouter_api_key\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "admin:missing_output_csv",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/generate_zotero_notes_sse",
+        "form": {
+          "session": "gsess-empty",
+          "note_mode": "extended"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"output.csv not found. Please complete the extraction step first.\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    }
+  ]
+}

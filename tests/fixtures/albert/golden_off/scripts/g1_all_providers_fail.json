@@ -1,0 +1,55 @@
+{
+  "scenario": "all_providers_fail",
+  "result_type": null,
+  "result": null,
+  "exception": {
+    "type": "OCRExtractionError",
+    "message": "Impossible d'extraire le texte du document. Configurez MISTRAL_API_KEY pour activer l'OCR Markdown (le fallback OpenAI est désactivé par défaut ; activez OCR_ENABLE_OPENAI_FALLBACK=1 pour l'autoriser)."
+  },
+  "calls": [
+    [
+      "_extract_text_with_mistral",
+      "<TMP>/book_unreadable.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<SYSTMP>/ragpy_part_p1-1_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p1-1_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<SYSTMP>/ragpy_part_p2-2_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p2-2_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<SYSTMP>/ragpy_part_p3-3_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p3-3_<RND>.pdf",
+      null
+    ],
+    [
+      "_local_ocr_available"
+    ],
+    [
+      "_extract_text_with_legacy_pdf",
+      "<TMP>/book_unreadable.pdf",
+      null
+    ]
+  ],
+  "sleeps": []
+}

@@ -1,0 +1,112 @@
+{
+  "route": "POST /api/projects/{project_id}/filter_citations_bg",
+  "fingerprint_legend": {},
+  "cases": [
+    {
+      "case": "admin_openai",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/2/filter_citations_bg",
+        "form": {
+          "session_id": 2,
+          "batch_size": 5
+        }
+      },
+      "status": 200,
+      "body": {
+        "task_id": 1,
+        "message": "Background filtering started for 2 citations",
+        "already_processed": 0,
+        "remaining": 2
+      },
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "background_task_manager.start_task",
+          "task_id": 1
+        }
+      ]
+    },
+    {
+      "case": "admin_openrouter_slug",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/3/filter_citations_bg",
+        "form": {
+          "session_id": 3,
+          "batch_size": 5
+        }
+      },
+      "status": 200,
+      "body": {
+        "task_id": 2,
+        "message": "Background filtering started for 2 citations",
+        "already_processed": 0,
+        "remaining": 2
+      },
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "background_task_manager.start_task",
+          "task_id": 2
+        }
+      ]
+    },
+    {
+      "case": "nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/4/filter_citations_bg",
+        "form": {
+          "session_id": 4,
+          "batch_size": 5
+        }
+      },
+      "status": 400,
+      "body": {
+        "detail": "Clé API OpenAI requise. Configurez-la dans Paramètres > Mes Identifiants."
+      },
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "openrouter_slug_nokey_member_nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/5/filter_citations_bg",
+        "form": {
+          "session_id": 5,
+          "batch_size": 5
+        }
+      },
+      "status": 400,
+      "body": {
+        "detail": "Clé API OpenRouter requise pour ce modèle. Configurez-la dans Paramètres > Mes Identifiants."
+      },
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "openrouter_slug_nokey_member_keys",
+      "persona": "member_keys",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/6/filter_citations_bg",
+        "form": {
+          "session_id": 6,
+          "batch_size": 5
+        }
+      },
+      "status": 400,
+      "body": {
+        "detail": "Clé API OpenRouter requise pour ce modèle. Configurez-la dans Paramètres > Mes Identifiants."
+      },
+      "server_exceptions": [],
+      "calls": []
+    }
+  ]
+}

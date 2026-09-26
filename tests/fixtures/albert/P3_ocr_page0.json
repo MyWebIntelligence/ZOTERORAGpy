@@ -1,0 +1,25 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/ocr",
+    "body_summary": {
+      "model": "mistral-ocr-2512",
+      "document": {
+        "type": "document_url",
+        "document_url": "data:application/pdf;base64,<1440 caractères base64>"
+      },
+      "pages": [
+        0
+      ],
+      "include_image_base64": false
+    }
+  },
+  "status": 404,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": "Model mistral-ocr-2512 not found."
+  },
+  "synthetic": false
+}

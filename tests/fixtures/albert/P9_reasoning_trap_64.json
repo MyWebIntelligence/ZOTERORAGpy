@@ -1,0 +1,72 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "gpt-oss-120b",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Combien font 17*23 ? Réponds par le nombre seul."
+        }
+      ],
+      "max_tokens": 64
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-95031613f04bf05a",
+    "object": "chat.completion",
+    "created": 1790442014,
+    "model": "gpt-oss-120b",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "tool_calls": [],
+          "reasoning": "User asks: \"Combien font 17*23 ? Réponds par le nombre seul.\" They want just the number, no extra text. 17*23 = 391? Let's calculate: 20*23=460, minus 3*23=69 => 460-69="
+        },
+        "logprobs": null,
+        "finish_reason": "length",
+        "stop_reason": null,
+        "token_ids": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": null,
+    "usage": {
+      "prompt_tokens": 16,
+      "completion_tokens": 0,
+      "total_tokens": 16,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 9.204117199960278e-06,
+          "max": 9.204117199960278e-06
+        },
+        "kgCO2eq": {
+          "min": 5.629770816841995e-07,
+          "max": 5.629770816841995e-07
+        }
+      },
+      "impacts": {
+        "kWh": 9.204117199960278e-06,
+        "kgCO2eq": 5.629770816841995e-07
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "kv_transfer_params": null
+  },
+  "synthetic": false
+}

@@ -1,0 +1,370 @@
+[
+  {
+    "case": "admin_no_personal",
+    "is_admin": true,
+    "required_keys": null,
+    "env": {
+      "OPENAI_API_KEY": {
+        "sha12": "b12105309256",
+        "origin": "env"
+      },
+      "OPENROUTER_API_KEY": {
+        "sha12": "fc9778f2aa10",
+        "origin": "env"
+      },
+      "OPENROUTER_DEFAULT_MODEL": {
+        "sha12": "521014770215",
+        "origin": "env"
+      },
+      "MISTRAL_API_KEY": {
+        "sha12": "51dfa8793650",
+        "origin": "env"
+      },
+      "MISTRAL_OCR_MODEL": {
+        "sha12": "d9cea89a6539",
+        "origin": "env"
+      },
+      "MISTRAL_API_BASE_URL": {
+        "sha12": "ab94d285556a",
+        "origin": "env"
+      },
+      "PINECONE_API_KEY": {
+        "sha12": "f6459adcb50e",
+        "origin": "env"
+      },
+      "PINECONE_ENV": {
+        "sha12": "4ee04614f91e",
+        "origin": "env"
+      },
+      "WEAVIATE_API_KEY": {
+        "sha12": "fc08dd1f1315",
+        "origin": "env"
+      },
+      "WEAVIATE_URL": {
+        "sha12": "c71cd5754a97",
+        "origin": "env"
+      },
+      "QDRANT_API_KEY": {
+        "sha12": "65eb30838bd5",
+        "origin": "env"
+      },
+      "QDRANT_URL": {
+        "sha12": "023284cfdd83",
+        "origin": "env"
+      },
+      "ZOTERO_API_KEY": {
+        "sha12": "669b22cf2228",
+        "origin": "env"
+      },
+      "ZOTERO_USER_ID": {
+        "sha12": "cb7c9d34db28",
+        "origin": "env"
+      },
+      "ZOTERO_GROUP_ID": {
+        "sha12": "a5d7b6b0f6ed",
+        "origin": "env"
+      }
+    },
+    "error": null
+  },
+  {
+    "case": "admin_with_personal",
+    "is_admin": true,
+    "required_keys": null,
+    "env": {
+      "OPENAI_API_KEY": {
+        "sha12": "00d47df64a8b",
+        "origin": "user"
+      },
+      "OPENROUTER_API_KEY": {
+        "sha12": "fc9778f2aa10",
+        "origin": "env"
+      },
+      "OPENROUTER_DEFAULT_MODEL": {
+        "sha12": "521014770215",
+        "origin": "env"
+      },
+      "MISTRAL_API_KEY": {
+        "sha12": "51dfa8793650",
+        "origin": "env"
+      },
+      "MISTRAL_OCR_MODEL": {
+        "sha12": "d9cea89a6539",
+        "origin": "env"
+      },
+      "MISTRAL_API_BASE_URL": {
+        "sha12": "369f42c61e56",
+        "origin": "derived"
+      },
+      "PINECONE_API_KEY": {
+        "sha12": "f6459adcb50e",
+        "origin": "env"
+      },
+      "PINECONE_ENV": {
+        "sha12": "4ee04614f91e",
+        "origin": "env"
+      },
+      "WEAVIATE_API_KEY": {
+        "sha12": "fc08dd1f1315",
+        "origin": "env"
+      },
+      "WEAVIATE_URL": {
+        "sha12": "c71cd5754a97",
+        "origin": "env"
+      },
+      "QDRANT_API_KEY": {
+        "sha12": "65eb30838bd5",
+        "origin": "env"
+      },
+      "QDRANT_URL": {
+        "sha12": "e13b83670a7c",
+        "origin": "user"
+      },
+      "ZOTERO_API_KEY": {
+        "sha12": "669b22cf2228",
+        "origin": "env"
+      },
+      "ZOTERO_USER_ID": {
+        "sha12": "cb7c9d34db28",
+        "origin": "env"
+      },
+      "ZOTERO_GROUP_ID": {
+        "sha12": "a5d7b6b0f6ed",
+        "origin": "env"
+      }
+    },
+    "error": null
+  },
+  {
+    "case": "admin_required_present",
+    "is_admin": true,
+    "required_keys": [
+      "openai_api_key",
+      "mistral_api_key"
+    ],
+    "env": {
+      "OPENAI_API_KEY": {
+        "sha12": "b12105309256",
+        "origin": "env"
+      },
+      "OPENROUTER_API_KEY": {
+        "sha12": "fc9778f2aa10",
+        "origin": "env"
+      },
+      "OPENROUTER_DEFAULT_MODEL": {
+        "sha12": "521014770215",
+        "origin": "env"
+      },
+      "MISTRAL_API_KEY": {
+        "sha12": "51dfa8793650",
+        "origin": "env"
+      },
+      "MISTRAL_OCR_MODEL": {
+        "sha12": "d9cea89a6539",
+        "origin": "env"
+      },
+      "MISTRAL_API_BASE_URL": {
+        "sha12": "ab94d285556a",
+        "origin": "env"
+      },
+      "PINECONE_API_KEY": {
+        "sha12": "f6459adcb50e",
+        "origin": "env"
+      },
+      "PINECONE_ENV": {
+        "sha12": "4ee04614f91e",
+        "origin": "env"
+      },
+      "WEAVIATE_API_KEY": {
+        "sha12": "fc08dd1f1315",
+        "origin": "env"
+      },
+      "WEAVIATE_URL": {
+        "sha12": "c71cd5754a97",
+        "origin": "env"
+      },
+      "QDRANT_API_KEY": {
+        "sha12": "65eb30838bd5",
+        "origin": "env"
+      },
+      "QDRANT_URL": {
+        "sha12": "023284cfdd83",
+        "origin": "env"
+      },
+      "ZOTERO_API_KEY": {
+        "sha12": "669b22cf2228",
+        "origin": "env"
+      },
+      "ZOTERO_USER_ID": {
+        "sha12": "cb7c9d34db28",
+        "origin": "env"
+      },
+      "ZOTERO_GROUP_ID": {
+        "sha12": "a5d7b6b0f6ed",
+        "origin": "env"
+      }
+    },
+    "error": null
+  },
+  {
+    "case": "admin_albert_key_only",
+    "is_admin": true,
+    "required_keys": null,
+    "env": {
+      "OPENAI_API_KEY": {
+        "sha12": "b12105309256",
+        "origin": "env"
+      },
+      "OPENROUTER_API_KEY": {
+        "sha12": "fc9778f2aa10",
+        "origin": "env"
+      },
+      "OPENROUTER_DEFAULT_MODEL": {
+        "sha12": "521014770215",
+        "origin": "env"
+      },
+      "MISTRAL_API_KEY": {
+        "sha12": "51dfa8793650",
+        "origin": "env"
+      },
+      "MISTRAL_OCR_MODEL": {
+        "sha12": "d9cea89a6539",
+        "origin": "env"
+      },
+      "MISTRAL_API_BASE_URL": {
+        "sha12": "ab94d285556a",
+        "origin": "env"
+      },
+      "PINECONE_API_KEY": {
+        "sha12": "f6459adcb50e",
+        "origin": "env"
+      },
+      "PINECONE_ENV": {
+        "sha12": "4ee04614f91e",
+        "origin": "env"
+      },
+      "WEAVIATE_API_KEY": {
+        "sha12": "fc08dd1f1315",
+        "origin": "env"
+      },
+      "WEAVIATE_URL": {
+        "sha12": "c71cd5754a97",
+        "origin": "env"
+      },
+      "QDRANT_API_KEY": {
+        "sha12": "65eb30838bd5",
+        "origin": "env"
+      },
+      "QDRANT_URL": {
+        "sha12": "023284cfdd83",
+        "origin": "env"
+      },
+      "ZOTERO_API_KEY": {
+        "sha12": "669b22cf2228",
+        "origin": "env"
+      },
+      "ZOTERO_USER_ID": {
+        "sha12": "cb7c9d34db28",
+        "origin": "env"
+      },
+      "ZOTERO_GROUP_ID": {
+        "sha12": "a5d7b6b0f6ed",
+        "origin": "env"
+      }
+    },
+    "error": null
+  },
+  {
+    "case": "nonadmin_no_personal",
+    "is_admin": false,
+    "required_keys": null,
+    "env": {
+      "OPENAI_API_KEY": null,
+      "OPENROUTER_API_KEY": null,
+      "OPENROUTER_DEFAULT_MODEL": null,
+      "MISTRAL_API_KEY": null,
+      "MISTRAL_OCR_MODEL": null,
+      "MISTRAL_API_BASE_URL": null,
+      "PINECONE_API_KEY": null,
+      "PINECONE_ENV": null,
+      "WEAVIATE_API_KEY": null,
+      "WEAVIATE_URL": null,
+      "QDRANT_API_KEY": null,
+      "QDRANT_URL": null,
+      "ZOTERO_API_KEY": null,
+      "ZOTERO_USER_ID": null,
+      "ZOTERO_GROUP_ID": null
+    },
+    "error": null
+  },
+  {
+    "case": "nonadmin_with_personal",
+    "is_admin": false,
+    "required_keys": null,
+    "env": {
+      "OPENAI_API_KEY": {
+        "sha12": "2d19cd5345be",
+        "origin": "user"
+      },
+      "OPENROUTER_API_KEY": null,
+      "OPENROUTER_DEFAULT_MODEL": null,
+      "MISTRAL_API_KEY": null,
+      "MISTRAL_OCR_MODEL": null,
+      "MISTRAL_API_BASE_URL": null,
+      "PINECONE_API_KEY": null,
+      "PINECONE_ENV": null,
+      "WEAVIATE_API_KEY": null,
+      "WEAVIATE_URL": null,
+      "QDRANT_API_KEY": null,
+      "QDRANT_URL": null,
+      "ZOTERO_API_KEY": {
+        "sha12": "1ed04f17c20d",
+        "origin": "user"
+      },
+      "ZOTERO_USER_ID": {
+        "sha12": "c4a215e1b365",
+        "origin": "user"
+      },
+      "ZOTERO_GROUP_ID": null
+    },
+    "error": null
+  },
+  {
+    "case": "nonadmin_albert_key_only",
+    "is_admin": false,
+    "required_keys": null,
+    "env": {
+      "OPENAI_API_KEY": null,
+      "OPENROUTER_API_KEY": null,
+      "OPENROUTER_DEFAULT_MODEL": null,
+      "MISTRAL_API_KEY": null,
+      "MISTRAL_OCR_MODEL": null,
+      "MISTRAL_API_BASE_URL": null,
+      "PINECONE_API_KEY": null,
+      "PINECONE_ENV": null,
+      "WEAVIATE_API_KEY": null,
+      "WEAVIATE_URL": null,
+      "QDRANT_API_KEY": null,
+      "QDRANT_URL": null,
+      "ZOTERO_API_KEY": null,
+      "ZOTERO_USER_ID": null,
+      "ZOTERO_GROUP_ID": null
+    },
+    "error": null
+  },
+  {
+    "case": "nonadmin_required_missing",
+    "is_admin": false,
+    "required_keys": [
+      "openai_api_key",
+      "mistral_api_key"
+    ],
+    "env": null,
+    "error": {
+      "type": "CredentialMissingError",
+      "credential_key": "mistral_api_key",
+      "is_admin": false,
+      "message": "Clé API Mistral requise pour l'OCR des PDFs. Configurez-la dans Paramètres > Mes Identifiants."
+    }
+  }
+]

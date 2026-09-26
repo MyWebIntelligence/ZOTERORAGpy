@@ -1,0 +1,53 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents/4934612/chunks",
+    "body_summary": {
+      "chunks": [
+        {
+          "content": "Quota 0 : phrase distincte pour la mesure d'usage.",
+          "metadata": {
+            "i": 0
+          }
+        },
+        {
+          "content": "Quota 1 : phrase distincte pour la mesure d'usage.",
+          "metadata": {
+            "i": 1
+          }
+        },
+        {
+          "content": "Quota 2 : phrase distincte pour la mesure d'usage.",
+          "metadata": {
+            "i": 2
+          }
+        },
+        "… (+61 éléments, 64 au total)"
+      ]
+    }
+  },
+  "status": 201,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "document_id": 4934612,
+    "ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  "synthetic": false,
+  "truncated": [
+    {
+      "chemin": "body.ids",
+      "longueur_originale": 64
+    }
+  ]
+}

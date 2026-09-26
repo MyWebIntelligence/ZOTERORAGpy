@@ -1,0 +1,42 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents/4934610/chunks",
+    "body_summary": {
+      "chunks": [
+        {
+          "content": "limite meta_key_256 0",
+          "metadata": {
+            "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk": 1,
+            "content_hash": "97b96f4f07cd8e083274abf51c230a7c5ff9e50324276da2fb71577829a5caf1"
+          }
+        }
+      ]
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "string_too_long",
+        "loc": [
+          "body",
+          "chunks",
+          0,
+          "metadata",
+          "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+          "[key]"
+        ],
+        "msg": "String should have at most 255 characters",
+        "input": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+        "ctx": {
+          "max_length": 255
+        }
+      }
+    ]
+  },
+  "synthetic": false
+}

@@ -1,0 +1,24 @@
+{
+  "scenario": "legacy_sparse_openai_key_set",
+  "result_type": "OCRResult",
+  "result": {
+    "text": "m1x0 m1x1 m1x2 m1x3 m1x4 m1x5 m1x6 m1x7 m1x8 m1x9\nm1x10 m1x11 m1x12 m1x13 m1x14 m1x15 m1x16 m1x17 m1x18 m1x19\nm1x20 m1x21 m1x22 m1x23 m1x24 m1x25 m1x26 m1x27 m1x28 m1x29\nm1x30 m1x31 m1x32 m1x33 m1x34 m1x35 m1x36 m1x37 m1x38 m1x39\nm1x40 m1x41 m1x42 m1x43 m1x44 m1x45 m1x46 m1x47 m1x48 m1x49\nm1x50 m1x51 m1x52 m1x53 m1x54\n\nm2x0 m2x1 m2x2 m2x3 m2x4 m2x5 m2x6 m2x7 m2x8 m2x9\nm2x10 m2x11 m2x12 m2x13 m2x14 m2x15 m2x16 m2x17 m2x18 m2x19\nm2x20 m2x21 m2x22 m2x23 m2x24 m2x25 m2x26 m2x27 m2x28 m2x29\nm2x30 m2x31 m2x32 m2x33 m2x34 m2x35 m2x36 m2x37 m2x38 m2x39\nm2x40 m2x41 m2x42 m2x43 m2x44 m2x45 m2x46 m2x47 m2x48 m2x49\nm2x50 m2x51 m2x52 m2x53 m2x54",
+    "provider": "legacy",
+    "partial": true,
+    "pages_done": 2,
+    "pages_total": 2,
+    "error": "OCR suspect (legacy) : 320 car./page sur 2 pages (< 500) — extraction probablement incomplète."
+  },
+  "exception": null,
+  "calls": [
+    [
+      "_local_ocr_available"
+    ],
+    [
+      "_extract_text_with_legacy_pdf",
+      "<TMP>/scan_sparse.pdf",
+      null
+    ]
+  ],
+  "sleeps": []
+}

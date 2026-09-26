@@ -1,0 +1,77 @@
+{
+  "scenario": "upload_without_id_falls_back_to_legacy",
+  "result_type": "OCRResult",
+  "result": {
+    "text": "terme1x0 terme1x1 terme1x2 terme1x3 terme1x4 terme1x5 terme1x6 terme1x7 terme1x8 terme1x9\nterme1x10 terme1x11 terme1x12 terme1x13 terme1x14 terme1x15 terme1x16 terme1x17 terme1x18 terme1x19\nterme1x20 terme1x21 terme1x22 terme1x23 terme1x24 terme1x25 terme1x26 terme1x27 terme1x28 terme1x29\nterme1x30 terme1x31 terme1x32 terme1x33 terme1x34 terme1x35 terme1x36 terme1x37 terme1x38 terme1x39\nterme1x40 terme1x41 terme1x42 terme1x43 terme1x44 terme1x45 terme1x46 terme1x47 terme1x48 terme1x49\nterme1x50 terme1x51 terme1x52 terme1x53 terme1x54 terme1x55 terme1x56 terme1x57 terme1x58 terme1x59\nterme1x60 terme1x61 terme1x62 terme1x63 terme1x64 terme1x65 terme1x66 terme1x67 terme1x68 terme1x69\nterme1x70 terme1x71 terme1x72 terme1x73 terme1x74 terme1x75 terme1x76 terme1x77 terme1x78 terme1x79\nterme1x80 terme1x81 terme1x82 terme1x83 terme1x84 terme1x85 terme1x86 terme1x87 terme1x88 terme1x89\nterme1x90 terme1x91 terme1x92 terme1x93 terme1x94 terme1x95 terme1x96 terme1x97 terme1x98 terme1x99\n\nterme2x0 terme2x1 terme2x2 terme2x3 terme2x4 terme2x5 terme2x6 terme2x7 terme2x8 terme2x9\nterme2x10 terme2x11 terme2x12 terme2x13 terme2x14 terme2x15 terme2x16 terme2x17 terme2x18 terme2x19\nterme2x20 terme2x21 terme2x22 terme2x23 terme2x24 terme2x25 terme2x26 terme2x27 terme2x28 terme2x29\nterme2x30 terme2x31 terme2x32 terme2x33 terme2x34 terme2x35 terme2x36 terme2x37 terme2x38 terme2x39\nterme2x40 terme2x41 terme2x42 terme2x43 terme2x44 terme2x45 terme2x46 terme2x47 terme2x48 terme2x49\nterme2x50 terme2x51 terme2x52 terme2x53 terme2x54 terme2x55 terme2x56 terme2x57 terme2x58 terme2x59\nterme2x60 terme2x61 terme2x62 terme2x63 terme2x64 terme2x65 terme2x66 terme2x67 terme2x68 terme2x69\nterme2x70 terme2x71 terme2x72 terme2x73 terme2x74 terme2x75 terme2x76 terme2x77 terme2x78 terme2x79\nterme2x80 terme2x81 terme2x82 terme2x83 terme2x84 terme2x85 terme2x86 terme2x87 terme2x88 terme2x89\nterme2x90 terme2x91 terme2x92 terme2x93 terme2x94 terme2x95 terme2x96 terme2x97 terme2x98 terme2x99",
+    "provider": "legacy",
+    "partial": false,
+    "pages_done": 2,
+    "pages_total": 2,
+    "error": null
+  },
+  "exception": null,
+  "calls": [
+    [
+      "_extract_text_with_mistral",
+      "<TMP>/upload_without_id_falls_back_to_legacy/document.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<TMP>/upload_without_id_falls_back_to_legacy/document.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<TMP>/upload_without_id_falls_back_to_legacy/document.pdf",
+      null
+    ],
+    [
+      "_local_ocr_available"
+    ],
+    [
+      "_extract_text_with_legacy_pdf",
+      "<TMP>/upload_without_id_falls_back_to_legacy/document.pdf",
+      null
+    ]
+  ],
+  "sleeps": [],
+  "max_pages": null,
+  "http": {
+    "sessions": 1,
+    "requests": [
+      {
+        "session": 1,
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/files",
+        "kwargs": {
+          "data": {
+            "purpose": "ocr"
+          },
+          "files": {
+            "file": [
+              "document.pdf",
+              "application/pdf"
+            ]
+          },
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3"
+          },
+          "timeout": 300
+        },
+        "answer": {
+          "status": 200,
+          "body": {
+            "object": "file",
+            "purpose": "ocr"
+          }
+        }
+      }
+    ],
+    "unconsumed": {
+      "uploads": [],
+      "ocr": [],
+      "deletes": []
+    }
+  }
+}

@@ -1,0 +1,250 @@
+{
+  "route": "POST /process_dataframe",
+  "fingerprint_legend": {
+    "fp:fc9778f2aa10": "server_env.OPENROUTER_API_KEY",
+    "fp:521014770215": "server_env.OPENROUTER_DEFAULT_MODEL",
+    "fp:51dfa8793650": "server_env.MISTRAL_API_KEY",
+    "fp:36bd200a1674": "server_env.MISTRAL_OCR_MODEL",
+    "fp:af36806dfb00": "server_env.MISTRAL_API_BASE_URL",
+    "fp:f6459adcb50e": "server_env.PINECONE_API_KEY",
+    "fp:4ee04614f91e": "server_env.PINECONE_ENV",
+    "fp:fc08dd1f1315": "server_env.WEAVIATE_API_KEY",
+    "fp:c71cd5754a97": "server_env.WEAVIATE_URL",
+    "fp:65eb30838bd5": "server_env.QDRANT_API_KEY",
+    "fp:023284cfdd83": "server_env.QDRANT_URL",
+    "fp:669b22cf2228": "server_env.ZOTERO_API_KEY",
+    "fp:cb7c9d34db28": "server_env.ZOTERO_USER_ID",
+    "fp:fba411cc5d41": "db.admin.openai_api_key",
+    "fp:a9908d50d22f": "db.member_keys.openai_api_key",
+    "fp:66565bd23150": "db.member_keys.mistral_api_key",
+    "fp:5914d90d87b1": "db.member_keys.pinecone_api_key",
+    "fp:f2859cefcc3f": "db.member_keys.zotero_api_key",
+    "fp:0aef06c7da78": "db.member_keys.zotero_user_id"
+  },
+  "cases": [
+    {
+      "case": "admin",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/process_dataframe",
+        "form": {
+          "path": "gsess-fresh-admin"
+        }
+      },
+      "status": 200,
+      "body": {
+        "csv": "<TMP>/uploads/gsess-fresh-admin/output.csv",
+        "preview": [
+          {
+            "itemKey": "ITEMA001",
+            "title": "Golden article A",
+            "authors": "Doe, J.",
+            "date": "2024",
+            "texteocr": "Texte OCR du document A.",
+            "texteocr_provider": "mistral"
+          },
+          {
+            "itemKey": "ITEMB002",
+            "title": "Golden article B",
+            "authors": "Roe, R.",
+            "date": "2023",
+            "texteocr": "Texte OCR du document B.",
+            "texteocr_provider": "mistral"
+          }
+        ]
+      },
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_tracked_subprocess",
+          "argv": [
+            "python3",
+            "<RAGPY>/scripts/rad_dataframe.py",
+            "--json",
+            "<TMP>/uploads/gsess-fresh-admin/biblio.json",
+            "--dir",
+            "<TMP>/uploads/gsess-fresh-admin",
+            "--output",
+            "<TMP>/uploads/gsess-fresh-admin/output.csv"
+          ],
+          "session_folder": "gsess-fresh-admin",
+          "timeout": 1800,
+          "env": {
+            "OPENAI_API_KEY": "fp:fba411cc5d41",
+            "OPENROUTER_API_KEY": "fp:fc9778f2aa10",
+            "OPENROUTER_DEFAULT_MODEL": "fp:521014770215",
+            "MISTRAL_API_KEY": "fp:51dfa8793650",
+            "MISTRAL_OCR_MODEL": "fp:36bd200a1674",
+            "MISTRAL_API_BASE_URL": "fp:af36806dfb00",
+            "PINECONE_API_KEY": "fp:f6459adcb50e",
+            "PINECONE_ENV": "fp:4ee04614f91e",
+            "WEAVIATE_API_KEY": "fp:fc08dd1f1315",
+            "WEAVIATE_URL": "fp:c71cd5754a97",
+            "QDRANT_API_KEY": "fp:65eb30838bd5",
+            "QDRANT_URL": "fp:023284cfdd83",
+            "ZOTERO_API_KEY": "fp:669b22cf2228",
+            "ZOTERO_USER_ID": "fp:cb7c9d34db28",
+            "ZOTERO_GROUP_ID": null
+          }
+        }
+      ]
+    },
+    {
+      "case": "member_keys",
+      "persona": "member_keys",
+      "request": {
+        "method": "POST",
+        "path": "/process_dataframe",
+        "form": {
+          "path": "gsess-fresh-member-keys"
+        }
+      },
+      "status": 200,
+      "body": {
+        "csv": "<TMP>/uploads/gsess-fresh-member-keys/output.csv",
+        "preview": [
+          {
+            "itemKey": "ITEMA001",
+            "title": "Golden article A",
+            "authors": "Doe, J.",
+            "date": "2024",
+            "texteocr": "Texte OCR du document A.",
+            "texteocr_provider": "mistral"
+          },
+          {
+            "itemKey": "ITEMB002",
+            "title": "Golden article B",
+            "authors": "Roe, R.",
+            "date": "2023",
+            "texteocr": "Texte OCR du document B.",
+            "texteocr_provider": "mistral"
+          }
+        ]
+      },
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_tracked_subprocess",
+          "argv": [
+            "python3",
+            "<RAGPY>/scripts/rad_dataframe.py",
+            "--json",
+            "<TMP>/uploads/gsess-fresh-member-keys/biblio.json",
+            "--dir",
+            "<TMP>/uploads/gsess-fresh-member-keys",
+            "--output",
+            "<TMP>/uploads/gsess-fresh-member-keys/output.csv"
+          ],
+          "session_folder": "gsess-fresh-member-keys",
+          "timeout": 1800,
+          "env": {
+            "OPENAI_API_KEY": "fp:a9908d50d22f",
+            "OPENROUTER_API_KEY": null,
+            "OPENROUTER_DEFAULT_MODEL": null,
+            "MISTRAL_API_KEY": "fp:66565bd23150",
+            "MISTRAL_OCR_MODEL": null,
+            "MISTRAL_API_BASE_URL": null,
+            "PINECONE_API_KEY": "fp:5914d90d87b1",
+            "PINECONE_ENV": null,
+            "WEAVIATE_API_KEY": null,
+            "WEAVIATE_URL": null,
+            "QDRANT_API_KEY": null,
+            "QDRANT_URL": null,
+            "ZOTERO_API_KEY": "fp:f2859cefcc3f",
+            "ZOTERO_USER_ID": "fp:0aef06c7da78",
+            "ZOTERO_GROUP_ID": null
+          }
+        }
+      ]
+    },
+    {
+      "case": "member_nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/process_dataframe",
+        "form": {
+          "path": "gsess-fresh-member-nokeys"
+        }
+      },
+      "status": 403,
+      "body": {
+        "error": "Clé API Mistral requise pour l'OCR des PDFs. Configurez-la dans Paramètres > Mes Identifiants.",
+        "credential_required": "mistral_api_key",
+        "configure_url": "/settings/credentials"
+      },
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "skip_existing_csv",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/process_dataframe",
+        "form": {
+          "path": "gsess-full"
+        }
+      },
+      "status": 200,
+      "body": {
+        "csv": "<TMP>/uploads/gsess-full/output.csv",
+        "preview": [
+          {
+            "itemKey": "ITEMA001",
+            "title": "Golden article A",
+            "authors": "Doe, J.",
+            "date": "2024",
+            "texteocr": "Texte OCR du document A.",
+            "texteocr_provider": "mistral"
+          },
+          {
+            "itemKey": "ITEMB002",
+            "title": "Golden article B",
+            "authors": "Roe, R.",
+            "date": "2023",
+            "texteocr": "Texte OCR du document B.",
+            "texteocr_provider": "mistral"
+          }
+        ]
+      },
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "missing_dir",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/process_dataframe",
+        "form": {
+          "path": "gsess-missing"
+        }
+      },
+      "status": 400,
+      "body": {
+        "error": "Processing directory not found: gsess-missing"
+      },
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "no_zotero_json",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/process_dataframe",
+        "form": {
+          "path": "gsess-empty"
+        }
+      },
+      "status": 400,
+      "body": {
+        "error": "No Zotero JSON file found (excluding pipeline-generated output_*.json files)."
+      },
+      "server_exceptions": [],
+      "calls": []
+    }
+  ]
+}

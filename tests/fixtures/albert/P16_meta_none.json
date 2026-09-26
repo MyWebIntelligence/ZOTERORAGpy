@@ -1,0 +1,78 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents/4934610/chunks",
+    "body_summary": {
+      "chunks": [
+        {
+          "content": "limite meta_none 0",
+          "metadata": {
+            "title": null,
+            "content_hash": "97b96f4f07cd8e083274abf51c230a7c5ff9e50324276da2fb71577829a5caf1"
+          }
+        }
+      ]
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "string_type",
+        "loc": [
+          "body",
+          "chunks",
+          0,
+          "metadata",
+          "title",
+          "constrained-str"
+        ],
+        "msg": "Input should be a valid string",
+        "input": null
+      },
+      {
+        "type": "int_type",
+        "loc": [
+          "body",
+          "chunks",
+          0,
+          "metadata",
+          "title",
+          "constrained-int"
+        ],
+        "msg": "Input should be a valid integer",
+        "input": null
+      },
+      {
+        "type": "float_type",
+        "loc": [
+          "body",
+          "chunks",
+          0,
+          "metadata",
+          "title",
+          "constrained-float"
+        ],
+        "msg": "Input should be a valid number",
+        "input": null
+      },
+      {
+        "type": "bool_type",
+        "loc": [
+          "body",
+          "chunks",
+          0,
+          "metadata",
+          "title",
+          "bool"
+        ],
+        "msg": "Input should be a valid boolean",
+        "input": null
+      }
+    ]
+  },
+  "synthetic": false
+}

@@ -1,0 +1,41 @@
+{
+  "process_document_chunks_gpt-4o-mini": [
+    "Traitement de 'golden.pdf': 4 chunks bruts générés.",
+    "  Lot 1 / 1 en recodage...",
+    "Using OpenAI with model: gpt-4o-mini",
+    "→ 4 chunks traités et sauvegardés pour le document 'golden.pdf' (doc_id=424242424242) dans '<TMP>/direct_chunks.json'."
+  ],
+  "process_all_documents_google/gemini-2.5-flash": [
+    "PROGRESS|init|1|Found 1 documents to chunk",
+    "Traitement de 'golden.pdf': 4 chunks bruts générés.",
+    "  Lot 1 / 1 en recodage...",
+    "Using OpenRouter with model: google/gemini-2.5-flash",
+    "→ 4 chunks traités et sauvegardés pour le document 'golden.pdf' (doc_id=424242424242) dans '<TMP>/output_chunks.json'.",
+    "PROGRESS|row|1/1|Document #0: 4 chunks",
+    "Document #0 traité, 4 chunks produits."
+  ],
+  "generate_and_save_embeddings": [
+    "Chargement de 4 chunks depuis '<TMP>/output_chunks.json' pour génération d'embeddings.",
+    "PROGRESS|init|4|Generating embeddings for 4 chunks",
+    "Préparation de 2 batches (taille max: 2)",
+    "PROGRESS|chunk|2/4|Chunk 2/4",
+    "PROGRESS|chunk|4/4|Chunk 4/4",
+    "Performance: 4 embeddings en <T>s (<T> emb/s)",
+    "Rate limit hits: 0/2 batches (0.0%)",
+    "Tous les chunks (4) ont été sauvegardés dans <TMP>/output_chunks_with_embeddings.json",
+    "Tous les embeddings denses ont été générés. Total 4 chunks sauvegardés dans '<TMP>/output_chunks_with_embeddings.json'."
+  ],
+  "process_document_chunks_skip_recode_mistral": [
+    "Traitement de 'golden.pdf': 4 chunks bruts générés.",
+    "  OCR Mistral détecté → recodage GPT sauté (chunks utilisés tels quels).",
+    "→ 4 chunks traités et sauvegardés pour le document 'golden.pdf' (doc_id=424242424242) dans '<TMP>/skip/skip_chunks.json'."
+  ],
+  "process_document_chunks_google/gemini-2.5-flash_without_openrouter_client": [
+    "Traitement de 'golden.pdf': 4 chunks bruts générés.",
+    "  Lot 1 / 1 en recodage...",
+    "Warning: OpenRouter model 'google/gemini-2.5-flash' requested but OpenRouter client not initialized.",
+    "Falling back to OpenAI gpt-4o-mini",
+    "Using OpenAI with model: gpt-4o-mini",
+    "→ 4 chunks traités et sauvegardés pour le document 'golden.pdf' (doc_id=424242424242) dans '<TMP>/fallback_chunks.json'."
+  ]
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "client": "openai",
+    "endpoint": "embeddings.create",
+    "kwargs": {
+      "input": [
+        "Doc A — chunk 1 : texte recodé stable pour l'embedding dense.",
+        "Doc A — chunk 2 : texte recodé stable pour l'embedding dense."
+      ],
+      "model": "text-embedding-3-large",
+      "timeout": 60.0
+    }
+  },
+  {
+    "client": "openai",
+    "endpoint": "embeddings.create",
+    "kwargs": {
+      "input": [
+        "Doc B — chunk 1 : texte recodé stable pour l'embedding dense.",
+        "Doc B — chunk 2 : texte recodé stable pour l'embedding dense."
+      ],
+      "model": "text-embedding-3-large",
+      "timeout": 60.0
+    }
+  }
+]

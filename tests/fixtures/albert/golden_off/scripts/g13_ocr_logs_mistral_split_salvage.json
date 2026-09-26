@@ -1,0 +1,47 @@
+[
+  [
+    "scripts.rad_dataframe",
+    "INFO",
+    "PDF <TMP>/book_split.pdf = 0.0 MB / 3 pages > seuils Mistral (45.0 MB / 2 pages) — bascule sur le mode large-file."
+  ],
+  [
+    "scripts.rad_dataframe",
+    "INFO",
+    "Découpage PDF book_split.pdf en 3 parts (cible ≤ 30.0 MB / ≤ 1 pages chacune)."
+  ],
+  [
+    "scripts.rad_dataframe",
+    "WARNING",
+    "OCR Mistral transitoire (tentative 1/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — nouvel essai dans 3.0s"
+  ],
+  [
+    "scripts.rad_dataframe",
+    "WARNING",
+    "OCR Mistral transitoire (tentative 2/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — nouvel essai dans 6.0s"
+  ],
+  [
+    "scripts.rad_dataframe",
+    "WARNING",
+    "OCR Mistral transitoire (tentative 3/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — nouvel essai dans 12.0s"
+  ],
+  [
+    "scripts.rad_dataframe",
+    "WARNING",
+    "OCR Mistral transitoire (tentative 4/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — nouvel essai dans 24.0s"
+  ],
+  [
+    "scripts.rad_dataframe",
+    "ERROR",
+    "OCR Mistral: échec après 5 tentatives pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable"
+  ],
+  [
+    "scripts.rad_dataframe",
+    "ERROR",
+    "Échec OCR Mistral sur la part 2/3 (pages 2-2): OCR Mistral échoué après 5 tentatives pour ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — part ignorée, OCR partiel."
+  ],
+  [
+    "scripts.rad_dataframe",
+    "WARNING",
+    "OCR Mistral partiel : 1/3 parts en échec (2/3 (pages 2-2)). pour <TMP>/book_split.pdf"
+  ]
+]

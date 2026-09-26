@@ -1,0 +1,79 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "ministral-3-8b-instruct-2512",
+      "temperature": 0.1,
+      "max_tokens": 2000,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Assistant spécialisé en recodage de textes académiques."
+        },
+        {
+          "role": "user",
+          "content": "Instructions : ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence p… (+4822 caractères)"
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-9fa6b5780fc8d28c",
+    "object": "chat.completion",
+    "created": 1790442030,
+    "model": "ministral-3-8b-instruct-2512",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "La sociologie des sciences examine les conditions sociales qui président à la production des savoirs. Elle étudie les laboratoires, les controverses et les instruments comme des espaces où se construisent les faits scientifiques, en refusant dès l’origine de dissocier le contenu des connaissances de leur contexte.\n\nDans cette optique, l’enquête ethnographique accompagne les chercheurs dans leur travail : elle révèle comment les inscriptions circulent, comment les résultats sont stabilisés par des publications et comment les désaccords se résolvent, parfois sans qu’une preuve définitive soit apportée.\n\nLes archives numériques transforment également la pratique des sciences humaines. La numérisation des fonds, l’océrisation des imprimés anciens et l’indexation sémantique permettent d’accéder à des corpus inédits, mais introduisent en même temps des biais de sélection et des erreurs de transcription.\n\nUne lecture rigoureuse des sources exige par conséquent une critique documentaire renouvelée : il faut identifier l’origine des textes, évaluer la qualité de la reconnaissance optique et conserver la trace des transformations successives subies par le document, depuis le support papier jusqu’à sa mise en base de données.",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "reasoning": null
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "stop_reason": null,
+        "token_ids": null,
+        "routed_experts": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": "vllm-0.25.1-9e7220b0",
+    "usage": {
+      "prompt_tokens": 1049,
+      "completion_tokens": 239,
+      "total_tokens": 1288,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 7.03585275168061e-05,
+          "max": 7.03585275168061e-05
+        },
+        "kgCO2eq": {
+          "min": 3.2336558512279655e-06,
+          "max": 3.2336558512279655e-06
+        }
+      },
+      "impacts": {
+        "kWh": 7.03585275168061e-05,
+        "kgCO2eq": 3.2336558512279655e-06
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "prompt_text": null,
+    "kv_transfer_params": null,
+    "metrics": null
+  },
+  "synthetic": false
+}

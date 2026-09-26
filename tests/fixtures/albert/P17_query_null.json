@@ -1,0 +1,73 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/search",
+    "body_summary": {
+      "query": null,
+      "collection_ids": [
+        302360
+      ],
+      "method": "semantic",
+      "limit": 10,
+      "metadata_filters": {
+        "key": "content_hash",
+        "type": "eq",
+        "value": "c9459d951ea5dea239b8ffaf035ef384f0cddaa345093d2c87d057bdf4fc9b3b"
+      }
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "int_type",
+        "loc": [
+          "body",
+          "input",
+          "list[int]",
+          0
+        ],
+        "msg": "Input should be a valid integer",
+        "input": null
+      },
+      {
+        "type": "list_type",
+        "loc": [
+          "body",
+          "input",
+          "list[list[int]]",
+          0
+        ],
+        "msg": "Input should be a valid list",
+        "input": null
+      },
+      {
+        "type": "string_type",
+        "loc": [
+          "body",
+          "input",
+          "str"
+        ],
+        "msg": "Input should be a valid string",
+        "input": [
+          null
+        ]
+      },
+      {
+        "type": "string_type",
+        "loc": [
+          "body",
+          "input",
+          "list[str]",
+          0
+        ],
+        "msg": "Input should be a valid string",
+        "input": null
+      }
+    ]
+  },
+  "synthetic": false
+}

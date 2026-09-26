@@ -1,0 +1,35 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/search",
+    "body_summary": {
+      "query": "txt",
+      "collection_ids": [
+        302360
+      ],
+      "method": "exact",
+      "limit": 10
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "enum",
+        "loc": [
+          "body",
+          "method"
+        ],
+        "msg": "Input should be 'hybrid', 'semantic' or 'lexical'",
+        "input": "exact",
+        "ctx": {
+          "expected": "'hybrid', 'semantic' or 'lexical'"
+        }
+      }
+    ]
+  },
+  "synthetic": false
+}

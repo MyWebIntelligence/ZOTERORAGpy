@@ -1,0 +1,182 @@
+{
+  "scenario": "ocr_429_retry_after_then_success",
+  "result_type": "OCRResult",
+  "result": {
+    "text": "<!-- Page 1 -->\nAprès Retry-After",
+    "provider": "mistral",
+    "partial": false,
+    "pages_done": 2,
+    "pages_total": 2,
+    "error": null
+  },
+  "exception": null,
+  "calls": [
+    [
+      "_extract_text_with_mistral",
+      "<TMP>/ocr_429_retry_after_then_success/document.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<TMP>/ocr_429_retry_after_then_success/document.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<TMP>/ocr_429_retry_after_then_success/document.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<TMP>/ocr_429_retry_after_then_success/document.pdf",
+      null
+    ]
+  ],
+  "sleeps": [
+    7.0
+  ],
+  "max_pages": null,
+  "http": {
+    "sessions": 2,
+    "requests": [
+      {
+        "session": 1,
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/files",
+        "kwargs": {
+          "data": {
+            "purpose": "ocr"
+          },
+          "files": {
+            "file": [
+              "document.pdf",
+              "application/pdf"
+            ]
+          },
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3"
+          },
+          "timeout": 300
+        },
+        "answer": {
+          "status": 200,
+          "body": {
+            "id": "file-golden-01",
+            "object": "file",
+            "purpose": "ocr"
+          }
+        }
+      },
+      {
+        "session": 1,
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/ocr",
+        "kwargs": {
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3",
+            "Content-Type": "application/json"
+          },
+          "json": {
+            "model": "mistral-ocr-latest",
+            "document": {
+              "type": "file",
+              "file_id": "file-golden-01"
+            },
+            "include_image_base64": false
+          },
+          "timeout": 300
+        },
+        "answer": {
+          "status": 429,
+          "text": "rate limited",
+          "headers": {
+            "Retry-After": "7"
+          }
+        }
+      },
+      {
+        "session": 2,
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/files",
+        "kwargs": {
+          "data": {
+            "purpose": "ocr"
+          },
+          "files": {
+            "file": [
+              "document.pdf",
+              "application/pdf"
+            ]
+          },
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3"
+          },
+          "timeout": 300
+        },
+        "answer": {
+          "status": 200,
+          "body": {
+            "id": "file-golden-02",
+            "object": "file",
+            "purpose": "ocr"
+          }
+        }
+      },
+      {
+        "session": 2,
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/ocr",
+        "kwargs": {
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3",
+            "Content-Type": "application/json"
+          },
+          "json": {
+            "model": "mistral-ocr-latest",
+            "document": {
+              "type": "file",
+              "file_id": "file-golden-02"
+            },
+            "include_image_base64": false
+          },
+          "timeout": 300
+        },
+        "answer": {
+          "status": 200,
+          "body": {
+            "pages": [
+              {
+                "index": 0,
+                "markdown": "Après Retry-After"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "session": 2,
+        "method": "DELETE",
+        "url": "https://api.mistral.ai/v1/files/file-golden-02",
+        "kwargs": {
+          "headers": {
+            "Authorization": "sha12:22a4d900abd3"
+          },
+          "timeout": 15
+        },
+        "answer": {
+          "status": 200,
+          "body": {
+            "id": "file-golden-02",
+            "object": "file",
+            "deleted": true
+          }
+        }
+      }
+    ],
+    "unconsumed": {
+      "uploads": [],
+      "ocr": [],
+      "deletes": []
+    }
+  }
+}

@@ -1,0 +1,275 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/search",
+    "body_summary": {
+      "query": "txt",
+      "collection_ids": [
+        302360
+      ],
+      "method": "hybrid",
+      "limit": 10,
+      "rrf_k": 20
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "list",
+    "data": [
+      {
+        "method": "hybrid",
+        "score": 0.030886196246139225,
+        "chunk": {
+          "object": "chunk",
+          "id": 5,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 5 : chunk de sonde RAGpy numéro 5.",
+          "metadata": {
+            "content_hash": "3300354a86498161de6597334d3a22d14826111e212928487451b2b2812ab0f2",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 5,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442020
+        }
+      },
+      {
+        "method": "hybrid",
+        "score": 0.029386529386529386,
+        "chunk": {
+          "object": "chunk",
+          "id": 13,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 13 : chunk de sonde RAGpy numéro 13.",
+          "metadata": {
+            "content_hash": "00807eea7c0f48838a9afa7cc6d3be01569734298bdd92af2e1bbbf3fd0eb004",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 13,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442020
+        }
+      },
+      {
+        "method": "hybrid",
+        "score": 0.028814262023217248,
+        "chunk": {
+          "object": "chunk",
+          "id": 8,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 8 : chunk de sonde RAGpy numéro 8.",
+          "metadata": {
+            "content_hash": "1e240d00d8f21338eeaa3f07d0bd290f772e4e64df7befea916057df611318b4",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 8,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442020
+        }
+      },
+      {
+        "method": "hybrid",
+        "score": 0.027650648360030512,
+        "chunk": {
+          "object": "chunk",
+          "id": 27,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 27 : chunk de sonde RAGpy numéro 27.",
+          "metadata": {
+            "content_hash": "e0e288508347e40fbbac9d30e64edafef06508caf14e086541a777872b997a76",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 27,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442020
+        }
+      },
+      {
+        "method": "hybrid",
+        "score": 0.027106227106227107,
+        "chunk": {
+          "object": "chunk",
+          "id": 43,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 43 : chunk de sonde RAGpy numéro 43.",
+          "metadata": {
+            "content_hash": "e45337c8bd94e7477b7eeba6d89be3d528cb6db802316bac9fe6230a1c0a4cee",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 43,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442021
+        }
+      },
+      {
+        "method": "hybrid",
+        "score": 0.01639344262295082,
+        "chunk": {
+          "object": "chunk",
+          "id": 0,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 0 : chunk de sonde RAGpy numéro 0.",
+          "metadata": {
+            "content_hash": "1fac5a92877517bf2ad67242305e9ff5c7a032c15fba472380e8dc70f4f69b79",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 0,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442020
+        }
+      },
+      {
+        "method": "hybrid",
+        "score": 0.016129032258064516,
+        "chunk": {
+          "object": "chunk",
+          "id": 17,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 17 : chunk de sonde RAGpy numéro 17.",
+          "metadata": {
+            "content_hash": "719892969804a7ed95209d53a66e0a9ab982990e391f921a192edc77558735f1",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 17,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442020
+        }
+      },
+      {
+        "method": "hybrid",
+        "score": 0.016129032258064516,
+        "chunk": {
+          "object": "chunk",
+          "id": 2,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 2 : chunk de sonde RAGpy numéro 2.",
+          "metadata": {
+            "content_hash": "266b60648681cc9bc35a5e2c22946d7381042f673a75c5b47def5c0c06018b79",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 2,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442020
+        }
+      },
+      {
+        "method": "hybrid",
+        "score": 0.015873015873015872,
+        "chunk": {
+          "object": "chunk",
+          "id": 26,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 26 : chunk de sonde RAGpy numéro 26.",
+          "metadata": {
+            "content_hash": "ae331db838a2f075f543567573295444286d965641e9d0aad12ba9f97bf223b8",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 26,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442020
+        }
+      },
+      {
+        "method": "hybrid",
+        "score": 0.015625,
+        "chunk": {
+          "object": "chunk",
+          "id": 39,
+          "collection_id": 302360,
+          "document_id": 4934607,
+          "content": "txt 39 : chunk de sonde RAGpy numéro 39.",
+          "metadata": {
+            "content_hash": "feabb0928d68194d75933631289f2605d68b5449339eab5e234d044709023a02",
+            "title": "T",
+            "year": 2026,
+            "score": 0.5,
+            "flag": true,
+            "chunk_index": 39,
+            "total_chunks": 64,
+            "doi": "10.1/x",
+            "zotero_key": "ABCD1234",
+            "source_file": "a.pdf"
+          },
+          "created": 1790442021
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 1,
+      "completion_tokens": 0,
+      "total_tokens": 1,
+      "cost": 0.0,
+      "impacts": {
+        "kWh": 0.0,
+        "kgCO2eq": 0.0
+      }
+    }
+  },
+  "synthetic": false
+}

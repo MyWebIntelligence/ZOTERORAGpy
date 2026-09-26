@@ -1,0 +1,94 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents/4934610/chunks",
+    "body_summary": {
+      "chunks": [
+        {
+          "content": "limite meta_list 0",
+          "metadata": {
+            "title": "T",
+            "tags": [
+              "a",
+              "b"
+            ],
+            "content_hash": "97b96f4f07cd8e083274abf51c230a7c5ff9e50324276da2fb71577829a5caf1"
+          }
+        }
+      ]
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "string_type",
+        "loc": [
+          "body",
+          "chunks",
+          0,
+          "metadata",
+          "tags",
+          "constrained-str"
+        ],
+        "msg": "Input should be a valid string",
+        "input": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "type": "int_type",
+        "loc": [
+          "body",
+          "chunks",
+          0,
+          "metadata",
+          "tags",
+          "constrained-int"
+        ],
+        "msg": "Input should be a valid integer",
+        "input": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "type": "float_type",
+        "loc": [
+          "body",
+          "chunks",
+          0,
+          "metadata",
+          "tags",
+          "constrained-float"
+        ],
+        "msg": "Input should be a valid number",
+        "input": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "type": "bool_type",
+        "loc": [
+          "body",
+          "chunks",
+          0,
+          "metadata",
+          "tags",
+          "bool"
+        ],
+        "msg": "Input should be a valid boolean",
+        "input": [
+          "a",
+          "b"
+        ]
+      }
+    ]
+  },
+  "synthetic": false
+}

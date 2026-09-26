@@ -1,0 +1,16 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/documents/4934607/chunks?limit=100",
+    "body_summary": null
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "list",
+    "data": []
+  },
+  "synthetic": false
+}

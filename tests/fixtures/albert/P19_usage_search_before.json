@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/usage?start_time=1790380800&end_time=1790442087&endpoint=%2Fv1%2Fsearch&limit=100",
+    "body_summary": null
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "list",
+    "total": 0,
+    "offset": 0,
+    "limit": 100,
+    "data": []
+  },
+  "synthetic": false
+}

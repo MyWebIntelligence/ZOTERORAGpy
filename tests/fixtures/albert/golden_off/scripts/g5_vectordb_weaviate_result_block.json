@@ -1,0 +1,46 @@
+[
+  {
+    "case": "success_existing_tenant",
+    "exit_code": 0,
+    "result_block": [
+      "=== Result ===",
+      "Status: success",
+      "Message: Insertion Weaviate terminée (tenant: golden-tenant). 3/3 chunks insérés.",
+      "Inserted: 3",
+      "Skipped (dedup): 0"
+    ]
+  },
+  {
+    "case": "new_tenant_partial_data",
+    "exit_code": 0,
+    "result_block": [
+      "=== Result ===",
+      "Status: success_partial_data",
+      "Message: Insertion Weaviate terminée (tenant: golden-tenant). 3/4 chunks insérés. Certains chunks sans embedding (ou en échec de lot) n'ont pas été insérés.",
+      "Inserted: 3",
+      "Skipped (dedup): 0"
+    ]
+  },
+  {
+    "case": "batch_errors",
+    "exit_code": 0,
+    "result_block": [
+      "=== Result ===",
+      "Status: success_partial_data",
+      "Message: Insertion Weaviate terminée (tenant: golden-tenant). 2/3 chunks insérés. Certains chunks sans embedding (ou en échec de lot) n'ont pas été insérés.",
+      "Inserted: 2",
+      "Skipped (dedup): 0"
+    ]
+  },
+  {
+    "case": "not_ready",
+    "exit_code": 1,
+    "result_block": [
+      "=== Result ===",
+      "Status: error",
+      "Message: Le serveur Weaviate n'est pas prêt.",
+      "Inserted: 0",
+      "Skipped (dedup): 0"
+    ]
+  }
+]

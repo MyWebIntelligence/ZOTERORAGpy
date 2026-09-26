@@ -1,0 +1,709 @@
+{
+  "D1": {
+    "value": {
+      "ALBERT_RECODE_RPM": 45,
+      "ALBERT_NOTES_RPM": 9,
+      "ALBERT_OCR_RPM": 45,
+      "ALBERT_EMBED_RPM": 450,
+      "ALBERT_CHAT_TPM": 115000,
+      "rpm_origine": "minimums observés sur /v1/me (90 %)",
+      "budget": null,
+      "expires": null,
+      "expires_ok": true,
+      "permissions": [],
+      "limits": [
+        {
+          "router_id": 342,
+          "type": "rpm",
+          "value": 500
+        },
+        {
+          "router_id": 342,
+          "type": "rpd",
+          "value": 50000
+        },
+        {
+          "router_id": 342,
+          "type": "tpm",
+          "value": null
+        },
+        {
+          "router_id": 342,
+          "type": "tpd",
+          "value": null
+        },
+        {
+          "router_id": 343,
+          "type": "rpm",
+          "value": 500
+        },
+        {
+          "router_id": 343,
+          "type": "rpd",
+          "value": 50000
+        },
+        {
+          "router_id": 343,
+          "type": "tpm",
+          "value": null
+        },
+        {
+          "router_id": 343,
+          "type": "tpd",
+          "value": null
+        },
+        {
+          "router_id": 1090,
+          "type": "rpm",
+          "value": 50
+        },
+        {
+          "router_id": 1090,
+          "type": "rpd",
+          "value": null
+        },
+        {
+          "router_id": 1090,
+          "type": "tpm",
+          "value": 246000
+        },
+        {
+          "router_id": 1090,
+          "type": "tpd",
+          "value": null
+        },
+        {
+          "router_id": 1086,
+          "type": "rpm",
+          "value": 50
+        },
+        {
+          "router_id": 1086,
+          "type": "rpd",
+          "value": 1000
+        },
+        {
+          "router_id": 1086,
+          "type": "tpm",
+          "value": 128000
+        },
+        {
+          "router_id": 1086,
+          "type": "tpd",
+          "value": 2460000
+        },
+        {
+          "router_id": 339,
+          "type": "rpm",
+          "value": 50
+        },
+        {
+          "router_id": 339,
+          "type": "rpd",
+          "value": 1000
+        },
+        {
+          "router_id": 339,
+          "type": "tpm",
+          "value": 128000
+        },
+        {
+          "router_id": 339,
+          "type": "tpd",
+          "value": 2460000
+        },
+        {
+          "router_id": 420,
+          "type": "rpm",
+          "value": 50
+        },
+        {
+          "router_id": 420,
+          "type": "rpd",
+          "value": 1000
+        },
+        {
+          "router_id": 420,
+          "type": "tpm",
+          "value": 128000
+        },
+        {
+          "router_id": 420,
+          "type": "tpd",
+          "value": 2460000
+        },
+        {
+          "router_id": 337,
+          "type": "rpm",
+          "value": 10
+        },
+        {
+          "router_id": 337,
+          "type": "rpd",
+          "value": 1000
+        },
+        {
+          "router_id": 337,
+          "type": "tpm",
+          "value": 128000
+        },
+        {
+          "router_id": 337,
+          "type": "tpd",
+          "value": 1280000
+        },
+        {
+          "router_id": 338,
+          "type": "rpm",
+          "value": 50
+        },
+        {
+          "router_id": 338,
+          "type": "rpd",
+          "value": 1000
+        },
+        {
+          "router_id": 338,
+          "type": "tpm",
+          "value": 128000
+        },
+        {
+          "router_id": 338,
+          "type": "tpd",
+          "value": 2460000
+        },
+        {
+          "router_id": 1092,
+          "type": "rpm",
+          "value": 50
+        },
+        {
+          "router_id": 1092,
+          "type": "rpd",
+          "value": 1000
+        },
+        {
+          "router_id": 1092,
+          "type": "tpm",
+          "value": null
+        },
+        {
+          "router_id": 1092,
+          "type": "tpd",
+          "value": null
+        },
+        {
+          "router_id": 1085,
+          "type": "rpm",
+          "value": 50
+        },
+        {
+          "router_id": 1085,
+          "type": "rpd",
+          "value": 1000
+        },
+        {
+          "router_id": 1085,
+          "type": "tpm",
+          "value": null
+        },
+        {
+          "router_id": 1085,
+          "type": "tpd",
+          "value": null
+        },
+        {
+          "router_id": 1094,
+          "type": "rpm",
+          "value": 50
+        },
+        {
+          "router_id": 1094,
+          "type": "rpd",
+          "value": 1000
+        },
+        {
+          "router_id": 1094,
+          "type": "tpm",
+          "value": 128000
+        },
+        {
+          "router_id": 1094,
+          "type": "tpd",
+          "value": 2460000
+        }
+      ],
+      "ALBERT_DAILY_REQUESTS_LLM": 1000,
+      "regime": "experimentation",
+      "analyse": "Correspondance routeur→modèle non exposée. Les limites du compte correspondent au régime expérimentation (albertai.md §13) : un routeur à 10 RPM/1000 RPD (gpt-oss), les autres modèles de chat à 50 RPM/1000 RPD/128k TPM, bge-m3 et rerank à 500 RPM/50000 RPD. Défauts ramenés à 90 % de ces minimums ; plafond journalier de 1000 requêtes par modèle de chat à signaler dans le preflight et la documentation."
+    },
+    "default": {
+      "ALBERT_RECODE_RPM": 60,
+      "ALBERT_NOTES_RPM": 30,
+      "ALBERT_OCR_RPM": 30,
+      "ALBERT_EMBED_RPM": 600,
+      "ALBERT_CHAT_TPM": 200000
+    },
+    "source": "probe",
+    "consumer": "L1 config, preflight, message 403 des collections"
+  },
+  "D2": {
+    "value": {
+      "models": {
+        "gpt-oss-120b": {
+          "type": "text-generation",
+          "max_context_length": 131072,
+          "aliases": [
+            "openweight-large",
+            "openai/gpt-oss-120b"
+          ],
+          "present": true
+        },
+        "ministral-3-8b-instruct-2512": {
+          "type": "image-text-to-text",
+          "max_context_length": 262144,
+          "aliases": [
+            "mistralai/Ministral-3-8B-Instruct-2512",
+            "openweight-small"
+          ],
+          "present": true
+        },
+        "lightonocr-2-1b": {
+          "type": "image-text-to-text",
+          "max_context_length": 16384,
+          "aliases": [
+            "lightonai/LightOnOCR-2-1B",
+            "openweight-ocr"
+          ],
+          "present": true
+        },
+        "bge-m3": {
+          "type": "text-embeddings-inference",
+          "max_context_length": 8192,
+          "aliases": [
+            "BAAI/bge-m3",
+            "openweight-embeddings"
+          ],
+          "present": true
+        }
+      },
+      "aliases_missing": [],
+      "mistral_ocr_2512_listed": false
+    },
+    "default": {
+      "models": {
+        "gpt-oss-120b": {
+          "type": "text-generation",
+          "max_context_length": 131072,
+          "aliases": [
+            "openai/gpt-oss-120b",
+            "openweight-large"
+          ]
+        },
+        "ministral-3-8b-instruct-2512": {
+          "type": "image-text-to-text",
+          "max_context_length": 262144,
+          "aliases": [
+            "mistralai/Ministral-3-8B-Instruct-2512",
+            "openweight-small"
+          ]
+        },
+        "lightonocr-2-1b": {
+          "type": "image-text-to-text",
+          "max_context_length": 16384,
+          "aliases": [
+            "lighton/LightOn-OCR-2-1B",
+            "openweight-ocr"
+          ]
+        },
+        "bge-m3": {
+          "type": "text-embeddings-inference",
+          "max_context_length": 8192,
+          "aliases": [
+            "BAAI/bge-m3",
+            "openweight-embeddings"
+          ]
+        },
+        "mistral-ocr-2512": {
+          "type": "image-to-text",
+          "max_context_length": 16384,
+          "aliases": []
+        }
+      },
+      "mistral_ocr_2512_listed": false
+    },
+    "source": "probe",
+    "consumer": "L1 catalog"
+  },
+  "D3": {
+    "value": {
+      "ALBERT_OCR_MODE": "auto",
+      "ocr_access": false,
+      "pages_zero_based": null,
+      "skip_live_ocr_doc_test": true,
+      "no_access_signature": {
+        "statut": 404,
+        "type_detail": "str",
+        "extrait": "{\"detail\":\"Model mistral-ocr-2512 not found.\"}",
+        "erreur_reseau": null
+      }
+    },
+    "default": {
+      "ALBERT_OCR_MODE": "auto",
+      "ocr_access": false,
+      "pages_zero_based": true
+    },
+    "source": "probe",
+    "consumer": "défaut ALBERT_OCR_MODE (L4), saut du test live"
+  },
+  "D4": {
+    "value": {
+      "ALBERT_OCR_PART_MB": 15,
+      "ALBERT_OCR_PART_PAGES": 100,
+      "ALBERT_TIMEOUT_OCR_DOC": 300
+    },
+    "default": {
+      "ALBERT_OCR_PART_MB": 15,
+      "ALBERT_OCR_PART_PAGES": 100,
+      "ALBERT_TIMEOUT_OCR_DOC": 300
+    },
+    "source": "default",
+    "consumer": "ALBERT_OCR_PART_MB, ALBERT_OCR_PART_PAGES, ALBERT_TIMEOUT_OCR_DOC"
+  },
+  "D5": {
+    "value": {
+      "ALBERT_OCR_CONCURRENCY": 1,
+      "ALBERT_TIMEOUT_OCR_PAGE": 120,
+      "p50_s": 1.154,
+      "p95_s": 1.278,
+      "rpm_utilise": 30,
+      "echantillon": "synthétique (pages denses générées localement)",
+      "response_model_echoes_request": true,
+      "analyse": "Appelé par l'alias openweight-ocr, le champ model de la réponse renvoie l'alias et non l'id : la reproductibilité passe par la résolution alias→id via /v1/models et l'envoi de l'id épinglé."
+    },
+    "default": {
+      "ALBERT_OCR_CONCURRENCY": 2,
+      "ALBERT_TIMEOUT_OCR_PAGE": 120
+    },
+    "source": "probe",
+    "consumer": "ALBERT_OCR_CONCURRENCY, ALBERT_TIMEOUT_OCR_PAGE"
+  },
+  "D6": {
+    "value": {
+      "classify_on_status": true,
+      "status_wrong_model_type": 422,
+      "status_unknown_model": 404,
+      "status_invalid_key": 401,
+      "detail_422": "str",
+      "detail_404": "str",
+      "detail_401": "str",
+      "wrong_model_type_in_body": false
+    },
+    "default": {
+      "classify_on_status": true,
+      "status_wrong_model_type": 422,
+      "status_unknown_model": 404,
+      "status_invalid_key": 401,
+      "detail_422": "list"
+    },
+    "source": "probe",
+    "consumer": "errors.py"
+  },
+  "D7": {
+    "value": {
+      "ledger_cost": true,
+      "ledger_impacts": true,
+      "par_endpoint": {
+        "chat": {
+          "cost": true,
+          "impacts": true
+        },
+        "embeddings": {
+          "cost": true,
+          "impacts": true
+        },
+        "ocr_chat": {
+          "cost": true,
+          "impacts": true
+        },
+        "search": {
+          "cost": true,
+          "impacts": true
+        }
+      }
+    },
+    "default": {
+      "ledger_cost": false,
+      "ledger_impacts": false
+    },
+    "source": "probe",
+    "consumer": "champs du ledger"
+  },
+  "D8": {
+    "value": {
+      "chat_max_param": "max_tokens",
+      "both_winner": "max_completion_tokens"
+    },
+    "default": {
+      "chat_max_param": "max_tokens"
+    },
+    "source": "probe",
+    "consumer": "client.chat"
+  },
+  "D9": {
+    "value": {
+      "reasoning_field": "reasoning",
+      "ALBERT_REASONING_HEADROOM": 2048,
+      "ALBERT_REASONING_EFFORT": "medium",
+      "trap_confirmed": true,
+      "completion_includes_reasoning": false,
+      "reasoning_effort_effect": false
+    },
+    "default": {
+      "reasoning_field": null,
+      "ALBERT_REASONING_HEADROOM": 2048,
+      "ALBERT_REASONING_EFFORT": "medium"
+    },
+    "source": "probe",
+    "consumer": "marge de raisonnement, raisonnement jamais pris comme contenu"
+  },
+  "D10": {
+    "value": {
+      "citation_filter_response_format": "json_schema",
+      "book_structure_response_format": "json_schema",
+      "gpt_oss_json_schema": true
+    },
+    "default": {
+      "citation_filter_response_format": null,
+      "book_structure_response_format": null
+    },
+    "source": "probe",
+    "consumer": "filtre de citations, phase 1 des fiches"
+  },
+  "D11": {
+    "value": {
+      "send_seed": true,
+      "fingerprint_stable": true
+    },
+    "default": {
+      "send_seed": false
+    },
+    "source": "probe",
+    "consumer": "mode harden (L3) : seed envoyé seulement si déterministe"
+  },
+  "D12": {
+    "value": {
+      "ALBERT_EMBED_BATCH": 64,
+      "embedding_dim": 1024,
+      "ALBERT_EMBED_L2_NORMALIZE": 1,
+      "already_normalized": true,
+      "norm_range": [
+        1.0,
+        1.0
+      ],
+      "status_65": 413,
+      "status_empty_string": 400,
+      "alias_model": "openweight-embeddings",
+      "response_model_echoes_request": true,
+      "analyse": "Appelé par l'alias openweight-embeddings, le champ model de la réponse renvoie l'alias et non l'id : la reproductibilité passe par la résolution alias→id via /v1/models et l'envoi de l'id épinglé."
+    },
+    "default": {
+      "ALBERT_EMBED_BATCH": 64,
+      "embedding_dim": 1024,
+      "ALBERT_EMBED_L2_NORMALIZE": 1
+    },
+    "source": "probe",
+    "consumer": "ALBERT_EMBED_L2_NORMALIZE, norm dans les paramètres d'espace et la clé de cache"
+  },
+  "D13": {
+    "value": {
+      "retry_after_format": "both",
+      "ALBERT_RETRY_AFTER_MAX": 120,
+      "ratelimit_headers": [
+        "x-ratelimit-limit-request",
+        "x-ratelimit-limit-token",
+        "x-ratelimit-remaining-request",
+        "x-ratelimit-remaining-token",
+        "x-ratelimit-reset-requests",
+        "x-ratelimit-reset-token"
+      ],
+      "natural_429_seen": false,
+      "first_429": null
+    },
+    "default": {
+      "retry_after_format": "both",
+      "ALBERT_RETRY_AFTER_MAX": 120
+    },
+    "source": "probe",
+    "consumer": "retry.py, quota épuisé"
+  },
+  "D14": {
+    "value": {
+      "name_filter": "exact",
+      "duplicates_allowed": true,
+      "policy": "correspondance exacte côté client ; plusieurs correspondances = erreur listant les ids",
+      "limit_101_status": 422
+    },
+    "default": {
+      "name_filter": "substring",
+      "duplicates_allowed": true,
+      "policy": "correspondance exacte côté client ; plusieurs correspondances = erreur listant les ids"
+    },
+    "source": "probe",
+    "consumer": "L5 : correspondance exacte ; plusieurs correspondances = erreur listant les ids"
+  },
+  "D15": {
+    "value": {
+      "create_document_encoding": "multipart",
+      "multipart_no_file": true,
+      "urlencoded_accepted": true,
+      "document_metadata_accepted": true
+    },
+    "default": {
+      "create_document_encoding": "multipart"
+    },
+    "source": "probe",
+    "consumer": "create_document"
+  },
+  "D16": {
+    "value": {
+      "chunk_ids_returned": true,
+      "ALBERT_CHUNKS_PER_POST": 64,
+      "ALBERT_METADATA_MAX_PROPS": 10,
+      "status_65": 422,
+      "status_11_props": 422,
+      "status_str_256": 422,
+      "status_empty_string": 422,
+      "status_none": 422,
+      "status_list": 422,
+      "status_key_256": 422,
+      "atomic_post": true,
+      "doc_metadata_merged": null,
+      "merged_counts_toward_cap": null,
+      "chunk_id_numbering": null,
+      "rollback": "delete_document",
+      "analyse": "Le compteur chunks du document reste à 0 juste après l'envoi (indexation asynchrone, D18 ≈ 2,4 s) ; les ids de chunks sont renvoyés et alimentent le manifeste."
+    },
+    "default": {
+      "chunk_ids_returned": false,
+      "ALBERT_CHUNKS_PER_POST": 64,
+      "ALBERT_METADATA_MAX_PROPS": 10,
+      "atomic_post": null,
+      "rollback": "delete_document"
+    },
+    "source": "probe",
+    "consumer": "contenu du manifeste et rollback (suppression du document dans tous les cas)"
+  },
+  "D17": {
+    "value": {
+      "query_required": true,
+      "send_rff_k": true,
+      "rrf_k_behaviour": "ignoré",
+      "score_threshold_semantic_only": false,
+      "or_filter_max": 4,
+      "method_exact_rejected": true,
+      "analyse": "score_threshold est accepté avec hybrid (pas de 422) ; le client continue de ne l'envoyer qu'en semantic. query est obligatoire : l'existence Tier 2 passe par la liste des chunks, pas par la recherche."
+    },
+    "default": {
+      "query_required": true,
+      "send_rff_k": true,
+      "score_threshold_semantic_only": true,
+      "or_filter_max": 4
+    },
+    "source": "probe",
+    "consumer": "client.search"
+  },
+  "D18": {
+    "value": {
+      "index_latency_s": 2.44,
+      "live_test_index_wait_s": 10
+    },
+    "default": {
+      "live_test_index_wait_s": 60
+    },
+    "source": "probe",
+    "consumer": "attentes des tests live, note de cohérence du preload"
+  },
+  "D19": {
+    "value": {
+      "push_counts_embed_quota": true,
+      "embed_requests_per_push_64": 2,
+      "embed_prompt_tokens_per_push_64": 958,
+      "search_delta": {
+        "requests": 0,
+        "prompt_tokens": 0
+      },
+      "ALBERT_PUSH_CONCURRENCY": 1,
+      "push_uses_embed_limiter": true
+    },
+    "default": {
+      "ALBERT_PUSH_CONCURRENCY": 1,
+      "push_uses_embed_limiter": true
+    },
+    "source": "probe",
+    "consumer": "ALBERT_PUSH_CONCURRENCY, rôle embed du limiteur pendant l'envoi"
+  },
+  "D20": {
+    "value": {
+      "preflight": "/v1/models",
+      "fallback_503_on_status": true,
+      "health_status": 200,
+      "health_models_status": 200,
+      "v1_health_status": 404,
+      "health_models_shape": {
+        "cles": [
+          "data"
+        ],
+        "cles_exemple": [
+          "id",
+          "status"
+        ]
+      }
+    },
+    "default": {
+      "preflight": "/v1/models",
+      "fallback_503_on_status": true
+    },
+    "source": "probe",
+    "consumer": "informative : le preflight utilise /v1/models, le repli 503 reste sur les statuts HTTP"
+  },
+  "D21": {
+    "value": {
+      "ALBERT_OCR_SKIP_RECODE": 0
+    },
+    "default": {
+      "ALBERT_OCR_SKIP_RECODE": 0
+    },
+    "source": "default",
+    "consumer": "ALBERT_OCR_SKIP_RECODE (défaut 0), confirmé au L8 avec l'utilisateur"
+  },
+  "D22": {
+    "value": {
+      "ALBERT_RECODE_CONCURRENCY": 2,
+      "ALBERT_NOTES_CONCURRENCY": 2,
+      "ALBERT_EMBED_CONCURRENCY": 4,
+      "p50_recode_s": 0.939,
+      "p50_notes_s": 9.641,
+      "rpm_recode": 45,
+      "rpm_notes": 9,
+      "p95": {
+        "c1": {
+          "recode": 1.025,
+          "notes": 11.48
+        },
+        "c8": {
+          "recode": 1.232,
+          "notes": 12.87
+        }
+      },
+      "analyse": "Recalculé avec les RPM réels du compte (D1) au lieu des valeurs de production documentées ; le limiteur reste la garde principale."
+    },
+    "default": {
+      "ALBERT_RECODE_CONCURRENCY": 4,
+      "ALBERT_NOTES_CONCURRENCY": 4,
+      "ALBERT_EMBED_CONCURRENCY": 4
+    },
+    "source": "probe",
+    "consumer": "ALBERT_RECODE_CONCURRENCY, ALBERT_NOTES_CONCURRENCY, ALBERT_EMBED_CONCURRENCY"
+  }
+}

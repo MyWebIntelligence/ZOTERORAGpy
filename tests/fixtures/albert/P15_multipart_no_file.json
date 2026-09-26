@@ -1,0 +1,20 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents",
+    "body_summary": {
+      "multipart": {
+        "name": "probe-doc",
+        "collection_id": "302360"
+      }
+    }
+  },
+  "status": 201,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": 4934607
+  },
+  "synthetic": false
+}

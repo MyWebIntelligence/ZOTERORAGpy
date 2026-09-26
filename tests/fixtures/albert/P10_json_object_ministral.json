@@ -1,0 +1,82 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "ministral-3-8b-instruct-2512",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Tu es un filtre de citations. Réponds uniquement en JSON."
+        },
+        {
+          "role": "user",
+          "content": "Parmi ces citations, lesquelles relèvent de la sociologie des sciences ? Réponds en JSON sous la forme {\"keep\": [numéros]}.\n1. Bourdieu analyse le champ scientifique comme un espace de concurrence pou… (+369 caractères)"
+        }
+      ],
+      "response_format": {
+        "type": "json_object"
+      },
+      "max_tokens": 300,
+      "temperature": 0.1
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-b980ee3b5e1d8e3e",
+    "object": "chat.completion",
+    "created": 1790442016,
+    "model": "ministral-3-8b-instruct-2512",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\n  \"keep\": [1, 3, 5]\n}",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "reasoning": null
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "stop_reason": null,
+        "token_ids": null,
+        "routed_experts": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": "vllm-0.25.1-9e7220b0",
+    "usage": {
+      "prompt_tokens": 149,
+      "completion_tokens": 15,
+      "total_tokens": 164,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 8.9304603165809e-06,
+          "max": 8.9304603165809e-06
+        },
+        "kgCO2eq": {
+          "min": 4.0525986604622614e-07,
+          "max": 4.0525986604622614e-07
+        }
+      },
+      "impacts": {
+        "kWh": 8.9304603165809e-06,
+        "kgCO2eq": 4.0525986604622614e-07
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "prompt_text": null,
+    "kv_transfer_params": null,
+    "metrics": null
+  },
+  "synthetic": false
+}

@@ -1,0 +1,23 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/search",
+    "body_summary": {
+      "query": "txt",
+      "collection_ids": [
+        302360
+      ],
+      "method": "hybrid",
+      "limit": 10,
+      "score_threshold": 0.5
+    }
+  },
+  "status": 400,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": "Score threshold is only available for semantic search method"
+  },
+  "synthetic": false
+}

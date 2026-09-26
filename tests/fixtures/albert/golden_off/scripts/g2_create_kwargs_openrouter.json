@@ -1,0 +1,78 @@
+[
+  {
+    "client": "openrouter",
+    "endpoint": "chat.completions.create",
+    "kwargs": {
+      "max_tokens": 8000,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Assistant spécialisé en recodage de textes académiques."
+        },
+        {
+          "role": "user",
+          "content": "Instructions : ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence par une phrase complète et se termine par un point. Supprime le bruit d'OCR et les imperfections en conservant le sens original. Ne echange ni ajoute aucun mot du texte d'origine. C'est une correction et un nettoyage de texte (suppression des erreurs) pas une réécriture\n\nTexte à recoder :\nParagraphe 1. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 1 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 2. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 2 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 3. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 3 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 4. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 4 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 5. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 5 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 6. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 6 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 7. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 7 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 8. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 8 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 9. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 9 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 10. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 10 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 11. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 11 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 12. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 12 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 13. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 13 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 14. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 14 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 15. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 15 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 16. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 16 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 17. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 17 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 18. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 18 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 19. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 19 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 20. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 20 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 21. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 21 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 22. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 22 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 23. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 23 renvoie à un contexte d'usage précis et situé.\n\nTexte recodé :"
+        }
+      ],
+      "model": "google/gemini-2.5-flash",
+      "temperature": 0.3
+    }
+  },
+  {
+    "client": "openrouter",
+    "endpoint": "chat.completions.create",
+    "kwargs": {
+      "max_tokens": 8000,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Assistant spécialisé en recodage de textes académiques."
+        },
+        {
+          "role": "user",
+          "content": "Instructions : ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence par une phrase complète et se termine par un point. Supprime le bruit d'OCR et les imperfections en conservant le sens original. Ne echange ni ajoute aucun mot du texte d'origine. C'est une correction et un nettoyage de texte (suppression des erreurs) pas une réécriture\n\nTexte à recoder :\nParagraphe 21. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 21 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 22. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 22 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 23. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 23 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 24. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 24 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 25. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 25 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 26. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 26 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 27. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 27 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 28. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 28 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 29. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 29 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 30. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 30 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 31. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 31 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 32. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 32 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 33. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 33 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 34. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 34 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 35. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 35 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 36. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 36 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 37. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 37 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 38. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 38 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 39. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 39 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 40. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 40 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 41. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 41 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 42. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 42 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 43. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 43 renvoie à un contexte d'usage précis et situé.\n\nTexte recodé :"
+        }
+      ],
+      "model": "google/gemini-2.5-flash",
+      "temperature": 0.3
+    }
+  },
+  {
+    "client": "openrouter",
+    "endpoint": "chat.completions.create",
+    "kwargs": {
+      "max_tokens": 8000,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Assistant spécialisé en recodage de textes académiques."
+        },
+        {
+          "role": "user",
+          "content": "Instructions : ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence par une phrase complète et se termine par un point. Supprime le bruit d'OCR et les imperfections en conservant le sens original. Ne echange ni ajoute aucun mot du texte d'origine. C'est une correction et un nettoyage de texte (suppression des erreurs) pas une réécriture\n\nTexte à recoder :\nParagraphe 41. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 41 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 42. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 42 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 43. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 43 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 44. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 44 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 45. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 45 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 46. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 46 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 47. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 47 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 48. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 48 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 49. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 49 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 50. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 50 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 51. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 51 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 52. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 52 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 53. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 53 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 54. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 54 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 55. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 55 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 56. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 56 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 57. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 57 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 58. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 58 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 59. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 59 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 60. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 60 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 61. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 61 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 62. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 62 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 63. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 63 renvoie à un contexte d'usage précis et situé.\n\nTexte recodé :"
+        }
+      ],
+      "model": "google/gemini-2.5-flash",
+      "temperature": 0.3
+    }
+  },
+  {
+    "client": "openrouter",
+    "endpoint": "chat.completions.create",
+    "kwargs": {
+      "max_tokens": 8000,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Assistant spécialisé en recodage de textes académiques."
+        },
+        {
+          "role": "user",
+          "content": "Instructions : ce chunk est issu d'un ocr brut qui laisse beaucoup de blocs de texte inutiles comme des titres de pages, des numeros, etc. Nettoie ce chunk pour en faire un texte propre qui commence par une phrase complète et se termine par un point. Supprime le bruit d'OCR et les imperfections en conservant le sens original. Ne echange ni ajoute aucun mot du texte d'origine. C'est une correction et un nettoyage de texte (suppression des erreurs) pas une réécriture\n\nTexte à recoder :\nParagraphe 61. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 61 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 62. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 62 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 63. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 63 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 64. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 64 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 65. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 65 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 66. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 66 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 67. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 67 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 68. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 68 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 69. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 69 renvoie à un contexte d'usage précis et situé.\n\nParagraphe 70. Le langage ordinaire structure l'expérience sociale ; l'énoncé numéro 70 renvoie à un contexte d'usage précis et situé.\n\nTexte recodé :"
+        }
+      ],
+      "model": "google/gemini-2.5-flash",
+      "temperature": 0.3
+    }
+  }
+]

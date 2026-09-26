@@ -1,0 +1,60 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/health/models",
+    "body_summary": null
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "data": [
+      {
+        "id": "gpt-oss-120b",
+        "status": "green"
+      },
+      {
+        "id": "qwen3-coder-30b-a3b-instruct",
+        "status": "green"
+      },
+      {
+        "id": "ministral-3-8b-instruct-2512",
+        "status": "green"
+      },
+      {
+        "id": "bge-m3",
+        "status": "green"
+      },
+      {
+        "id": "bge-reranker-v2-m3",
+        "status": "green"
+      },
+      {
+        "id": "mistral-small-3-2-24b-instruct-2506",
+        "status": "green"
+      },
+      {
+        "id": "whisper-large-v3",
+        "status": "green"
+      },
+      {
+        "id": "lightonocr-2-1b",
+        "status": "green"
+      },
+      {
+        "id": "deepseek-v4-flash-0731",
+        "status": "green"
+      },
+      {
+        "id": "qwen3-vl-embedding-8b",
+        "status": "green"
+      },
+      {
+        "id": "gemma-4-31b-it",
+        "status": "green"
+      }
+    ]
+  },
+  "synthetic": false
+}

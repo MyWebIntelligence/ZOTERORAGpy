@@ -1,0 +1,162 @@
+{
+  "route": "POST /cluster_documents_sse",
+  "fingerprint_legend": {
+    "fp:fc9778f2aa10": "server_env.OPENROUTER_API_KEY",
+    "fp:521014770215": "server_env.OPENROUTER_DEFAULT_MODEL",
+    "fp:51dfa8793650": "server_env.MISTRAL_API_KEY",
+    "fp:36bd200a1674": "server_env.MISTRAL_OCR_MODEL",
+    "fp:af36806dfb00": "server_env.MISTRAL_API_BASE_URL",
+    "fp:f6459adcb50e": "server_env.PINECONE_API_KEY",
+    "fp:4ee04614f91e": "server_env.PINECONE_ENV",
+    "fp:fc08dd1f1315": "server_env.WEAVIATE_API_KEY",
+    "fp:c71cd5754a97": "server_env.WEAVIATE_URL",
+    "fp:65eb30838bd5": "server_env.QDRANT_API_KEY",
+    "fp:023284cfdd83": "server_env.QDRANT_URL",
+    "fp:669b22cf2228": "server_env.ZOTERO_API_KEY",
+    "fp:cb7c9d34db28": "server_env.ZOTERO_USER_ID",
+    "fp:fba411cc5d41": "db.admin.openai_api_key"
+  },
+  "cases": [
+    {
+      "case": "admin:min_cluster_size",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/cluster_documents_sse",
+        "form": {
+          "session_folder": "gsess-full",
+          "session_name": "Golden",
+          "min_cluster_size": 3
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Found 2 documents to process\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing: doc_a.pdf\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 2, \"total\": 2, \"percent\": 100, \"message\": \"Processing: doc_b.pdf\"}",
+        "{\"type\": \"complete\", \"total\": 5, \"results\": {\"n_documents\": 2, \"n_clusters\": 1, \"n_noise\": 0}}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_subprocess_with_sse",
+          "argv": [
+            "python3",
+            "-u",
+            "<RAGPY>/scripts/rad_clustering.py",
+            "--input",
+            "<TMP>/uploads/gsess-full/output_chunks_with_embeddings_sparse.json",
+            "--output",
+            "<TMP>/uploads/gsess-full",
+            "--session-name",
+            "Golden",
+            "--aggregation",
+            "mean",
+            "--min-cluster-size",
+            "3"
+          ],
+          "session_folder": "gsess-full",
+          "timeout": 600,
+          "error_keywords": "<default>",
+          "env": {
+            "OPENAI_API_KEY": "fp:fba411cc5d41",
+            "OPENROUTER_API_KEY": "fp:fc9778f2aa10",
+            "OPENROUTER_DEFAULT_MODEL": "fp:521014770215",
+            "MISTRAL_API_KEY": "fp:51dfa8793650",
+            "MISTRAL_OCR_MODEL": "fp:36bd200a1674",
+            "MISTRAL_API_BASE_URL": "fp:af36806dfb00",
+            "PINECONE_API_KEY": "fp:f6459adcb50e",
+            "PINECONE_ENV": "fp:4ee04614f91e",
+            "WEAVIATE_API_KEY": "fp:fc08dd1f1315",
+            "WEAVIATE_URL": "fp:c71cd5754a97",
+            "QDRANT_API_KEY": "fp:65eb30838bd5",
+            "QDRANT_URL": "fp:023284cfdd83",
+            "ZOTERO_API_KEY": "fp:669b22cf2228",
+            "ZOTERO_USER_ID": "fp:cb7c9d34db28",
+            "ZOTERO_GROUP_ID": null
+          }
+        }
+      ]
+    },
+    {
+      "case": "member_nokeys:auto",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/cluster_documents_sse",
+        "form": {
+          "session_folder": "gsess-full",
+          "session_name": "Golden",
+          "aggregation": "max"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"message\": \"Found 2 documents to process\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 1, \"total\": 2, \"percent\": 50, \"message\": \"Processing: doc_a.pdf\"}",
+        "{\"type\": \"progress\", \"level\": \"row\", \"current\": 2, \"total\": 2, \"percent\": 100, \"message\": \"Processing: doc_b.pdf\"}",
+        "{\"type\": \"complete\", \"total\": 5, \"results\": {\"n_documents\": 2, \"n_clusters\": 1, \"n_noise\": 0}}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_subprocess_with_sse",
+          "argv": [
+            "python3",
+            "-u",
+            "<RAGPY>/scripts/rad_clustering.py",
+            "--input",
+            "<TMP>/uploads/gsess-full/output_chunks_with_embeddings_sparse.json",
+            "--output",
+            "<TMP>/uploads/gsess-full",
+            "--session-name",
+            "Golden",
+            "--aggregation",
+            "max"
+          ],
+          "session_folder": "gsess-full",
+          "timeout": 600,
+          "error_keywords": "<default>",
+          "env": {
+            "OPENAI_API_KEY": null,
+            "OPENROUTER_API_KEY": null,
+            "OPENROUTER_DEFAULT_MODEL": null,
+            "MISTRAL_API_KEY": null,
+            "MISTRAL_OCR_MODEL": null,
+            "MISTRAL_API_BASE_URL": null,
+            "PINECONE_API_KEY": null,
+            "PINECONE_ENV": null,
+            "WEAVIATE_API_KEY": null,
+            "WEAVIATE_URL": null,
+            "QDRANT_API_KEY": null,
+            "QDRANT_URL": null,
+            "ZOTERO_API_KEY": null,
+            "ZOTERO_USER_ID": null,
+            "ZOTERO_GROUP_ID": null
+          }
+        }
+      ]
+    },
+    {
+      "case": "missing_embeddings",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/cluster_documents_sse",
+        "form": {
+          "session_folder": "gsess-empty",
+          "session_name": "Golden"
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"Embeddings file not found. Run embedding generation first.\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    }
+  ]
+}

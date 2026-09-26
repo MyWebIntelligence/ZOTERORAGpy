@@ -1,0 +1,31 @@
+{
+  "scenario": "mistral_fast_path",
+  "result_type": "OCRResult",
+  "result": {
+    "text": "<!-- Page 1 -->\n# Titre\nAlpha\n\n<!-- Page 2 -->\nBeta",
+    "provider": "mistral",
+    "partial": false,
+    "pages_done": 2,
+    "pages_total": 2,
+    "error": null
+  },
+  "exception": null,
+  "calls": [
+    [
+      "_extract_text_with_mistral",
+      "<TMP>/article_mistral.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<TMP>/article_mistral.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<TMP>/article_mistral.pdf",
+      null
+    ]
+  ],
+  "sleeps": []
+}

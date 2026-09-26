@@ -1,0 +1,191 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/models",
+    "body_summary": null
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "list",
+    "data": [
+      {
+        "object": "model",
+        "id": "gpt-oss-120b",
+        "type": "text-generation",
+        "aliases": [
+          "openweight-large",
+          "openai/gpt-oss-120b"
+        ],
+        "created": 1765375160,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 131072,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "qwen3-coder-30b-a3b-instruct",
+        "type": "text-generation",
+        "aliases": [
+          "openweight-code",
+          "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+        ],
+        "created": 1765384282,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 262144,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "ministral-3-8b-instruct-2512",
+        "type": "image-text-to-text",
+        "aliases": [
+          "mistralai/Ministral-3-8B-Instruct-2512",
+          "openweight-small"
+        ],
+        "created": 1765384336,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 262144,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "bge-m3",
+        "type": "text-embeddings-inference",
+        "aliases": [
+          "BAAI/bge-m3",
+          "openweight-embeddings"
+        ],
+        "created": 1765384416,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 8192,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "bge-reranker-v2-m3",
+        "type": "text-classification",
+        "aliases": [
+          "BAAI/bge-reranker-v2-m3",
+          "openweight-rerank"
+        ],
+        "created": 1765384523,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 8192,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "mistral-small-3-2-24b-instruct-2506",
+        "type": "image-text-to-text",
+        "aliases": [
+          "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+          "openweight-medium"
+        ],
+        "created": 1765979886,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 128000,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "whisper-large-v3",
+        "type": "automatic-speech-recognition",
+        "aliases": [
+          "openai/whisper-large-v3",
+          "openweight-audio"
+        ],
+        "created": 1778071574,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": null,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "lightonocr-2-1b",
+        "type": "image-text-to-text",
+        "aliases": [
+          "lightonai/LightOnOCR-2-1B",
+          "openweight-ocr"
+        ],
+        "created": 1778661968,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 16384,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "deepseek-v4-flash-0731",
+        "type": "text-generation",
+        "aliases": [
+          "deepseek-ai/DeepSeek-V4-Flash-0731",
+          "deepseek-v4-flash"
+        ],
+        "created": 1782391535,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 131072,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "qwen3-vl-embedding-8b",
+        "type": "text-embeddings-inference",
+        "aliases": [
+          "Qwen/Qwen3-VL-Embedding-8B"
+        ],
+        "created": 1782401149,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 32768,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      },
+      {
+        "object": "model",
+        "id": "gemma-4-31b-it",
+        "type": "image-text-to-text",
+        "aliases": [
+          "google/gemma-4-31B-it"
+        ],
+        "created": 1784907835,
+        "owned_by": "Direction interministerielle du numerique (DINUM)",
+        "max_context_length": 262144,
+        "costs": {
+          "prompt_tokens": 0.0,
+          "completion_tokens": 0.0
+        }
+      }
+    ]
+  },
+  "synthetic": false
+}

@@ -1,0 +1,73 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "gpt-oss-120b",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Combien font 17*23 ? Réponds par le nombre seul."
+        }
+      ],
+      "max_tokens": 2048,
+      "reasoning_effort": "low"
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-8c23b0e24871d978",
+    "object": "chat.completion",
+    "created": 1790442014,
+    "model": "gpt-oss-120b",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "391",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "tool_calls": [],
+          "reasoning": "Just answer 391."
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "stop_reason": null,
+        "token_ids": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": null,
+    "usage": {
+      "prompt_tokens": 16,
+      "completion_tokens": 1,
+      "total_tokens": 17,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 9.139140149957796e-06,
+          "max": 9.139140149957796e-06
+        },
+        "kgCO2eq": {
+          "min": 4.512480009761586e-07,
+          "max": 4.512480009761586e-07
+        }
+      },
+      "impacts": {
+        "kWh": 9.139140149957796e-06,
+        "kgCO2eq": 4.512480009761586e-07
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "kv_transfer_params": null
+  },
+  "synthetic": false
+}

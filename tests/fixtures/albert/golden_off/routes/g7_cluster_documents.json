@@ -1,0 +1,101 @@
+{
+  "route": "POST /cluster_documents",
+  "fingerprint_legend": {},
+  "cases": [
+    {
+      "case": "admin:min_cluster_size",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/cluster_documents",
+        "form": {
+          "session_folder": "gsess-full",
+          "session_name": "Golden",
+          "min_cluster_size": 3
+        }
+      },
+      "status": 200,
+      "body": {
+        "success": true,
+        "n_documents": 2,
+        "n_clusters": 1,
+        "n_noise": 0,
+        "noise_ratio": 0.0,
+        "cluster_sizes": {
+          "0": 2
+        },
+        "output_path": "gsess-full/clustering_results.json"
+      },
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_clustering_pipeline",
+          "kwargs": {
+            "embeddings_json_path": "<TMP>/uploads/gsess-full/output_chunks_with_embeddings_sparse.json",
+            "output_dir": "<TMP>/uploads/gsess-full",
+            "session_name": "Golden",
+            "min_cluster_size": 3,
+            "aggregation_method": "mean"
+          }
+        }
+      ]
+    },
+    {
+      "case": "member_nokeys:auto",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/cluster_documents",
+        "form": {
+          "session_folder": "gsess-full",
+          "session_name": "Golden",
+          "aggregation": "max"
+        }
+      },
+      "status": 200,
+      "body": {
+        "success": true,
+        "n_documents": 2,
+        "n_clusters": 1,
+        "n_noise": 0,
+        "noise_ratio": 0.0,
+        "cluster_sizes": {
+          "0": 2
+        },
+        "output_path": "gsess-full/clustering_results.json"
+      },
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "run_clustering_pipeline",
+          "kwargs": {
+            "embeddings_json_path": "<TMP>/uploads/gsess-full/output_chunks_with_embeddings_sparse.json",
+            "output_dir": "<TMP>/uploads/gsess-full",
+            "session_name": "Golden",
+            "min_cluster_size": null,
+            "aggregation_method": "max"
+          }
+        }
+      ]
+    },
+    {
+      "case": "missing_embeddings",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/cluster_documents",
+        "form": {
+          "session_folder": "gsess-empty",
+          "session_name": "Golden"
+        }
+      },
+      "status": 400,
+      "body": {
+        "error": "Embeddings file not found. Run embedding generation first.",
+        "missing_file": "output_chunks_with_embeddings.json"
+      },
+      "server_exceptions": [],
+      "calls": []
+    }
+  ]
+}

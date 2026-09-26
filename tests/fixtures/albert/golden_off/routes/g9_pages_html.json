@@ -1,0 +1,118 @@
+{
+  "route": "GET pages (index, profile, project detail)",
+  "fingerprint_legend": {},
+  "cases": [
+    {
+      "case": "index.html:admin",
+      "persona": "admin",
+      "request": {
+        "method": "GET",
+        "path": "/pipeline"
+      },
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 115547,
+      "lines": 3170,
+      "sha256": "1ea526b008c7e7446e6f41a06a35434421798c065587e129cd7d52cb89abedcd",
+      "server_exceptions": []
+    },
+    {
+      "case": "index.html:member_nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "GET",
+        "path": "/pipeline"
+      },
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 115252,
+      "lines": 3164,
+      "sha256": "22d5e25486c206308975485968c6dd18cc8541cd65f1f941fea3cc48b055784a",
+      "server_exceptions": []
+    },
+    {
+      "case": "index.html:project:admin",
+      "persona": "admin",
+      "request": {
+        "method": "GET",
+        "path": "/pipeline?project=1&session=gsess-full"
+      },
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 115945,
+      "lines": 3182,
+      "sha256": "c5b0a9c23bca1103e5a0bf8ecc01ffbf972ed465dcebf77c1549660636695bd2",
+      "server_exceptions": []
+    },
+    {
+      "case": "index.html:project:member_nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "GET",
+        "path": "/pipeline?project=1&session=gsess-full"
+      },
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 115650,
+      "lines": 3176,
+      "sha256": "41b57db118a1354c9bc287a48ca132b58a07b7108e09cbca8946502c66e8172e",
+      "server_exceptions": []
+    },
+    {
+      "case": "user/profile.html:admin",
+      "persona": "admin",
+      "request": {
+        "method": "GET",
+        "path": "/profile"
+      },
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 46263,
+      "lines": 1228,
+      "sha256": "a344ea3b244993615213974eaf7edbd32a956f47d6f6b62140c4b8a45bbcd8ab",
+      "server_exceptions": []
+    },
+    {
+      "case": "user/profile.html:member_nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "GET",
+        "path": "/profile"
+      },
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 45037,
+      "lines": 1204,
+      "sha256": "aeb1a486a9c80322343359c8265c96523ef5c86cba9e674dc9f4118a646104f1",
+      "server_exceptions": []
+    },
+    {
+      "case": "user/project_detail.html:admin",
+      "persona": "admin",
+      "request": {
+        "method": "GET",
+        "path": "/project/1"
+      },
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 107903,
+      "lines": 2731,
+      "sha256": "b960417179ec8b9f9284103db9cec050b926b2e5eb4d27503435503aa03a09e8",
+      "server_exceptions": []
+    },
+    {
+      "case": "user/project_detail.html:member_nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "GET",
+        "path": "/project/1"
+      },
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 106677,
+      "lines": 2707,
+      "sha256": "29b65fb81319f183487d6c200366e0e95e0ce9aac1c3b48230e6c74e3af80631",
+      "server_exceptions": []
+    }
+  ]
+}

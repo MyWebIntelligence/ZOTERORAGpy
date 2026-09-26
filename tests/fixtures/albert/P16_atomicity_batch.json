@@ -1,0 +1,100 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents/4934610/chunks",
+    "body_summary": {
+      "chunks": [
+        {
+          "content": "atomicité 0",
+          "metadata": {
+            "i": 0
+          }
+        },
+        {
+          "content": "atomicité 1",
+          "metadata": {
+            "i": 1
+          }
+        },
+        {
+          "content": "atomicité 2",
+          "metadata": {
+            "i": 2,
+            "tags": [
+              "a"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "string_type",
+        "loc": [
+          "body",
+          "chunks",
+          2,
+          "metadata",
+          "tags",
+          "constrained-str"
+        ],
+        "msg": "Input should be a valid string",
+        "input": [
+          "a"
+        ]
+      },
+      {
+        "type": "int_type",
+        "loc": [
+          "body",
+          "chunks",
+          2,
+          "metadata",
+          "tags",
+          "constrained-int"
+        ],
+        "msg": "Input should be a valid integer",
+        "input": [
+          "a"
+        ]
+      },
+      {
+        "type": "float_type",
+        "loc": [
+          "body",
+          "chunks",
+          2,
+          "metadata",
+          "tags",
+          "constrained-float"
+        ],
+        "msg": "Input should be a valid number",
+        "input": [
+          "a"
+        ]
+      },
+      {
+        "type": "bool_type",
+        "loc": [
+          "body",
+          "chunks",
+          2,
+          "metadata",
+          "tags",
+          "bool"
+        ],
+        "msg": "Input should be a valid boolean",
+        "input": [
+          "a"
+        ]
+      }
+    ]
+  },
+  "synthetic": false
+}

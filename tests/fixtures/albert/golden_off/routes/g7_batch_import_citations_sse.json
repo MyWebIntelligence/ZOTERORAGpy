@@ -1,0 +1,272 @@
+{
+  "route": "POST /api/projects/{project_id}/batch_import_citations_sse",
+  "fingerprint_legend": {
+    "fp:fc9778f2aa10": "server_env.OPENROUTER_API_KEY",
+    "fp:669b22cf2228": "server_env.ZOTERO_API_KEY",
+    "fp:cb7c9d34db28": "server_env.ZOTERO_USER_ID",
+    "fp:fba411cc5d41": "db.admin.openai_api_key"
+  },
+  "cases": [
+    {
+      "case": "admin_openai",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/2/batch_import_citations_sse",
+        "form": {
+          "session_id": 2,
+          "batch_size": 10
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 1, \"batch_size\": 10, \"num_batches\": 1, \"existing_items\": 0}",
+        "{\"type\": \"batch_start\", \"batch\": 1, \"start_idx\": 0, \"end_idx\": 1}",
+        "{\"type\": \"filter_progress\", \"current\": 1, \"status\": \"relevant\"}",
+        "{\"type\": \"import_progress\", \"current\": 1, \"action\": \"created\", \"item_key\": \"ITEMGOLD1\"}",
+        "{\"type\": \"batch_complete\", \"batch\": 1, \"created\": 1, \"skipped\": 0, \"errors\": 0}",
+        "{\"type\": \"complete\", \"total_created\": 1, \"total_skipped\": 0, \"total_errors\": 0}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "get_or_create_collection",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "collection_name": "Golden collection",
+            "description": "Golden collection description",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "fetch_collection_items",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "collection_key": "COLLGOLD1",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "fetch_citation_content",
+          "kwargs": {
+            "article_url": "https://example.org/golden-1",
+            "fulltext_url": null,
+            "timeout": 30,
+            "max_chars": 10000
+          }
+        },
+        {
+          "fn": "filter_citation_with_llm",
+          "kwargs": {
+            "citation": {
+              "uid": "GOLDEN:0001",
+              "title": "Golden citation one",
+              "source": null,
+              "publisher": null,
+              "article_url": "https://example.org/golden-1",
+              "fulltext_url": null,
+              "abstract": null,
+              "year": 2024,
+              "cites": null,
+              "authors": [
+                "A. Author"
+              ],
+              "doi": "10.0000/golden.1",
+              "type": null
+            },
+            "web_content": {
+              "len": 19,
+              "sha": "sha:a991d3de0d68"
+            },
+            "web_content_source": "article_url",
+            "project_name": "Golden citations",
+            "project_description": "Golden citation filtering",
+            "collection_name": "Golden collection",
+            "collection_description": "Golden collection description",
+            "model": "gpt-4o-mini",
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "create_or_update_item",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_data": {
+              "itemType": "journalArticle",
+              "title": "Golden citation one",
+              "DOI": "",
+              "collections": [
+                "COLLGOLD1"
+              ]
+            },
+            "api_key": "fp:669b22cf2228"
+          }
+        }
+      ]
+    },
+    {
+      "case": "admin_openrouter_slug",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/3/batch_import_citations_sse",
+        "form": {
+          "session_id": 3,
+          "batch_size": 10
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 1, \"batch_size\": 10, \"num_batches\": 1, \"existing_items\": 0}",
+        "{\"type\": \"batch_start\", \"batch\": 1, \"start_idx\": 0, \"end_idx\": 1}",
+        "{\"type\": \"filter_progress\", \"current\": 1, \"status\": \"relevant\"}",
+        "{\"type\": \"import_progress\", \"current\": 1, \"action\": \"created\", \"item_key\": \"ITEMGOLD1\"}",
+        "{\"type\": \"batch_complete\", \"batch\": 1, \"created\": 1, \"skipped\": 0, \"errors\": 0}",
+        "{\"type\": \"complete\", \"total_created\": 1, \"total_skipped\": 0, \"total_errors\": 0}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "get_or_create_collection",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "collection_name": "Golden collection",
+            "description": "Golden collection description",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "fetch_collection_items",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "collection_key": "COLLGOLD1",
+            "api_key": "fp:669b22cf2228"
+          }
+        },
+        {
+          "fn": "fetch_citation_content",
+          "kwargs": {
+            "article_url": "https://example.org/golden-1",
+            "fulltext_url": null,
+            "timeout": 30,
+            "max_chars": 10000
+          }
+        },
+        {
+          "fn": "filter_citation_with_llm",
+          "kwargs": {
+            "citation": {
+              "uid": "GOLDEN:0001",
+              "title": "Golden citation one",
+              "source": null,
+              "publisher": null,
+              "article_url": "https://example.org/golden-1",
+              "fulltext_url": null,
+              "abstract": null,
+              "year": 2024,
+              "cites": null,
+              "authors": [
+                "A. Author"
+              ],
+              "doi": "10.0000/golden.1",
+              "type": null
+            },
+            "web_content": {
+              "len": 19,
+              "sha": "sha:a991d3de0d68"
+            },
+            "web_content_source": "article_url",
+            "project_name": "Golden citations",
+            "project_description": "Golden citation filtering",
+            "collection_name": "Golden collection",
+            "collection_description": "Golden collection description",
+            "model": "google/gemini-2.5-flash",
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10"
+          }
+        },
+        {
+          "fn": "create_or_update_item",
+          "kwargs": {
+            "library_type": "users",
+            "library_id": "fp:cb7c9d34db28",
+            "item_data": {
+              "itemType": "journalArticle",
+              "title": "Golden citation one",
+              "DOI": "",
+              "collections": [
+                "COLLGOLD1"
+              ]
+            },
+            "api_key": "fp:669b22cf2228"
+          }
+        }
+      ]
+    },
+    {
+      "case": "nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/4/batch_import_citations_sse",
+        "form": {
+          "session_id": 4,
+          "batch_size": 10
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"OpenAI API key required\", \"credential_required\": \"openai_api_key\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "openrouter_slug_nokey_member_nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/5/batch_import_citations_sse",
+        "form": {
+          "session_id": 5,
+          "batch_size": 10
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"OpenRouter API key required\", \"credential_required\": \"openrouter_api_key\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "openrouter_slug_nokey_member_keys",
+      "persona": "member_keys",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/6/batch_import_citations_sse",
+        "form": {
+          "session_id": 6,
+          "batch_size": 10
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"OpenRouter API key required\", \"credential_required\": \"openrouter_api_key\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    }
+  ]
+}

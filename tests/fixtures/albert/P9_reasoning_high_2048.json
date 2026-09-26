@@ -1,0 +1,73 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "gpt-oss-120b",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Combien font 17*23 ? Réponds par le nombre seul."
+        }
+      ],
+      "max_tokens": 2048,
+      "reasoning_effort": "high"
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-a3f751675784a4ac",
+    "object": "chat.completion",
+    "created": 1790442015,
+    "model": "gpt-oss-120b",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "391",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "tool_calls": [],
+          "reasoning": "We have a user writing in French: \"Combien font 17*23 ? Réponds par le nombre seul.\"\n\nMeaning: \"What is 17*23? Respond with the number only.\"\n\nThey want the product of 17 and 23, expressed as a single number, no words. So the product is 391. Let's compute: 17 * 23 = 17*20 + 17*3 = 340 + 51 = 391. Yes.\n\nThe instruction: Respond with the number only, not any other text.\n\nThus the answer should be \"391\". Also ensure no extra punctuation? Typically they just want number, maybe plain \"391\". So final response: \"391\"."
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "stop_reason": null,
+        "token_ids": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": null,
+    "usage": {
+      "prompt_tokens": 16,
+      "completion_tokens": 1,
+      "total_tokens": 17,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 1.0948515149957796e-05,
+          "max": 1.0948515149957796e-05
+        },
+        "kgCO2eq": {
+          "min": 8.664468826035051e-07,
+          "max": 8.664468826035051e-07
+        }
+      },
+      "impacts": {
+        "kWh": 1.0948515149957796e-05,
+        "kgCO2eq": 8.664468826035051e-07
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "kv_transfer_params": null
+  },
+  "synthetic": false
+}

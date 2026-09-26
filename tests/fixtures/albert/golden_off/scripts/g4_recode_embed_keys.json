@@ -1,0 +1,314 @@
+[
+  {
+    "model": "gpt-4o-mini",
+    "prefer_openai": 0,
+    "harden": 0,
+    "key_model": "gpt-4o-mini",
+    "provider_label": "openai",
+    "recode_key": "ead6fbadc23f93d14158fb72f9060306d55150eb40ea27642c1cb9909615d44a",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "gpt-4o-mini",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openai",
+    "sent_model": "gpt-4o-mini",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "84ec8afcd2667827d004c8a8d1fc6beeb881f9067630a05806114696f4f9b870",
+    "embed_key_args": {
+      "text_sha12": "ab6f266ba443",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "gpt-4o-mini",
+    "prefer_openai": 0,
+    "harden": 1,
+    "key_model": "gpt-4o-mini-2024-07-18",
+    "provider_label": "openai",
+    "recode_key": "09c06c7233de3ec19c24b06a89f451752066f36d0c791531061e342090a29d00",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "gpt-4o-mini-2024-07-18",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openai",
+    "sent_model": "gpt-4o-mini-2024-07-18",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "1ae52210995e08b65fa5392ffc8d30cb3133652e156ea1c9145154feed19624f",
+    "embed_key_args": {
+      "text_sha12": "c4ca2cda4708",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "gpt-4o-mini",
+    "prefer_openai": 1,
+    "harden": 0,
+    "key_model": "gpt-4o-mini",
+    "provider_label": "openai",
+    "recode_key": "ead6fbadc23f93d14158fb72f9060306d55150eb40ea27642c1cb9909615d44a",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "gpt-4o-mini",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openai",
+    "sent_model": "gpt-4o-mini",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "84ec8afcd2667827d004c8a8d1fc6beeb881f9067630a05806114696f4f9b870",
+    "embed_key_args": {
+      "text_sha12": "ab6f266ba443",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "gpt-4o-mini",
+    "prefer_openai": 1,
+    "harden": 1,
+    "key_model": "gpt-4o-mini-2024-07-18",
+    "provider_label": "openai",
+    "recode_key": "09c06c7233de3ec19c24b06a89f451752066f36d0c791531061e342090a29d00",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "gpt-4o-mini-2024-07-18",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openai",
+    "sent_model": "gpt-4o-mini-2024-07-18",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "1ae52210995e08b65fa5392ffc8d30cb3133652e156ea1c9145154feed19624f",
+    "embed_key_args": {
+      "text_sha12": "c4ca2cda4708",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "google/gemini-2.5-flash",
+    "prefer_openai": 0,
+    "harden": 0,
+    "key_model": "google/gemini-2.5-flash",
+    "provider_label": "openrouter",
+    "recode_key": "46f89c404c437f51f768b038157678583c3a543d8ad6dec7c05f89a7f4ad7743",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "google/gemini-2.5-flash",
+      "provider": "openrouter",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openrouter",
+    "sent_model": "google/gemini-2.5-flash",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "4c71271104c40d72ee823d25cf994da70d7aade91bf9bc3bcb912c70bfbb9a2f",
+    "embed_key_args": {
+      "text_sha12": "8ea519bc77ed",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "google/gemini-2.5-flash",
+    "prefer_openai": 0,
+    "harden": 1,
+    "key_model": "gpt-4o-mini-2024-07-18",
+    "provider_label": "openai",
+    "recode_key": "09c06c7233de3ec19c24b06a89f451752066f36d0c791531061e342090a29d00",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "gpt-4o-mini-2024-07-18",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openai",
+    "sent_model": "gpt-4o-mini-2024-07-18",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "1ae52210995e08b65fa5392ffc8d30cb3133652e156ea1c9145154feed19624f",
+    "embed_key_args": {
+      "text_sha12": "c4ca2cda4708",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "google/gemini-2.5-flash",
+    "prefer_openai": 1,
+    "harden": 0,
+    "key_model": "google/gemini-2.5-flash",
+    "provider_label": "openai",
+    "recode_key": "f552081e7061f512f414672e5ad075ba0fd39982cee308afe442095a17c7f946",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "google/gemini-2.5-flash",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openrouter",
+    "sent_model": "google/gemini-2.5-flash",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "4c71271104c40d72ee823d25cf994da70d7aade91bf9bc3bcb912c70bfbb9a2f",
+    "embed_key_args": {
+      "text_sha12": "8ea519bc77ed",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "google/gemini-2.5-flash",
+    "prefer_openai": 1,
+    "harden": 1,
+    "key_model": "gpt-4o-mini-2024-07-18",
+    "provider_label": "openai",
+    "recode_key": "09c06c7233de3ec19c24b06a89f451752066f36d0c791531061e342090a29d00",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "gpt-4o-mini-2024-07-18",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openai",
+    "sent_model": "gpt-4o-mini-2024-07-18",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "1ae52210995e08b65fa5392ffc8d30cb3133652e156ea1c9145154feed19624f",
+    "embed_key_args": {
+      "text_sha12": "c4ca2cda4708",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "openai/gpt-oss-120b",
+    "prefer_openai": 0,
+    "harden": 0,
+    "key_model": "openai/gpt-oss-120b",
+    "provider_label": "openrouter",
+    "recode_key": "316ccd5506ba5927da2ed1b75af64bcfd0a1373580bad9223917da6116654d71",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "openai/gpt-oss-120b",
+      "provider": "openrouter",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openrouter",
+    "sent_model": "openai/gpt-oss-120b",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "1e29ee085d83c310da8fa99d90a395deef1fa7812f6f0fe1d7072cde887e8b2c",
+    "embed_key_args": {
+      "text_sha12": "97554fedd557",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "openai/gpt-oss-120b",
+    "prefer_openai": 0,
+    "harden": 1,
+    "key_model": "gpt-4o-mini-2024-07-18",
+    "provider_label": "openai",
+    "recode_key": "09c06c7233de3ec19c24b06a89f451752066f36d0c791531061e342090a29d00",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "gpt-4o-mini-2024-07-18",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openai",
+    "sent_model": "gpt-4o-mini-2024-07-18",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "1ae52210995e08b65fa5392ffc8d30cb3133652e156ea1c9145154feed19624f",
+    "embed_key_args": {
+      "text_sha12": "c4ca2cda4708",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "openai/gpt-oss-120b",
+    "prefer_openai": 1,
+    "harden": 0,
+    "key_model": "openai/gpt-oss-120b",
+    "provider_label": "openai",
+    "recode_key": "0bfcb99d6c13b7983cf97da3adba919f23f4245cb6fd65be47f5c9695535b9a9",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "openai/gpt-oss-120b",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openrouter",
+    "sent_model": "openai/gpt-oss-120b",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "1e29ee085d83c310da8fa99d90a395deef1fa7812f6f0fe1d7072cde887e8b2c",
+    "embed_key_args": {
+      "text_sha12": "97554fedd557",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  },
+  {
+    "model": "openai/gpt-oss-120b",
+    "prefer_openai": 1,
+    "harden": 1,
+    "key_model": "gpt-4o-mini-2024-07-18",
+    "provider_label": "openai",
+    "recode_key": "09c06c7233de3ec19c24b06a89f451752066f36d0c791531061e342090a29d00",
+    "recode_key_args": {
+      "content_hash": "7b558f69202e679239412682b63cb3ca6951b05759b783fe7db45876d47597b2",
+      "model": "gpt-4o-mini-2024-07-18",
+      "provider": "openai",
+      "prompt_version": "cceb75bfd4470bc7",
+      "decode_params": "{\"max_tokens\": 1600, \"seed\": 0, \"temperature\": 0.0, \"top_p\": 1.0}"
+    },
+    "routed_client": "openai",
+    "sent_model": "gpt-4o-mini-2024-07-18",
+    "statuses": [
+      "recoded"
+    ],
+    "embed_key": "1ae52210995e08b65fa5392ffc8d30cb3133652e156ea1c9145154feed19624f",
+    "embed_key_args": {
+      "text_sha12": "c4ca2cda4708",
+      "embed_model": "text-embedding-3-large",
+      "embed_params": "{\"model\": \"text-embedding-3-large\"}"
+    }
+  }
+]

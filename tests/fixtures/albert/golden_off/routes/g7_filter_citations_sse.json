@@ -1,0 +1,150 @@
+{
+  "route": "POST /api/projects/{project_id}/filter_citations_sse",
+  "fingerprint_legend": {
+    "fp:fc9778f2aa10": "server_env.OPENROUTER_API_KEY",
+    "fp:fba411cc5d41": "db.admin.openai_api_key"
+  },
+  "cases": [
+    {
+      "case": "admin_openai",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/2/filter_citations_sse",
+        "form": {
+          "session_id": 2,
+          "batch_size": 5
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"already_processed\": 0, \"remaining\": 2, \"batch_size\": 5}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"status\": \"relevant\", \"title\": \"Golden citation one\"}",
+        "{\"type\": \"progress\", \"current\": 2, \"total\": 2, \"status\": \"skipped\", \"title\": \"Golden citation two\"}",
+        "{\"type\": \"complete\", \"relevant\": 1, \"skipped\": 1}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "process_citations_parallel",
+          "kwargs": {
+            "citations": [
+              "Golden citation one",
+              "Golden citation two"
+            ],
+            "config": {
+              "project_name": "Golden citations",
+              "project_description": "Golden citation filtering",
+              "collection_name": "Golden collection",
+              "collection_description": "Golden collection description",
+              "model": "gpt-4o-mini"
+            },
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10",
+            "batch_size": 5
+          }
+        }
+      ]
+    },
+    {
+      "case": "admin_openrouter_slug",
+      "persona": "admin",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/3/filter_citations_sse",
+        "form": {
+          "session_id": 3,
+          "batch_size": 5
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"init\", \"total\": 2, \"already_processed\": 0, \"remaining\": 2, \"batch_size\": 5}",
+        "{\"type\": \"progress\", \"current\": 1, \"total\": 2, \"status\": \"relevant\", \"title\": \"Golden citation one\"}",
+        "{\"type\": \"progress\", \"current\": 2, \"total\": 2, \"status\": \"skipped\", \"title\": \"Golden citation two\"}",
+        "{\"type\": \"complete\", \"relevant\": 1, \"skipped\": 1}"
+      ],
+      "server_exceptions": [],
+      "calls": [
+        {
+          "fn": "process_citations_parallel",
+          "kwargs": {
+            "citations": [
+              "Golden citation one",
+              "Golden citation two"
+            ],
+            "config": {
+              "project_name": "Golden citations",
+              "project_description": "Golden citation filtering",
+              "collection_name": "Golden collection",
+              "collection_description": "Golden collection description",
+              "model": "google/gemini-2.5-flash"
+            },
+            "openai_api_key": "fp:fba411cc5d41",
+            "openrouter_api_key": "fp:fc9778f2aa10",
+            "batch_size": 5
+          }
+        }
+      ]
+    },
+    {
+      "case": "nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/4/filter_citations_sse",
+        "form": {
+          "session_id": 4,
+          "batch_size": 5
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"Clé API OpenAI requise. Configurez-la dans Paramètres > Mes Identifiants.\", \"credential_required\": \"openai_api_key\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "openrouter_slug_nokey_member_nokeys",
+      "persona": "member_nokeys",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/5/filter_citations_sse",
+        "form": {
+          "session_id": 5,
+          "batch_size": 5
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"Clé API OpenRouter requise pour ce modèle. Configurez-la dans Paramètres > Mes Identifiants.\", \"credential_required\": \"openrouter_api_key\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    },
+    {
+      "case": "openrouter_slug_nokey_member_keys",
+      "persona": "member_keys",
+      "request": {
+        "method": "POST",
+        "path": "/api/projects/6/filter_citations_sse",
+        "form": {
+          "session_id": 6,
+          "batch_size": 5
+        }
+      },
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "events": [
+        "{\"type\": \"error\", \"message\": \"Clé API OpenRouter requise pour ce modèle. Configurez-la dans Paramètres > Mes Identifiants.\", \"credential_required\": \"openrouter_api_key\"}"
+      ],
+      "server_exceptions": [],
+      "calls": []
+    }
+  ]
+}

@@ -1,0 +1,219 @@
+[
+  {
+    "function": "_generate_with_llm",
+    "case": "short_openai",
+    "mode": "short",
+    "model": "gpt-4o-mini",
+    "returned": "<p>[openai:gpt-4o-mini] Réponse golden.</p>",
+    "error": null,
+    "credentials_passed": [
+      {
+        "openai_api_key_passed": true,
+        "openrouter_api_key_passed": true
+      }
+    ],
+    "calls": [
+      {
+        "client": "openai",
+        "endpoint": "chat.completions.create",
+        "kwargs": {
+          "max_tokens": 2000,
+          "messages": [
+            {
+              "role": "system",
+              "content": "Tu es un assistant spécialisé en rédaction de fiches de lecture académiques."
+            },
+            {
+              "role": "user",
+              "content": "PROMPT GOLDEN G11 : produire une fiche de lecture sur « Le langage ordinaire »."
+            }
+          ],
+          "model": "gpt-4o-mini",
+          "temperature": 0.2
+        }
+      }
+    ]
+  },
+  {
+    "function": "_generate_with_llm",
+    "case": "extended_openrouter",
+    "mode": "extended",
+    "model": "google/gemini-2.5-flash",
+    "returned": "<p>[openrouter:google/gemini-2.5-flash] Réponse golden.</p>",
+    "error": null,
+    "credentials_passed": [
+      {
+        "openai_api_key_passed": true,
+        "openrouter_api_key_passed": true
+      }
+    ],
+    "calls": [
+      {
+        "client": "openrouter",
+        "endpoint": "chat.completions.create",
+        "kwargs": {
+          "max_tokens": 16000,
+          "messages": [
+            {
+              "role": "system",
+              "content": "Tu es un assistant spécialisé en rédaction de fiches de lecture académiques."
+            },
+            {
+              "role": "user",
+              "content": "PROMPT GOLDEN G11 : produire une fiche de lecture sur « Le langage ordinaire »."
+            }
+          ],
+          "model": "google/gemini-2.5-flash",
+          "temperature": 0.2
+        }
+      }
+    ]
+  },
+  {
+    "function": "_generate_with_llm",
+    "case": "extended_default_model",
+    "mode": "extended",
+    "model": null,
+    "returned": "<p>[openai:gpt-4o-mini] Réponse golden.</p>",
+    "error": null,
+    "credentials_passed": [
+      {
+        "openai_api_key_passed": true,
+        "openrouter_api_key_passed": true
+      }
+    ],
+    "calls": [
+      {
+        "client": "openai",
+        "endpoint": "chat.completions.create",
+        "kwargs": {
+          "max_tokens": 16000,
+          "messages": [
+            {
+              "role": "system",
+              "content": "Tu es un assistant spécialisé en rédaction de fiches de lecture académiques."
+            },
+            {
+              "role": "user",
+              "content": "PROMPT GOLDEN G11 : produire une fiche de lecture sur « Le langage ordinaire »."
+            }
+          ],
+          "model": "gpt-4o-mini",
+          "temperature": 0.2
+        }
+      }
+    ]
+  },
+  {
+    "function": "_generate_with_llm",
+    "case": "short_openrouter_missing_fallback",
+    "mode": "short",
+    "model": "google/gemini-2.5-flash",
+    "returned": "<p>[openai:gpt-4o-mini] Réponse golden.</p>",
+    "error": null,
+    "credentials_passed": [
+      {
+        "openai_api_key_passed": true,
+        "openrouter_api_key_passed": true
+      }
+    ],
+    "calls": [
+      {
+        "client": "openai",
+        "endpoint": "chat.completions.create",
+        "kwargs": {
+          "max_tokens": 2000,
+          "messages": [
+            {
+              "role": "system",
+              "content": "Tu es un assistant spécialisé en rédaction de fiches de lecture académiques."
+            },
+            {
+              "role": "user",
+              "content": "PROMPT GOLDEN G11 : produire une fiche de lecture sur « Le langage ordinaire »."
+            }
+          ],
+          "model": "gpt-4o-mini",
+          "temperature": 0.2
+        }
+      }
+    ]
+  },
+  {
+    "function": "_call_llm_api",
+    "case": "filter_openai",
+    "model": "gpt-4o-mini",
+    "returned": "<p>[openai:gpt-4o-mini] Réponse golden.</p>",
+    "error": null,
+    "credentials_passed": [
+      {
+        "openai_api_key_passed": true,
+        "openrouter_api_key_passed": true
+      }
+    ],
+    "calls": [
+      {
+        "client": "openai",
+        "endpoint": "chat.completions.create",
+        "kwargs": {
+          "max_tokens": 1500,
+          "messages": [
+            {
+              "role": "user",
+              "content": "PROMPT GOLDEN G11 : produire une fiche de lecture sur « Le langage ordinaire »."
+            }
+          ],
+          "model": "gpt-4o-mini",
+          "temperature": 0.2
+        }
+      }
+    ]
+  },
+  {
+    "function": "_call_llm_api",
+    "case": "filter_openrouter",
+    "model": "google/gemini-2.5-flash",
+    "returned": "<p>[openrouter:google/gemini-2.5-flash] Réponse golden.</p>",
+    "error": null,
+    "credentials_passed": [
+      {
+        "openai_api_key_passed": true,
+        "openrouter_api_key_passed": true
+      }
+    ],
+    "calls": [
+      {
+        "client": "openrouter",
+        "endpoint": "chat.completions.create",
+        "kwargs": {
+          "max_tokens": 1500,
+          "messages": [
+            {
+              "role": "user",
+              "content": "PROMPT GOLDEN G11 : produire une fiche de lecture sur « Le langage ordinaire »."
+            }
+          ],
+          "model": "google/gemini-2.5-flash",
+          "temperature": 0.2
+        }
+      }
+    ]
+  },
+  {
+    "function": "_call_llm_api",
+    "case": "filter_openrouter_missing",
+    "model": "google/gemini-2.5-flash",
+    "returned": null,
+    "error": {
+      "type": "ValueError",
+      "message": "OpenRouter client not available (missing OPENROUTER_API_KEY)"
+    },
+    "credentials_passed": [
+      {
+        "openai_api_key_passed": true,
+        "openrouter_api_key_passed": true
+      }
+    ],
+    "calls": []
+  }
+]

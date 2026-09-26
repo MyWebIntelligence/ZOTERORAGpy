@@ -1,0 +1,27 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents/4934611/chunks",
+    "body_summary": {
+      "chunks": [
+        {
+          "content": "Jeton unique ZXQ1790442024 pour la mesure d'indexation.",
+          "metadata": {
+            "sonde": "p18"
+          }
+        }
+      ]
+    }
+  },
+  "status": 201,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "document_id": 4934611,
+    "ids": [
+      0
+    ]
+  },
+  "synthetic": false
+}

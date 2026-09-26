@@ -1,0 +1,244 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/me",
+    "body_summary": null
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "userInfo",
+    "id": "<masqué>",
+    "email": "<masqué>",
+    "name": "<masqué>",
+    "organization_id": "<masqué>",
+    "budget": null,
+    "permissions": [],
+    "limits": [
+      {
+        "router_id": 342,
+        "type": "rpm",
+        "value": 500
+      },
+      {
+        "router_id": 342,
+        "type": "rpd",
+        "value": 50000
+      },
+      {
+        "router_id": 342,
+        "type": "tpm",
+        "value": null
+      },
+      {
+        "router_id": 342,
+        "type": "tpd",
+        "value": null
+      },
+      {
+        "router_id": 343,
+        "type": "rpm",
+        "value": 500
+      },
+      {
+        "router_id": 343,
+        "type": "rpd",
+        "value": 50000
+      },
+      {
+        "router_id": 343,
+        "type": "tpm",
+        "value": null
+      },
+      {
+        "router_id": 343,
+        "type": "tpd",
+        "value": null
+      },
+      {
+        "router_id": 1090,
+        "type": "rpm",
+        "value": 50
+      },
+      {
+        "router_id": 1090,
+        "type": "rpd",
+        "value": null
+      },
+      {
+        "router_id": 1090,
+        "type": "tpm",
+        "value": 246000
+      },
+      {
+        "router_id": 1090,
+        "type": "tpd",
+        "value": null
+      },
+      {
+        "router_id": 1086,
+        "type": "rpm",
+        "value": 50
+      },
+      {
+        "router_id": 1086,
+        "type": "rpd",
+        "value": 1000
+      },
+      {
+        "router_id": 1086,
+        "type": "tpm",
+        "value": 128000
+      },
+      {
+        "router_id": 1086,
+        "type": "tpd",
+        "value": 2460000
+      },
+      {
+        "router_id": 339,
+        "type": "rpm",
+        "value": 50
+      },
+      {
+        "router_id": 339,
+        "type": "rpd",
+        "value": 1000
+      },
+      {
+        "router_id": 339,
+        "type": "tpm",
+        "value": 128000
+      },
+      {
+        "router_id": 339,
+        "type": "tpd",
+        "value": 2460000
+      },
+      {
+        "router_id": 420,
+        "type": "rpm",
+        "value": 50
+      },
+      {
+        "router_id": 420,
+        "type": "rpd",
+        "value": 1000
+      },
+      {
+        "router_id": 420,
+        "type": "tpm",
+        "value": 128000
+      },
+      {
+        "router_id": 420,
+        "type": "tpd",
+        "value": 2460000
+      },
+      {
+        "router_id": 337,
+        "type": "rpm",
+        "value": 10
+      },
+      {
+        "router_id": 337,
+        "type": "rpd",
+        "value": 1000
+      },
+      {
+        "router_id": 337,
+        "type": "tpm",
+        "value": 128000
+      },
+      {
+        "router_id": 337,
+        "type": "tpd",
+        "value": 1280000
+      },
+      {
+        "router_id": 338,
+        "type": "rpm",
+        "value": 50
+      },
+      {
+        "router_id": 338,
+        "type": "rpd",
+        "value": 1000
+      },
+      {
+        "router_id": 338,
+        "type": "tpm",
+        "value": 128000
+      },
+      {
+        "router_id": 338,
+        "type": "tpd",
+        "value": 2460000
+      },
+      {
+        "router_id": 1092,
+        "type": "rpm",
+        "value": 50
+      },
+      {
+        "router_id": 1092,
+        "type": "rpd",
+        "value": 1000
+      },
+      {
+        "router_id": 1092,
+        "type": "tpm",
+        "value": null
+      },
+      {
+        "router_id": 1092,
+        "type": "tpd",
+        "value": null
+      },
+      {
+        "router_id": 1085,
+        "type": "rpm",
+        "value": 50
+      },
+      {
+        "router_id": 1085,
+        "type": "rpd",
+        "value": 1000
+      },
+      {
+        "router_id": 1085,
+        "type": "tpm",
+        "value": null
+      },
+      {
+        "router_id": 1085,
+        "type": "tpd",
+        "value": null
+      },
+      {
+        "router_id": 1094,
+        "type": "rpm",
+        "value": 50
+      },
+      {
+        "router_id": 1094,
+        "type": "rpd",
+        "value": 1000
+      },
+      {
+        "router_id": 1094,
+        "type": "tpm",
+        "value": 128000
+      },
+      {
+        "router_id": 1094,
+        "type": "tpd",
+        "value": 2460000
+      }
+    ],
+    "expires": null
+  },
+  "synthetic": false
+}

@@ -1,0 +1,35 @@
+[
+  {
+    "case": "success_namespace",
+    "exit_code": 0,
+    "result_block": [
+      "=== Result ===",
+      "Status: success",
+      "Message: Insertion terminée. Namespace ciblé: golden-ns. Total de chunks traités (tentative de préparation): 3. Total de chunks effectivement préparés et insérés avec succès dans Pinecone: 3 (sur 3 chunks initialement chargés si tous étaient valides).",
+      "Inserted: 3",
+      "Skipped (dedup): 0"
+    ]
+  },
+  {
+    "case": "success_partial_data",
+    "exit_code": 0,
+    "result_block": [
+      "=== Result ===",
+      "Status: success_partial_data",
+      "Message: Insertion terminée. Total de chunks traités (tentative de préparation): 4. Total de chunks effectivement préparés et insérés avec succès dans Pinecone: 3 (sur 4 chunks initialement chargés si tous étaient valides). Certains chunks étaient invalides et n'ont pas été préparés pour l'insertion.",
+      "Inserted: 3",
+      "Skipped (dedup): 0"
+    ]
+  },
+  {
+    "case": "partial_error",
+    "exit_code": 1,
+    "result_block": [
+      "=== Result ===",
+      "Status: partial_error",
+      "Message: Insertion terminée. Total de chunks traités (tentative de préparation): 3. Total de chunks effectivement préparés et insérés avec succès dans Pinecone: 0 (sur 3 chunks initialement chargés si tous étaient valides). Au moins un lot n'a pas pu être inséré.",
+      "Inserted: 0",
+      "Skipped (dedup): 0"
+    ]
+  }
+]

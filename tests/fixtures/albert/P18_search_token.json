@@ -1,0 +1,49 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/search",
+    "body_summary": {
+      "query": "ZXQ1790442024",
+      "collection_ids": [
+        302360
+      ],
+      "method": "lexical",
+      "limit": 1
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "list",
+    "data": [
+      {
+        "method": "lexical",
+        "score": 22.25594,
+        "chunk": {
+          "object": "chunk",
+          "id": 0,
+          "collection_id": 302360,
+          "document_id": 4934611,
+          "content": "Jeton unique ZXQ1790442024 pour la mesure d'indexation.",
+          "metadata": {
+            "sonde": "p18"
+          },
+          "created": 1790442024
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "cost": 0.0,
+      "impacts": {
+        "kWh": 0.0,
+        "kgCO2eq": 0.0
+      }
+    }
+  },
+  "synthetic": false
+}

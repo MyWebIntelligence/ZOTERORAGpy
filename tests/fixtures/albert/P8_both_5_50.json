@@ -1,0 +1,76 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "ministral-3-8b-instruct-2512",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Écris 200 mots sur la Loire."
+        }
+      ],
+      "temperature": 0.1,
+      "max_tokens": 5,
+      "max_completion_tokens": 50
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-8792b7c13e6fb9a7",
+    "object": "chat.completion",
+    "created": 1790442014,
+    "model": "ministral-3-8b-instruct-2512",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "**La Loire, le plus long fleuve de France**\n\nLa Loire, surnommée *« la Reine des rivières »*, est le plus long fleuve de France avec environ **1 000 kilomètres**, prenant sa source dans le Massif central (",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "reasoning": null
+        },
+        "logprobs": null,
+        "finish_reason": "length",
+        "stop_reason": null,
+        "token_ids": null,
+        "routed_experts": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": "vllm-0.25.1-9e7220b0",
+    "usage": {
+      "prompt_tokens": 9,
+      "completion_tokens": 54,
+      "total_tokens": 63,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 3.5521451978329068e-06,
+          "max": 3.5521451978329068e-06
+        },
+        "kgCO2eq": {
+          "min": 1.8356933948595374e-07,
+          "max": 1.8356933948595374e-07
+        }
+      },
+      "impacts": {
+        "kWh": 3.5521451978329068e-06,
+        "kgCO2eq": 1.8356933948595374e-07
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "prompt_text": null,
+    "kv_transfer_params": null,
+    "metrics": null
+  },
+  "synthetic": false
+}

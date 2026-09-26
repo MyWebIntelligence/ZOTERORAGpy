@@ -1,0 +1,83 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "gpt-oss-120b",
+      "max_tokens": 6000,
+      "reasoning_effort": "medium",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Tu es un assistant de recherche en sciences humaines et sociales."
+        },
+        {
+          "role": "user",
+          "content": "Rédige une note de lecture académique structurée (problématique, thèses, méthode, apports, limites) du texte suivant :\n\n- 12 -\nLa sociologie des sciences s'intéresse aux conditions sociales de product… (+4437 caractères)"
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-a3523b501601764c",
+    "object": "chat.completion",
+    "created": 1790442101,
+    "model": "gpt-oss-120b",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "**Note de lecture**  \n*Texte fourni (extraits multiples d’un même chapitre intitulé « La fabrique des savoirs », référencé comme Chapitre III d’une introduction générale à la sociologie des sciences et aux archives numériques).*\n\n---\n\n### 1. Problématique  \n\nLe texte met en évidence une double interrogation :\n\n1. **Comment les savoirs scientifiques sont‑ils produits, stabilisés et légitimés dans leurs contextes sociaux ?**  \n   La sociologie des sciences s’attache à rendre visible les pratiques, les instruments et les controverses qui constituent le « chantier » de la connaissance, en refusant de dissocier a priori le contenu des savoirs de leurs conditions d’apparition.\n\n2. **En quoi la numérisation massive des sources (digitisation, OCR, indexation sémantique) reconfigure la pratique des sciences humaines et pose de nouveaux défis méthodologiques ?**  \n   Les archives numériques offrent des corpus inédits, mais introduisent des biais de sélection et des erreurs techniques qui menacent la fiabilité des recherches.\n\nLa problématique centrale du texte consiste donc à articuler **la sociologie des pratiques scientifiques** avec **les enjeux épistémologiques et documentaires du numérique**, afin de proposer une *critique documentaire renouvelée* capable de rendre compte des transformations du « papier » au « données ».\n\n---\n\n### 2. Thèses principales  \n\n| N° | Formulation de la thèse | Illustration dans le texte |\n|---|--------------------------|----------------------------|\n| **T1** | Les faits scientifiques sont le produit d’un **travail collectif et matériel** (laboratoires, instruments, controverses) et non le simple résultat d’une logique logique‑déductive. | « …elle observe les laboratoires, les controverses et les instruments comme autant de lieux où se fabriquent les faits scientifiques… » |\n| **T2** | La **stabilisation** d’un résultat passe par la circulation d’inscriptions et la **publication**, même lorsque les preuves ne sont pas décisives. | « …comment les inscriptions circulent, dont les résultats sont stabilisés par des publications et dont les désaccords se referment, parfois sans que la preuve soit décisive. » |\n| **T3** | La **numérisation** des archives transfigure la pratique des sciences humaines en ouvrant de nouveaux corpus, mais crée simultanément des **biais de sélection** et des **erreurs de transcription** qui peuvent fausser les connaissances. | « Les archives numériques transforment à leur tour la pratique des sciences humaines… ouvrent des corpus inédits, mais elles introduisent aussi des biais de sélection et des erreurs de transcription. » |\n| **T4** | Une **critique documentaire renouvelée** doit inclure (i) l’identification de la provenance des textes, (ii) l’évaluation de la qualité de l’OCR, et (iii) la traçabilité des transformations entre le support papier et la base de données. | « …identifier la provenance des textes, mesurer la qualité de la reconnaissance optique, et conserver la trace des transformations successives que subit le document… » |\n\nCes thèses sont récurrentes tout au long du texte, même si les passages sont largement répétitifs. Elles forment le cœur de l’argumentation : la connaissance ne peut être appréhendée que comme un **objet historique et technique**, inscrit dans des réseaux humains et matériels, y compris numériques.\n\n---\n\n### 3. Méthode  \n\n1. **Enquête ethnographique**  \n   - *Observation participante* des chercheurs « au travail ».  \n   - Analyse des mouvements d’inscriptions (notes, graphiques, modèles informatiques) et de leurs circulations dans les communautés scientifiques.  \n   - Étude des processus de **stabilisation** des faits via la publication et la négociation (controverses, accords tacites).\n\n2. **Analyse documentaire du numérique**  \n   - **Cartographie** des chaînes de production des archives numériques : numérisation → OCR → indexation sémantique → bases de données.  \n   - **Évaluation technique** de la qualité de l’OCR (taux d’erreur, typologie des fautes) et des algorithmes d’indexation (précision/sensibilité).  \n   - **Traçabilité** : mise en place d’un registre documentaire qui consigne chaque transformation (format, métadonnées, version) afin d’assurer la transparence épistémologique.\n\n3. **Approche interdisciplinaire**  \n   - Croisement des cadres de la **sociologie des sciences** (Latour, Callon, Bourdieu) avec ceux de la **humanités numériques** (digital critique, provenance data).  \n\nLa méthode se veut **holistique** : elle ne se limite pas à la description sociologique du laboratoire, mais s’étend à la chaîne technique du document, du support physique au format numérique.\n\n---\n\n### 4. Apports  \n\n| Domaine | Contribution du texte |\n|---------|-----------------------|\n| **Sociologie des sciences** | Rappel de la dimension **matérielle et sociale** de la production du savoir ; mise à jour du paradigme « « faits » = inscriptions circulantes » en intégrant les pratiques numériques. |\n| **Humanités numériques / Archives** | Identification de **biais systématiques** inhérents aux processus de numérisation (sélection des fonds, performances de l’OCR, logique de l’indexation sémantique). |\n| **Méthodologie** | Proposition d’un **cadre de critique documentaire renouvelée** qui conjugue provenance, qualité technique et traçabilité, offrant une grille d’évaluation applicable aux projets de numérisation à grande échelle. |\n| **Pratiques de recherche** | Insistance sur la nécessité d’une **lecture attentive** des sources numériques, afin d’éviter la reproduction aveugle d’erreurs techniques dans les analyses scientifiques. |\n| **Théorie de la connaissance** | Illustration de la façon dont la **« preuve » scientifique peut être insuffisante** pour clore une controverse, soulignant le rôle des **processus sociaux** (autorité, conventions) dans la stabilisation des faits. |\n\nCes apports sont pertinents pour les chercheurs qui **concilient recherche qualitative (ethnographie) et recherche quantitative (analyse de gran…",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "tool_calls": [],
+          "reasoning": "The user wants a structured academic reading note (note de lecture) with sections: problématique, thèses, méthode, apports, limites, for the given text. The text seems repetitive, but core ideas: sociology of science studies social conditions of knowledge production, ethnographic observation of labs, controversies, instruments; digital archives transform humanities, digitization, OCR, semantic indexing open new corpora but introduce biases and transcription errors; need renewed documentary criticism to trace provenance, measure OCR quality, preserve transformation trace. So note must be structured accordingly.\n\nWe should summarize problematics: how sociological analysis of science must account for material practices and digital transformations, challenge separation of content/context, address biases in digital corpora.\n\nTheses: that scientific facts are socially constructed in labs, controversies settle without decisive proof; digital archives reshape humanities but embed biases; need for continuous documentary critique.\n\nMethod: ethnographic observation, participant observation, analysis of inscription circulation, tracking of digital processes, quality assessment of OCR, provenance tracking.\n\nApports: highlights importance of materiality, reflexivity; bridges sociology of science with digital humanities; proposes methodological guidelines for documentary criticism.\n\nLimités: repetitive text, limited empirical data, focus on French context? Overemphasis on bias perhaps not empirical; lacks concrete case studies; methodological challenges of measuring OCR quality.\n\nProvide note with citations? Not necessary. Provide an academic style note.\n\nLet's craft."
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "stop_reason": null,
+        "token_ids": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": null,
+    "usage": {
+      "prompt_tokens": 963,
+      "completion_tokens": 2228,
+      "total_tokens": 3191,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 0.0017040551084420781,
+          "max": 0.0017040551084420781
+        },
+        "kgCO2eq": {
+          "min": 8.20824349817498e-05,
+          "max": 8.20824349817498e-05
+        }
+      },
+      "impacts": {
+        "kWh": 0.0017040551084420781,
+        "kgCO2eq": 8.20824349817498e-05
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "kv_transfer_params": null
+  },
+  "synthetic": false,
+  "truncated": [
+    {
+      "chemin": "body.choices[].message.content",
+      "longueur_originale": 9640
+    }
+  ]
+}

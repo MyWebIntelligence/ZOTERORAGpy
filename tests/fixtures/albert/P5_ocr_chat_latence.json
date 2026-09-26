@@ -1,0 +1,83 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "lightonocr-2-1b",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,<173436 caractères base64>"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 4096,
+      "temperature": 0.2,
+      "top_p": 0.9
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-b5da171f7ef756ce",
+    "object": "chat.completion",
+    "created": 1790442075,
+    "model": "lightonocr-2-1b",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "- 1 -\n\nLa sociologie des sciences s'intéresse aux conditions sociales de production des savoirs. Elle observe les laboratoires, les controverses et les instruments comme autant de lieux où se fabriquent les faits scientifiques, et elle refuse de séparer a priori le contenu des connaissances de leur contexte.\n\nDans cette perspective, l'enquête ethnographique suit les chercheurs au travail : elle décrit la manière dont les inscriptions circulent, dont les résultats sont stabilisés par des publications et dont les désaccords se referment, parfois sans que la preuve soit décisive.\n\nLes archives numériques transforment à leur tour la pratique des sciences humaines. La numérisation des fonds, l'océrisation des imprimés anciens et l'indexation sémantique ouvrent des corpus inédits, mais elles introduisent aussi des biais de sélection et des erreurs de transcription.\n\nUne lecture attentive des sources impose donc une critique documentaire renouvelée : identifier la provenance des textes, mesurer la qualité de la reconnaissance optique, et conserver la trace des transformations successives que subit le document entre le papier et la base de données.\n\nLa sociologie des sciences s'intéresse aux conditions sociales de production des savoirs. Elle observe les laboratoires, les controverses et les instruments comme autant de lieux où se fabriquent les faits scientifiques, et elle refuse de séparer a priori le contenu des connaissances de leur contexte.\n\nDans cette perspective, l'enquête ethnographique suit les chercheurs au travail : elle décrit la manière dont les inscriptions circulent, dont les résultats sont stabilisés par des publications et dont les désaccords se referment, parfois sans que la preuve soit décisive.",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "reasoning": null
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "stop_reason": null,
+        "token_ids": null,
+        "routed_experts": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": "vllm-0.25.1-dp3-1fa2bffa",
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 338,
+      "total_tokens": 338,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 1.7482912085750096e-05,
+          "max": 1.7482912085750096e-05
+        },
+        "kgCO2eq": {
+          "min": 9.23088658101534e-07,
+          "max": 9.23088658101534e-07
+        }
+      },
+      "impacts": {
+        "kWh": 1.7482912085750096e-05,
+        "kgCO2eq": 9.23088658101534e-07
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "prompt_text": null,
+    "kv_transfer_params": null,
+    "metrics": null
+  },
+  "synthetic": false
+}

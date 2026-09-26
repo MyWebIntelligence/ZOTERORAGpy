@@ -1,0 +1,78 @@
+[
+  {
+    "id": "111111111111_1",
+    "doc_id": "111111111111",
+    "chunk_index": 1,
+    "total_chunks": 2,
+    "text": "Doc A — chunk 1 : texte recodé stable pour l'embedding dense.",
+    "title": "Doc A",
+    "texteocr_provider": "mistral",
+    "embedding": [
+      0.96484375,
+      0.72265625,
+      0.77734375,
+      0.046875,
+      0.3125,
+      0.578125,
+      0.90234375,
+      0.72265625
+    ]
+  },
+  {
+    "id": "111111111111_2",
+    "doc_id": "111111111111",
+    "chunk_index": 2,
+    "total_chunks": 2,
+    "text": "Doc A — chunk 2 : texte recodé stable pour l'embedding dense.",
+    "title": "Doc A",
+    "texteocr_provider": "mistral",
+    "embedding": [
+      0.39453125,
+      0.57421875,
+      0.703125,
+      0.0703125,
+      0.57421875,
+      0.26953125,
+      0.5078125,
+      0.1015625
+    ]
+  },
+  {
+    "id": "222222222222_1",
+    "doc_id": "222222222222",
+    "chunk_index": 1,
+    "total_chunks": 2,
+    "text": "Doc B — chunk 1 : texte recodé stable pour l'embedding dense.",
+    "title": "Doc B",
+    "texteocr_provider": "mistral",
+    "embedding": [
+      0.63671875,
+      0.66015625,
+      0.76953125,
+      0.44140625,
+      0.34375,
+      0.515625,
+      0.06640625,
+      0.265625
+    ]
+  },
+  {
+    "id": "222222222222_2",
+    "doc_id": "222222222222",
+    "chunk_index": 2,
+    "total_chunks": 2,
+    "text": "Doc B — chunk 2 : texte recodé stable pour l'embedding dense.",
+    "title": "Doc B",
+    "texteocr_provider": "mistral",
+    "embedding": [
+      0.6640625,
+      0.734375,
+      0.6328125,
+      0.29296875,
+      0.53515625,
+      0.3203125,
+      0.1796875,
+      0.2265625
+    ]
+  }
+]

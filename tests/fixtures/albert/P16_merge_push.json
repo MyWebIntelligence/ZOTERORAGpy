@@ -1,0 +1,27 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/documents/4934609/chunks",
+    "body_summary": {
+      "chunks": [
+        {
+          "content": "fusion",
+          "metadata": {
+            "b": 1
+          }
+        }
+      ]
+    }
+  },
+  "status": 201,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "document_id": 4934609,
+    "ids": [
+      0
+    ]
+  },
+  "synthetic": false
+}

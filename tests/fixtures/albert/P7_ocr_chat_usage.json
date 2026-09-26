@@ -1,0 +1,83 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "openweight-ocr",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,<8828 caractères base64>"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 4096,
+      "temperature": 0.2,
+      "top_p": 0.9
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-9e325f4b61d06a93",
+    "object": "chat.completion",
+    "created": 1790442087,
+    "model": "openweight-ocr",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "PAGE_ONE_7Q",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "reasoning": null
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "stop_reason": null,
+        "token_ids": null,
+        "routed_experts": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": "vllm-0.25.1-dp3-1fa2bffa",
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 5,
+      "total_tokens": 5,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 3.2627967212648077e-07,
+          "max": 3.2627967212648077e-07
+        },
+        "kgCO2eq": {
+          "min": 2.918040327248805e-08,
+          "max": 2.918040327248805e-08
+        }
+      },
+      "impacts": {
+        "kWh": 3.2627967212648077e-07,
+        "kgCO2eq": 2.918040327248805e-08
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "prompt_text": null,
+    "kv_transfer_params": null,
+    "metrics": null
+  },
+  "synthetic": false
+}

@@ -1,0 +1,76 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "ministral-3-8b-instruct-2512",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Résume en deux phrases : La sociologie des sciences s'intéresse aux conditions sociales de production des savoirs. Elle observe les laboratoires, les controverses et les instruments comme autant de lieux où se fabriquent les faits scientifiques, et elle refuse de séparer a priori le contenu des connaissances de leur contexte."
+        }
+      ],
+      "temperature": 0.1,
+      "seed": 42,
+      "max_tokens": 200
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-98d4bd9b3be511aa",
+    "object": "chat.completion",
+    "created": 1790442017,
+    "model": "ministral-3-8b-instruct-2512",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "La sociologie des sciences étudie comment les savoirs scientifiques émergent et se structurent à travers des dynamiques sociales, institutionnelles et matérielles (laboratoires, réseaux, controverses), en montrant que leur production est indissociable de son contexte historique et culturel.\n\nElle remet en cause l’idée d’une objectivité pure en analysant les biais, les enjeux et les processus collectifs qui façonnent les faits scientifiques, en les considérant comme le produit de négociations et de rapports de pouvoir.",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "reasoning": null
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "stop_reason": null,
+        "token_ids": null,
+        "routed_experts": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": "vllm-0.25.1-9e7220b0",
+    "usage": {
+      "prompt_tokens": 63,
+      "completion_tokens": 106,
+      "total_tokens": 169,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 9.427530371964464e-06,
+          "max": 9.427530371964464e-06
+        },
+        "kgCO2eq": {
+          "min": 4.6920038711074497e-07,
+          "max": 4.6920038711074497e-07
+        }
+      },
+      "impacts": {
+        "kWh": 9.427530371964464e-06,
+        "kgCO2eq": 4.6920038711074497e-07
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "prompt_text": null,
+    "kv_transfer_params": null,
+    "metrics": null
+  },
+  "synthetic": false
+}

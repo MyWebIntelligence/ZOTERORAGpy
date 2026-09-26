@@ -1,0 +1,99 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_summary": {
+      "model": "gpt-oss-120b",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Tu es un filtre de citations. Réponds uniquement en JSON."
+        },
+        {
+          "role": "user",
+          "content": "Parmi ces citations, lesquelles relèvent de la sociologie des sciences ? Réponds en JSON sous la forme {\"keep\": [numéros]}.\n1. Bourdieu analyse le champ scientifique comme un espace de concurrence pou… (+369 caractères)"
+        }
+      ],
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "filtre",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "keep": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              }
+            },
+            "required": [
+              "keep"
+            ],
+            "additionalProperties": false
+          },
+          "strict": true
+        }
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "chatcmpl-86c49b7b43a8fe92",
+    "object": "chat.completion",
+    "created": 1790442016,
+    "model": "gpt-oss-120b",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\"keep\": [1, 3, 5]}",
+          "refusal": null,
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "tool_calls": [],
+          "reasoning": "The user asks: \"Parmi ces citations, lesquelles relèvent de la sociologie des sciences ? Réponds en JSON sous la forme {\"keep\": [numéros]}.\"\n\nWe need to identify which citations are about sociology of science. Let's examine each:\n\n1. Bourdieu analyse le champ scientifique comme un espace de concurrence pour le capital symbolique. => Yes, sociology of science (Bourdieu's field theory applied to science).\n\n2. Recette de tarte aux pommes => No.\n\n3. Latour et Woolgar décrivent la construction sociale des faits dans un laboratoire. => Yes, sociology of science (Science and Technology Studies).\n\n4. Le moteur diesel utilise l'auto-inflammation du carburant comprimé. => No.\n\n5. Merton formule les normes de l'ethos scientifique : universalisme, communalisme, désintéressement. => Yes, sociology of science (Merton's norms).\n\nThus keep numbers: 1,3,5.\n\nReturn JSON exactly: {\"keep\": [1, 3, 5]}. Ensure no extra text."
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "stop_reason": null,
+        "token_ids": null
+      }
+    ],
+    "service_tier": null,
+    "system_fingerprint": null,
+    "usage": {
+      "prompt_tokens": 149,
+      "completion_tokens": 12,
+      "total_tokens": 161,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 8.728869494960032e-05,
+          "max": 8.728869494960032e-05
+        },
+        "kgCO2eq": {
+          "min": 4.442396965078652e-06,
+          "max": 4.442396965078652e-06
+        }
+      },
+      "impacts": {
+        "kWh": 8.728869494960032e-05,
+        "kgCO2eq": 4.442396965078652e-06
+      },
+      "requests": 1
+    },
+    "prompt_logprobs": null,
+    "prompt_token_ids": null,
+    "kv_transfer_params": null
+  },
+  "synthetic": false
+}

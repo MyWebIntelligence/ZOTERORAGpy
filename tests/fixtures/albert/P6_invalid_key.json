@@ -1,0 +1,15 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/models",
+    "body_summary": null
+  },
+  "status": 401,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": "Invalid API key."
+  },
+  "synthetic": false
+}

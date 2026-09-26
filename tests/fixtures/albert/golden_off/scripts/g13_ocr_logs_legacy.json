@@ -1,0 +1,21 @@
+{
+  "legacy_no_keys": [
+    [
+      "scripts.rad_dataframe",
+      "ERROR",
+      "Aucune clé API OCR configurée (MISTRAL_API_KEY ou OPENAI_API_KEY). Basculer sur l'extraction locale peut dégrader la qualité du texte."
+    ]
+  ],
+  "legacy_sparse_openai_key_set": [
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "OCR OpenAI désactivé par défaut (OCR_ENABLE_OPENAI_FALLBACK=0) — chaîne Mistral → legacy uniquement pour <TMP>/scan_sparse.pdf."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR suspect (legacy) : 320 car./page sur 2 pages (< 500) — extraction probablement incomplète. (<TMP>/scan_sparse.pdf)"
+    ]
+  ]
+}

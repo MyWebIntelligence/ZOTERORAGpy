@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "body_summary": {
+      "model": "bge-m3",
+      "input": [
+        "Phrase de test numéro 0 sur la sociologie des sciences.",
+        "Phrase de test numéro 1 sur la sociologie des sciences.",
+        "Phrase de test numéro 2 sur la sociologie des sciences.",
+        "… (+62 éléments, 65 au total)"
+      ],
+      "encoding_format": "float"
+    }
+  },
+  "status": 413,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": "batch size 65 > maximum allowed batch size 64"
+  },
+  "synthetic": false
+}

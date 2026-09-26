@@ -1,0 +1,46 @@
+[
+  {
+    "case": "success_existing_collection",
+    "exit_code": 0,
+    "result_block": [
+      "=== Result ===",
+      "Status: success",
+      "Message: Insertion Qdrant terminée (collection: golden-collection). 3/3 points insérés.",
+      "Inserted: 3",
+      "Skipped (dedup): 0"
+    ]
+  },
+  {
+    "case": "created_collection_partial_data",
+    "exit_code": 0,
+    "result_block": [
+      "=== Result ===",
+      "Status: success_partial_data",
+      "Message: Insertion Qdrant terminée (collection: golden-collection). 3/4 points insérés. Certains chunks sans embedding (ou en échec de lot) n'ont pas été insérés.",
+      "Inserted: 3",
+      "Skipped (dedup): 0"
+    ]
+  },
+  {
+    "case": "upsert_retry_then_success",
+    "exit_code": 0,
+    "result_block": [
+      "=== Result ===",
+      "Status: success",
+      "Message: Insertion Qdrant terminée (collection: golden-collection). 3/3 points insérés.",
+      "Inserted: 3",
+      "Skipped (dedup): 0"
+    ]
+  },
+  {
+    "case": "upsert_not_completed",
+    "exit_code": 1,
+    "result_block": [
+      "=== Result ===",
+      "Status: error",
+      "Message: Insertion Qdrant terminée (collection: golden-collection). 0/3 points insérés. Aucun point inséré.",
+      "Inserted: 0",
+      "Skipped (dedup): 0"
+    ]
+  }
+]

@@ -1,0 +1,20 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "body_summary": {
+      "model": "gpt-oss-120b",
+      "input": [
+        "x"
+      ]
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": "Model has wrong type. Expected: text-embeddings-inference. Actual: text-generation."
+  },
+  "synthetic": false
+}

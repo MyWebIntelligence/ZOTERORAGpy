@@ -1,0 +1,265 @@
+{
+  "csv_starts_with_bom": true,
+  "csv_header": [
+    "itemKey",
+    "type",
+    "title",
+    "abstract",
+    "date",
+    "url",
+    "doi",
+    "authors",
+    "filename",
+    "path",
+    "attachment_title",
+    "texteocr",
+    "texteocr_provider",
+    "texteocr_partial",
+    "texteocr_pages_done",
+    "texteocr_pages_total"
+  ],
+  "csv_text": "itemKey,type,title,abstract,date,url,doi,authors,filename,path,attachment_title,texteocr,texteocr_provider,texteocr_partial,texteocr_pages_done,texteocr_pages_total\r\nITEMOK01,journalArticle,Article complet,Résumé de l'article.,2021-05-01,https://example.org/article,10.1234/golden.a,\"Dupont Jeanne, Martin Paul\",article_ok.pdf,<TMP>/zotero/files/article_ok.pdf,Full Text PDF,\"<!-- Page 1 -->\n# Article\nAlpha\n\n<!-- Page 2 -->\nBeta\",mistral,False,2,2\r\nITEMSPL2,book,Livre découpé en parts,,2019,,,Lahire ,book_split.pdf,<TMP>/zotero/files/book_split.pdf,PDF,\"<!-- Part 1/3 (pages 1-1) -->\n<!-- Page 1 -->\nAAA\n\n<!-- Part 2/3 (pages 2-2) — OCR ÉCHOUÉ: OCR Mistral échoué après 5 tentatives pour ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable -->\n\n<!-- Part 3/3 (pages 3-3) -->\n<!-- Page 3 -->\nCCC\",mistral,True,2,3\r\n",
+  "dataframe_columns": [
+    "itemKey",
+    "type",
+    "title",
+    "abstract",
+    "date",
+    "url",
+    "doi",
+    "authors",
+    "filename",
+    "path",
+    "attachment_title",
+    "texteocr",
+    "texteocr_provider",
+    "texteocr_partial",
+    "texteocr_pages_done",
+    "texteocr_pages_total"
+  ],
+  "dataframe_rows": 2,
+  "errors_json": {
+    "total_errors": 2,
+    "errors": [
+      {
+        "itemKey": "ITEMSPL2",
+        "title": "Livre découpé en parts",
+        "error_type": "OCR_PARTIAL",
+        "error_message": "OCR Mistral partiel : 1/3 parts en échec (2/3 (pages 2-2)).",
+        "provider": "mistral",
+        "pages_done": 2,
+        "pages_total": 3,
+        "pdf_path": "<TMP>/zotero/files/book_split.pdf",
+        "timestamp": "<T>"
+      },
+      {
+        "itemKey": "ITEMDOC3",
+        "title": "Pièce jointe non supportée",
+        "error_type": "UNSUPPORTED_EXTENSION",
+        "error_message": "Extension non supportée: .docx",
+        "path": "files/notes.docx",
+        "timestamp": "<T>"
+      }
+    ],
+    "last_updated": "<T>"
+  },
+  "progress_json": {
+    "processed_keys": [
+      "ITEMDOC3",
+      "ITEMOK01",
+      "ITEMSPL2"
+    ],
+    "last_updated": "<T>"
+  },
+  "stdout_lines": [
+    "PROGRESS|init|3|Found 3 Zotero items to process",
+    "PROGRESS|row|1/3|Article complet",
+    "PROGRESS|row|2/3|Livre découpé en parts",
+    "PROGRESS|row|3/3|Pièce jointe non supportée"
+  ],
+  "calls": [
+    [
+      "_extract_text_with_mistral",
+      "<TMP>/zotero/files/article_ok.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<TMP>/zotero/files/article_ok.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<TMP>/zotero/files/article_ok.pdf",
+      null
+    ],
+    [
+      "_extract_text_with_mistral",
+      "<TMP>/zotero/files/book_split.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<SYSTMP>/ragpy_part_p1-1_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p1-1_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<SYSTMP>/ragpy_part_p2-2_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p2-2_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p2-2_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p2-2_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p2-2_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p2-2_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr",
+      "<SYSTMP>/ragpy_part_p3-3_<RND>.pdf",
+      null
+    ],
+    [
+      "_mistral_upload_and_ocr_once",
+      "<SYSTMP>/ragpy_part_p3-3_<RND>.pdf",
+      null
+    ]
+  ],
+  "sleeps": [
+    3.0,
+    6.0,
+    12.0,
+    24.0
+  ],
+  "logs": [
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Chargement du fichier JSON Zotero depuis : <TMP>/zotero/export.json"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Detected Zotero JSON format: object with 'items' key, 3 items"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Items to process: 3 (skipping 0 already done)"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Using SEQUENTIAL mode (workers=1)"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "[0] Processing .pdf file: article_ok.pdf"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "[0] ✓ Extraction success for ITEMOK01 (mistral)"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "✓ Item ITEMOK01 saved (1 total)"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "[1] Processing .pdf file: book_split.pdf"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "PDF <TMP>/zotero/files/book_split.pdf = 0.0 MB / 3 pages > seuils Mistral (45.0 MB / 2 pages) — bascule sur le mode large-file."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Découpage PDF book_split.pdf en 3 parts (cible ≤ 30.0 MB / ≤ 1 pages chacune)."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 1/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — nouvel essai dans 3.0s"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 2/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — nouvel essai dans 6.0s"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 3/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — nouvel essai dans 12.0s"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral transitoire (tentative 4/5) pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — nouvel essai dans 24.0s"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "ERROR",
+      "OCR Mistral: échec après 5 tentatives pour <SYSTMP>/ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "ERROR",
+      "Échec OCR Mistral sur la part 2/3 (pages 2-2): OCR Mistral échoué après 5 tentatives pour ragpy_part_p2-2_<RND>.pdf: Mistral OCR erreur transitoire 503 pour ragpy_part_p2-2_<RND>.pdf: Service Unavailable — part ignorée, OCR partiel."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "OCR Mistral partiel : 1/3 parts en échec (2/3 (pages 2-2)). pour <TMP>/zotero/files/book_split.pdf"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "[1] ⚠ OCR PARTIEL pour ITEMSPL2 (mistral) : OCR Mistral partiel : 1/3 parts en échec (2/3 (pages 2-2))."
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "✓ Item ITEMSPL2 saved (2 total)"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "WARNING",
+      "[2] Unsupported extension .docx for files/notes.docx"
+    ],
+    [
+      "scripts.rad_dataframe",
+      "INFO",
+      "Saved 2 errors to <TMP>/zotero/output_errors.json"
+    ]
+  ]
+}
