@@ -1209,7 +1209,9 @@ do{% extends "base.html" %}
             <div class="model-input-group">
               <label for="recodingModelInput">Recoding Model (optional)</label>
               <input type="text" id="recodingModelInput" placeholder="google/gemini-2.5-flash">
-              <p class="model-input-hint">Leave empty for default. Format: "provider/model" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>
+              <p class="model-input-hint">Leave empty for default. Format: "provider/model" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>{% if albert_enabled %}
+              <p class="model-input-hint">Albert (DINUM) : "albert/&lt;modèle&gt;", par ex. "albert/ministral-3-8b-instruct-2512". Suggestions issues de votre compte Albert (clé à enregistrer dans les paramètres).</p>
+              <datalist id="albertModelOptions"></datalist>{% endif %}
             </div>
 
             <button id="runInitialChunkBtn" class="btn btn-primary">
@@ -1250,7 +1252,16 @@ do{% extends "base.html" %}
             <form id="denseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
               <input type="file" id="denseUploadInput" name="file" accept=".json">
               <button type="submit" class="btn btn-secondary btn-sm">Upload Chunks</button>
-            </form>
+            </form>{% if albert_enabled %}
+            <div class="model-input-group">
+              <label for="embeddingProviderSelect">Fournisseur d'embeddings</label>
+              <select id="embeddingProviderSelect" name="embedding_provider" class="form-select">
+                <option value="" selected>Défaut du serveur</option>
+                <option value="openai">OpenAI : text-embedding-3-large (3072 dimensions)</option>
+                <option value="albert">Albert (DINUM) : bge-m3 (1024 dimensions)</option>
+              </select>
+              <p class="model-input-hint">Les deux espaces vectoriels ne se mélangent jamais : un index créé en 3072 dimensions (OpenAI) refuse les vecteurs bge-m3 (1024 dimensions), et inversement.</p>
+            </div>{% endif %}
             <button id="runDenseEmbeddingBtn" class="btn btn-primary">
               <i class="bi bi-grid-3x3-gap"></i> Generate Dense Embeddings
             </button>
@@ -1303,7 +1314,8 @@ do{% extends "base.html" %}
           <!-- 4.a Vector DB Upload -->
           <div class="sub-section step-locked" id="db-section">
             <h3>4.a Upload to Vector Database</h3>
-            <p class="text-secondary text-sm mb-4">Store embeddings for semantic search and RAG applications.</p>
+            <p class="text-secondary text-sm mb-4">Store embeddings for semantic search and RAG applications.</p>{% if albert_enabled %}
+            <p id="albertEarlyDbNote" class="text-secondary text-sm mb-4">Albert (DINUM) : cette étape est accessible dès la fin du découpage (3.1), car Albert calcule lui-même les embeddings (bge-m3). Pinecone, Weaviate et Qdrant exigent les étapes 3.2 et 3.3.</p>{% endif %}
 
             <div class="db-options" id="vectorDbOptions">
               <div class="db-select-group">
@@ -1311,7 +1323,8 @@ do{% extends "base.html" %}
                 <select id="dbChoice" class="form-select">
                   <option value="pinecone">Pinecone</option>
                   <option value="weaviate">Weaviate</option>
-                  <option value="qdrant">Qdrant</option>
+                  <option value="qdrant">Qdrant</option>{% if albert_enabled %}
+                  <option value="albert">Albert (DINUM)</option>{% endif %}
                 </select>
               </div>
 
@@ -1352,7 +1365,55 @@ do{% extends "base.html" %}
                   <label for="qdrantCollectionName">Collection Name</label>
                   <input type="text" id="qdrantCollectionName" name="qdrant_collection_name" placeholder="e.g., my_documents" required>
                 </div>
+              </div>{% if albert_enabled %}
+
+              <div id="albertParams" class="db-params" style="display:none;">
+                <div>
+                  <label for="albertCollectionId">Collection privée existante</label>
+                  <div class="input-with-button">
+                    <select id="albertCollectionId" name="albert_collection_id" class="form-select">
+                      <option value="">-- Nouvelle collection (nom ci-dessous) --</option>
+                    </select>
+                    <button type="button" id="refreshAlbertCollections" class="btn btn-ghost btn-sm" title="Rafraîchir les collections" aria-label="Rafraîchir les collections">
+                      <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                    <button type="button" id="deleteAlbertCollectionBtn" class="btn btn-ghost btn-sm" title="Supprimer la collection sélectionnée" aria-label="Supprimer la collection sélectionnée">
+                      <i class="bi bi-trash"></i>
+                    </button>
+                  </div>
+                  <small id="albertCollectionStatus" class="text-secondary"></small>
+                  <div id="albertDeleteConfirm" class="alert alert-error" role="alertdialog" aria-labelledby="albertDeleteConfirmText" style="display:none; margin-top: var(--space-2);">
+                    <div class="alert-content">
+                      <p id="albertDeleteConfirmText"></p>
+                      <div style="display:flex; gap: var(--space-2); margin-top: var(--space-2);">
+                        <button type="button" id="albertDeleteConfirmYes" class="btn btn-danger btn-sm">Supprimer définitivement</button>
+                        <button type="button" id="albertDeleteConfirmNo" class="btn btn-secondary btn-sm">Annuler</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label for="albertCollectionName">Nouvelle collection</label>
+                  <input type="text" id="albertCollectionName" name="albert_collection_name" placeholder="ex. ragpy-mon-corpus" autocomplete="off">
+                  <small>Utilisé seulement si aucune collection n'est sélectionnée : la collection est créée en privé si ce nom n'existe pas encore (albert_create_collection).</small>
+                </div>
+                <div id="albertGdprBlock" class="alert alert-warning">
+                  <div class="alert-content">
+                    <p class="alert-title">Confirmation avant l'envoi vers Albert (DINUM)</p>
+                    <ul style="margin: var(--space-2) 0 0 var(--space-4); padding: 0;">
+                      <li>Les textes des chunks et leurs métadonnées sont stockés chez la DINUM jusqu'à la suppression de la collection (bouton de suppression ci-dessus).</li>
+                      <li>La collection est privée : elle n'est accessible qu'avec votre clé Albert.</li>
+                      <li>La DINUM agit en qualité de sous-traitant au sens de l'art. 28 RGPD.</li>
+                      <li>Le respect des droits d'auteur et le traitement des données personnelles contenues dans vos documents restent sous votre responsabilité.</li>
+                    </ul>
+                    <label for="albertGdprAck" style="display:flex; gap: var(--space-2); align-items:flex-start; margin-top: var(--space-3);">
+                      <input type="checkbox" id="albertGdprAck" name="albert_gdpr_ack" value="true" required style="width:auto; margin-top: 2px;">
+                      <span>J'ai pris connaissance de ces conditions et je confirme l'envoi de ce corpus vers Albert.</span>
+                    </label>
+                  </div>
+                </div>
               </div>
+              <p id="albertSparseRequiredNote" class="sub-section-warning" role="status" aria-live="polite" style="display:none;">Pinecone, Weaviate et Qdrant exigent les embeddings denses et sparses : terminez les étapes 3.2 et 3.3 avant l'envoi, ou choisissez Albert (DINUM), accessible dès la fin du découpage.</p>{% endif %}
 
               <button id="uploadDbBtn" class="btn btn-primary">
                 <i class="bi bi-cloud-upload"></i> Upload to Vector DB
@@ -1449,7 +1510,8 @@ do{% extends "base.html" %}
               <div class="model-input-group">
                 <label for="zoteroModelInput">LLM Model (optional)</label>
                 <input type="text" id="zoteroModelInput" placeholder="google/gemini-2.5-flash or gpt-4o-mini">
-                <p class="model-input-hint">Leave empty for default (gpt-4o-mini).</p>
+                <p class="model-input-hint">Leave empty for default (gpt-4o-mini).</p>{% if albert_enabled %}
+                <p class="model-input-hint">Albert (DINUM) : "albert/&lt;modèle&gt;", par ex. "albert/gpt-oss-120b" (mêmes suggestions que pour le recodage).</p>{% endif %}
               </div>
             </div>
 
@@ -1744,7 +1806,8 @@ do{% extends "base.html" %}
       if (files.chunking.completed) {
         completeStep('chunking', 'output_chunks.json');
         markSectionCompleted('initial-chunk-section');
-        unlockSection('dense-embedding-section');
+        unlockSection('dense-embedding-section');{% if albert_enabled %}
+        unlockSection('db-section');{% endif %}
         const chunkInfo = files.chunking.chunk_count ? ` (${files.chunking.chunk_count} chunks)` : '';
         document.getElementById('initialChunkResult').innerHTML = `<p>✅ Existing chunks: ${buildDownloadLink('output_chunks.json')}${chunkInfo}</p>`;
       }
@@ -2110,7 +2173,8 @@ do{% extends "base.html" %}
                 resultDiv.innerHTML = `<p>✅ File generated: ${buildDownloadLink(fileName)}</p><p>Chunks: <strong>${data.count || 'N/A'}</strong></p>`;
                 completeStep('chunking', fileName);
                 markSectionCompleted('initial-chunk-section');
-                unlockSection('dense-embedding-section');
+                unlockSection('dense-embedding-section');{% if albert_enabled %}
+                unlockSection('db-section');{% endif %}
                 showToast('Chunks generated successfully!', 'success');
               } else if (data.type === 'error') {
                 progressStatus.textContent = 'Error';
@@ -2171,7 +2235,9 @@ do{% extends "base.html" %}
     });
 
     const formData = new FormData();
-    formData.append('path', currentPath);
+    formData.append('path', currentPath);{% if albert_enabled %}
+    const embeddingProviderSelect = document.getElementById('embeddingProviderSelect');
+    if (embeddingProviderSelect && embeddingProviderSelect.value) formData.append('embedding_provider', embeddingProviderSelect.value);{% endif %}
 
     try {
       const response = await fetch('/dense_embedding_generation_sse', { method: 'POST', body: formData });
@@ -2237,7 +2303,8 @@ do{% extends "base.html" %}
     resultDiv.innerHTML = `<p>✅ Chunks JSON uploaded: ${buildDownloadLink(response.filename)}</p>${formatUploadSummary(response.details)}`;
     fileInput.value = '';
     markSectionCompleted('dense-embedding-section');
-    unlockSection('sparse-embedding-section');
+    unlockSection('sparse-embedding-section');{% if albert_enabled %}
+    unlockSection('db-section');{% endif %}
   });
 
   // Step 3.3: Sparse Embeddings with SSE
@@ -2471,7 +2538,9 @@ do{% extends "base.html" %}
         return;
       }
       form.append('qdrant_collection_name', qdrantCollection);
-    }
+    }{% if albert_enabled %} else if (dbChoice === 'albert') {
+      if (!appendAlbertUploadFields(form, resultDiv)) return;
+    }{% endif %}
 
     try {
       const res = await fetch('/upload_db', {
@@ -2486,7 +2555,8 @@ do{% extends "base.html" %}
       }
       if (res.ok && json && json.status) {
         resultDiv.innerHTML = `<p>✅ Status: <strong>${json.status}</strong>. ${json.message || ''}</p>`;
-        if (json.inserted_count !== undefined) resultDiv.innerHTML += `<p>Items inserted: ${json.inserted_count}</p>`;
+        if (json.inserted_count !== undefined) resultDiv.innerHTML += `<p>Items inserted: ${json.inserted_count}</p>`;{% if albert_enabled %}
+        if (dbChoice === 'albert') appendAlbertUploadSummary(resultDiv, json);{% endif %}
         completeStep('vectorDb', null);
         markSectionCompleted('db-section');
         showToast('Uploaded to vector DB!', 'success');
@@ -2881,6 +2951,366 @@ do{% extends "base.html" %}
     } catch (err) {
       stopResultDiv.textContent = 'Failed to stop: ' + err;
     }
+  });{% if albert_enabled %}
+
+  // ========================================
+  // ALBERT (DINUM) - rendered only when Albert is enabled on the server.
+  // Every call goes through the RAGpy /api/albert/* routes (never to the Albert host).
+  // ========================================
+
+  /**
+   * Headers of an authenticated call to the /api/albert/* routes.
+   * The JWT is read from localStorage (the access_token cookie is sent by the browser as well).
+   * @returns {Object} The Authorization header when a token is stored, otherwise an empty object.
+   */
+  function albertAuthHeaders() {
+    let token = null;
+    try { token = localStorage.getItem('access_token'); } catch (e) { token = null; }
+    return token ? { 'Authorization': 'Bearer ' + token } : {};
+  }
+
+  /**
+   * Parse the JSON body of a response.
+   * @param {Response} response - The fetch response.
+   * @returns {Promise<Object>} The parsed body, or an empty object when the body is not JSON.
+   */
+  async function albertReadJson(response) {
+    try { return (await response.json()) || {}; } catch (e) { return {}; }
+  }
+
+  /**
+   * Build a French error message from an error response of /api/albert/*.
+   * @param {Response} response - The fetch response.
+   * @param {Object} json - Its parsed body.
+   * @returns {string} "Erreur <status> : <detail>".
+   */
+  function albertErrorMessage(response, json) {
+    let detail = (json && (json.error || json.detail)) || response.statusText || 'erreur inconnue';
+    if (typeof detail !== 'string') detail = JSON.stringify(detail);
+    return `Erreur ${response.status} : ${detail}`;
+  }
+
+  // ---- Model suggestions (<datalist> fed by GET /api/albert/models) ----
+  const ALBERT_CHAT_MODEL_TYPES = ['text-generation', 'image-text-to-text'];
+  let albertModelsState = 'idle';
+
+  /**
+   * Fill the shared <datalist> with the chat models of the caller's Albert account ("albert/<id>").
+   * Called on the first focus of a model input; retried on a later focus after a failure.
+   * @returns {Promise<void>}
+   */
+  async function loadAlbertModelOptions() {
+    const datalist = document.getElementById('albertModelOptions');
+    if (!datalist || albertModelsState === 'loading' || albertModelsState === 'done') return;
+    albertModelsState = 'loading';
+    try {
+      const response = await fetch('/api/albert/models', { headers: albertAuthHeaders() });
+      const json = await albertReadJson(response);
+      if (!response.ok || !json.success) {
+        albertModelsState = 'failed';
+        return;
+      }
+      datalist.innerHTML = '';
+      (Array.isArray(json.models) ? json.models : []).forEach(model => {
+        if (!model || typeof model.id !== 'string' || !model.id) return;
+        if (model.type && !ALBERT_CHAT_MODEL_TYPES.includes(model.type)) return;
+        const option = document.createElement('option');
+        option.value = 'albert/' + model.id;
+        const details = [];
+        if (model.type) details.push(model.type);
+        if (typeof model.max_context_length === 'number') details.push(`${model.max_context_length} tokens`);
+        const aliases = Array.isArray(model.aliases) ? model.aliases.filter(a => typeof a === 'string') : [];
+        if (aliases.length) details.push(`alias : ${aliases.join(', ')}`);
+        option.textContent = details.join(' - ');
+        datalist.appendChild(option);
+      });
+      albertModelsState = 'done';
+    } catch (err) {
+      albertModelsState = 'failed';
+    }
+  }
+
+  ['recodingModelInput', 'zoteroModelInput'].forEach(id => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.setAttribute('list', 'albertModelOptions');
+    input.addEventListener('focus', loadAlbertModelOptions);
   });
+
+  // ---- Collections (GET /api/albert/collections, DELETE /api/albert/collections/{id}?confirm=true) ----
+  const albertParamsDiv = document.getElementById('albertParams');
+  const albertCollectionSelect = document.getElementById('albertCollectionId');
+  const albertCollectionNameInput = document.getElementById('albertCollectionName');
+  const albertCollectionStatus = document.getElementById('albertCollectionStatus');
+  const albertDeleteConfirm = document.getElementById('albertDeleteConfirm');
+  const albertDeleteConfirmYes = document.getElementById('albertDeleteConfirmYes');
+  let albertCollectionsCache = null;
+  let albertCollectionsLoading = false;
+  // GET /api/albert/collections is paginated: largest page size it accepts, and a bound on the pages read.
+  const ALBERT_COLLECTIONS_PER_PAGE = 100;
+  const ALBERT_COLLECTIONS_MAX_PAGES = 20;
+
+  /**
+   * Reset the collection select to its single "new collection" entry.
+   */
+  function resetAlbertCollectionSelect() {
+    albertCollectionSelect.innerHTML = '';
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '-- Nouvelle collection (nom ci-dessous) --';
+    albertCollectionSelect.appendChild(option);
+  }
+
+  /**
+   * Enable the new-collection name input only while no existing collection is selected.
+   */
+  function syncAlbertCollectionName() {
+    albertCollectionNameInput.disabled = !!albertCollectionSelect.value;
+  }
+
+  /**
+   * Hide the inline deletion confirmation and forget the collection it targeted.
+   */
+  function hideAlbertDeleteConfirm() {
+    albertDeleteConfirm.style.display = 'none';
+    delete albertDeleteConfirm.dataset.collectionId;
+  }
+
+  /**
+   * Load the caller's private Albert collections into the select (same flow as fetchPineconeIndexes).
+   * The listing is paginated: every page is read (up to ALBERT_COLLECTIONS_MAX_PAGES), following "pages".
+   * @param {boolean} forceRefresh - Reload even when the list is already cached.
+   * @returns {Promise<void>}
+   */
+  async function fetchAlbertCollections(forceRefresh = false) {
+    if (albertCollectionsLoading || (albertCollectionsCache && !forceRefresh)) return;
+    albertCollectionsLoading = true;
+    const refreshBtn = document.getElementById('refreshAlbertCollections');
+    const previous = albertCollectionSelect.value;
+
+    hideAlbertDeleteConfirm();
+    albertCollectionSelect.innerHTML = '<option value="">Chargement des collections...</option>';
+    albertCollectionSelect.disabled = true;
+    if (refreshBtn) refreshBtn.disabled = true;
+
+    try {
+      const collected = [];
+      let page = 1;
+      let pages = 1;
+      do {
+        const response = await fetch(`/api/albert/collections?page=${page}&per_page=${ALBERT_COLLECTIONS_PER_PAGE}`, { headers: albertAuthHeaders() });
+        const json = await albertReadJson(response);
+        if (!response.ok || !json.success) {
+          resetAlbertCollectionSelect();
+          albertCollectionStatus.textContent = albertErrorMessage(response, json);
+          return;
+        }
+        if (Array.isArray(json.collections)) collected.push(...json.collections);
+        pages = typeof json.pages === 'number' ? json.pages : 1;
+        page += 1;
+      } while (page <= pages && page <= ALBERT_COLLECTIONS_MAX_PAGES);
+      resetAlbertCollectionSelect();
+
+      albertCollectionsCache = collected;
+      albertCollectionsCache.forEach(collection => {
+        if (!collection || collection.id === undefined || collection.id === null) return;
+        const option = document.createElement('option');
+        option.value = String(collection.id);
+        const name = typeof collection.name === 'string' && collection.name ? collection.name : '(sans nom)';
+        const documents = typeof collection.documents === 'number' ? `, ${collection.documents} document(s)` : '';
+        option.textContent = `${name} (id ${collection.id}${documents})`;
+        option.dataset.name = name;
+        albertCollectionSelect.appendChild(option);
+      });
+
+      if (previous && Array.from(albertCollectionSelect.options).some(o => o.value === previous)) {
+        albertCollectionSelect.value = previous;
+      }
+      albertCollectionStatus.textContent = albertCollectionsCache.length
+        ? ''
+        : 'Aucune collection privée : saisissez un nom pour en créer une.';
+    } catch (err) {
+      console.error('Error fetching Albert collections:', err);
+      resetAlbertCollectionSelect();
+      albertCollectionStatus.textContent = 'Erreur de chargement des collections : ' + err;
+    } finally {
+      albertCollectionsLoading = false;
+      albertCollectionSelect.disabled = false;
+      if (refreshBtn) refreshBtn.disabled = false;
+      syncAlbertCollectionName();
+    }
+  }
+
+  /**
+   * Show the inline confirmation of the deletion of the selected collection (no browser dialog).
+   */
+  function showAlbertDeleteConfirm() {
+    const collectionId = albertCollectionSelect.value;
+    if (!collectionId) {
+      albertCollectionStatus.textContent = "Sélectionnez d'abord une collection existante.";
+      return;
+    }
+    const option = albertCollectionSelect.options[albertCollectionSelect.selectedIndex];
+    const name = (option && option.dataset.name) || collectionId;
+    albertDeleteConfirm.dataset.collectionId = collectionId;
+    document.getElementById('albertDeleteConfirmText').textContent =
+      `Supprimer définitivement la collection « ${name} » (id ${collectionId}) chez Albert, avec tous ses documents et chunks ? Cette action est irréversible.`;
+    albertDeleteConfirm.style.display = 'block';
+    albertDeleteConfirmYes.focus();
+  }
+
+  /**
+   * Delete the collection targeted by the inline confirmation, then reload the list.
+   * @returns {Promise<void>}
+   */
+  async function deleteAlbertCollection() {
+    const collectionId = albertDeleteConfirm.dataset.collectionId;
+    if (!collectionId) {
+      hideAlbertDeleteConfirm();
+      return;
+    }
+    albertDeleteConfirmYes.disabled = true;
+    albertCollectionStatus.textContent = 'Suppression en cours...';
+    try {
+      const response = await fetch(`/api/albert/collections/${encodeURIComponent(collectionId)}?confirm=true`, {
+        method: 'DELETE',
+        headers: albertAuthHeaders()
+      });
+      const json = await albertReadJson(response);
+      if (!response.ok || json.success === false) {
+        albertCollectionStatus.textContent = albertErrorMessage(response, json);
+        return;
+      }
+      hideAlbertDeleteConfirm();
+      showToast('Collection Albert supprimée', 'success');
+      albertCollectionStatus.textContent = '';
+      await fetchAlbertCollections(true);
+      if (!albertCollectionStatus.textContent) {
+        albertCollectionStatus.textContent = `Collection ${collectionId} supprimée.`;
+      }
+    } catch (err) {
+      albertCollectionStatus.textContent = 'Échec de la suppression : ' + err;
+    } finally {
+      albertDeleteConfirmYes.disabled = false;
+    }
+  }
+
+  document.getElementById('refreshAlbertCollections').addEventListener('click', () => {
+    fetchAlbertCollections(true);
+  });
+  document.getElementById('deleteAlbertCollectionBtn').addEventListener('click', showAlbertDeleteConfirm);
+  albertDeleteConfirmYes.addEventListener('click', deleteAlbertCollection);
+  document.getElementById('albertDeleteConfirmNo').addEventListener('click', hideAlbertDeleteConfirm);
+  albertCollectionSelect.addEventListener('change', () => {
+    hideAlbertDeleteConfirm();
+    syncAlbertCollectionName();
+  });
+
+  /**
+   * Show the Albert parameters only while "Albert (DINUM)" is the chosen database.
+   */
+  function syncAlbertParams() {
+    if (dbChoiceSelect.value === 'albert') {
+      albertParamsDiv.style.display = 'grid';
+      fetchAlbertCollections();
+    } else {
+      albertParamsDiv.style.display = 'none';
+      hideAlbertDeleteConfirm();
+    }
+  }
+  dbChoiceSelect.addEventListener('change', syncAlbertParams);
+  syncAlbertParams();
+
+  // ---- Early unlock of step 4.a (right after chunking) reserved to Albert ----
+  const uploadDbBtn = document.getElementById('uploadDbBtn');
+  const dbSection = document.getElementById('db-section');
+  const sparseEmbeddingSection = document.getElementById('sparse-embedding-section');
+  const albertSparseRequiredNote = document.getElementById('albertSparseRequiredNote');
+
+  /**
+   * Tell whether step 3.3 is done. Every place that unlocks step 4.a when Albert is off
+   * (session reload, sparse generation, sparse upload) first marks the sparse section completed,
+   * so this is exactly the condition under which Pinecone, Weaviate and Qdrant are reachable.
+   * @returns {boolean} True when the sparse section is marked completed.
+   */
+  function albertSparseStepDone() {
+    return !!sparseEmbeddingSection && sparseEmbeddingSection.classList.contains('step-completed');
+  }
+
+  /**
+   * Keep the early unlock of step 4.a for the Albert target only: while step 3.3 is not done,
+   * the upload button is disabled for Pinecone, Weaviate and Qdrant (their /upload_db call needs
+   * the sparse file) and an inline message says why. Albert, which embeds the chunks itself,
+   * stays available.
+   */
+  function syncEarlyDbUpload() {
+    const blocked = dbChoiceSelect.value !== 'albert' && !albertSparseStepDone();
+    uploadDbBtn.disabled = blocked;
+    if (blocked) {
+      uploadDbBtn.setAttribute('aria-describedby', 'albertSparseRequiredNote');
+    } else {
+      uploadDbBtn.removeAttribute('aria-describedby');
+    }
+    const sectionOpen = !!dbSection && !dbSection.classList.contains('step-locked');
+    albertSparseRequiredNote.style.display = blocked && sectionOpen ? 'block' : 'none';
+  }
+  dbChoiceSelect.addEventListener('change', syncEarlyDbUpload);
+  if (typeof MutationObserver !== 'undefined') {
+    const earlyDbObserver = new MutationObserver(syncEarlyDbUpload);
+    [dbSection, sparseEmbeddingSection].forEach(section => {
+      if (section) earlyDbObserver.observe(section, { attributes: true, attributeFilter: ['class'] });
+    });
+  }
+  syncEarlyDbUpload();
+
+  /**
+   * Add the Albert fields to the /upload_db form, after the local checks.
+   * An existing collection is sent by id; otherwise the name is sent with albert_create_collection=true
+   * (private collection created when the name does not exist). The GDPR confirmation is required.
+   * @param {URLSearchParams} form - The form being built by the upload handler.
+   * @param {HTMLElement} resultDiv - Where to report a refused upload.
+   * @returns {boolean} False when the upload must not be sent.
+   */
+  function appendAlbertUploadFields(form, resultDiv) {
+    const collectionId = albertCollectionSelect.value;
+    const collectionName = albertCollectionNameInput.value.trim();
+    const gdprAck = document.getElementById('albertGdprAck');
+
+    if (!collectionId && !collectionName) {
+      resultDiv.textContent = "Erreur : choisissez une collection Albert existante ou saisissez le nom d'une nouvelle collection.";
+      return false;
+    }
+    if (!gdprAck || !gdprAck.checked) {
+      resultDiv.textContent = "Erreur : confirmation RGPD requise. Cochez la case de confirmation avant l'envoi vers Albert.";
+      if (gdprAck) gdprAck.focus();
+      return false;
+    }
+
+    if (collectionId) {
+      form.append('albert_collection_id', collectionId);
+    } else {
+      form.append('albert_collection_name', collectionName);
+      form.append('albert_create_collection', 'true');
+    }
+    form.append('albert_gdpr_ack', 'true');
+    return true;
+  }
+
+  /**
+   * Add the Albert counters of a successful upload to the result, then reload the collections.
+   * @param {HTMLElement} resultDiv - The upload result element.
+   * @param {Object} json - The /upload_db response.
+   */
+  function appendAlbertUploadSummary(resultDiv, json) {
+    const lines = [];
+    if (typeof json.existing_count === 'number') lines.push(`Chunks déjà présents dans la collection : ${json.existing_count}`);
+    if (typeof json.skipped_count === 'number') lines.push(`Chunks écartés (dédoublonnage) : ${json.skipped_count}`);
+    lines.forEach(text => {
+      const p = document.createElement('p');
+      p.textContent = text;
+      resultDiv.appendChild(p);
+    });
+    fetchAlbertCollections(true);
+  }{% endif %}
 </script>
 {% endblock %}

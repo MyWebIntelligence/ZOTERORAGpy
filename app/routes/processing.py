@@ -18,16 +18,36 @@ Security:
 - Credentials are retrieved from user's personal settings (encrypted in DB).
 - Non-admin users cannot access .env credentials.
 - Subprocess environments are built with user-specific credentials.
+
+Albert (DINUM, opt-in, ``ALBERT_ENABLED=1``):
+- The chat provider of a model is decided by ``resolve_llm_provider`` (the
+  ``albert/`` prefix first, then the historical ``provider/model`` rule); an
+  ``albert/`` model while Albert is disabled gives a 400 (or one SSE error
+  event) and no subprocess is started.
+- The dense phase takes an ``embedding_provider`` form field (ignored while
+  Albert is disabled, except ``albert`` which gives a 400).
+- ``/upload_db`` gains the ``albert`` target (collections, retention
+  acknowledgement, audit entry, manifest archived out of ``uploads/``); its
+  extra fields are read from the raw form so the OpenAPI schema never
+  mentions them.
+- ``_subprocess_timeout`` extends the subprocess timeout to
+  ``ALBERT_SUBPROCESS_TIMEOUT`` only when the request selects Albert.
+- While Albert is disabled every response, argv, environment and timeout is
+  the historical one.
 """
 import os
+import re
+import shutil
 import subprocess
 import logging
 import json
 import pandas as pd
 import asyncio
-from typing import Dict, Optional
-from fastapi import APIRouter, Form, Depends
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple
+from fastapi import APIRouter, Form, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy.orm import Session
 
 from app.core.config import APP_DIR, RAGPY_DIR, UPLOAD_DIR
 from app.services.process_manager import process_manager
@@ -37,15 +57,468 @@ from app.core.credentials import (
     build_subprocess_env,
     get_credential_or_env,
     get_credential_error_message,
+    albert_enabled,
     CredentialMissingError
 )
 from app.database.session import get_db
 from app.models.project import Project
+from app.models.pipeline_session import PipelineSession
+
+try:
+    from scripts.rad_albert.config import AlbertConfig, FIELD_ENV_NAMES
+    from scripts.rad_albert.errors import AlbertDisabledError
+    from scripts.rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, resolve_llm_provider
+except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
+    from rad_albert.config import AlbertConfig, FIELD_ENV_NAMES
+    from rad_albert.errors import AlbertDisabledError
+    from rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, resolve_llm_provider
 
 # Setup logger
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# =============================================================================
+# Albert (DINUM) helpers — inert while Albert is disabled
+# =============================================================================
+ALBERT_DB_CHOICE = "albert"
+ALBERT_CREDENTIAL_KEY = "albert_api_key"
+EMBEDDING_PROVIDER_ENV = "EMBEDDING_PROVIDER"
+EMBEDDING_PROVIDERS = ("openai", "albert")
+CREDENTIALS_CONFIGURE_URL = "/settings/credentials"
+# Copies of the upload manifests, out of uploads/: <dir>/<user_id>/<session>-<ts>.jsonl
+ALBERT_MANIFEST_DIR = os.path.join(RAGPY_DIR, "data", "albert_manifests")
+ALBERT_UPLOAD_AUDIT_ACTION = "ALBERT_COLLECTION_UPLOAD"
+ALBERT_COLLECTION_RESOURCE = "albert_collection"
+# Raw form fields of the albert target of /upload_db (never declared as Form
+# parameters, so the OpenAPI schema stays free of them).
+ALBERT_FORM_COLLECTION_ID = "albert_collection_id"
+ALBERT_FORM_COLLECTION_NAME = "albert_collection_name"
+ALBERT_FORM_CREATE_COLLECTION = "albert_create_collection"
+ALBERT_FORM_GDPR_ACK = "albert_gdpr_ack"
+_ALBERT_NAME_MAX_CHARS = 255
+_TRUE_FORM_VALUES = ("1", "true", "yes", "on")
+_SAFE_LABEL_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_SAFE_LABEL_MAX_CHARS = 120
+# Anchored lines of the pipeline scripts' output: the Result block header and
+# the "Albert abort: kind=<kind> reason=<reason>[ credential_required=<key>]" line.
+_RESULT_BLOCK_RE = re.compile(r"^=== Result ===\s*$", re.MULTILINE)
+_ALBERT_ABORT_RE = re.compile(
+    r"^Albert abort: kind=(\w+) reason=(\w+)(?: credential_required=(\w+))?\s*$", re.MULTILINE
+)
+# 403 body of a registered session of a project the user cannot access
+# (stop_all_scripts and the Albert branches).
+SESSION_DENIED_BODY = {
+    "error": "Accès non autorisé à cette session",
+    "details": "You can only stop the processes of your own sessions."
+}
+ALBERT_GDPR_MESSAGE = (
+    "Confirmation requise avant l'envoi vers Albert : les textes des chunks sont "
+    "conservés par la DINUM (sous-traitant, art. 28 RGPD) dans une collection privée "
+    "jusqu'à leur suppression ; vérifier les droits d'auteur et l'absence de données "
+    "personnelles non nécessaires."
+)
+
+
+def _albert_setting(field_name: str) -> Any:
+    """
+    Read one ``AlbertConfig`` field from its environment variable only.
+
+    The configuration is built from a mapping holding that single variable,
+    so the parser and the default are those of ``AlbertConfig.from_env`` and
+    nothing else is read or validated (an invalid ``ALBERT_BASE_URL`` never
+    raises here).
+
+    Args:
+        field_name: Name of an ``AlbertConfig`` field (``FIELD_ENV_NAMES`` key).
+
+    Returns:
+        The parsed value of the field.
+    """
+    env_name = FIELD_ENV_NAMES[field_name]
+    raw = os.environ.get(env_name)
+    mapping = {} if raw is None else {env_name: raw}
+    return getattr(AlbertConfig.from_env(mapping), field_name)
+
+
+def _subprocess_timeout(default: int, albert_selected: bool) -> int:
+    """
+    Timeout of a pipeline subprocess (decision 19 of the Albert sprint).
+
+    Args:
+        default: The historical literal timeout of the call site (1800 or 3600).
+        albert_selected: True when the request selects Albert (``albert/``
+            model, ``embedding_provider=albert``, ``db_choice=albert`` or the
+            active Albert OCR link).
+
+    Returns:
+        ``ALBERT_SUBPROCESS_TIMEOUT`` when Albert is selected, else ``default``
+        unchanged.
+    """
+    if not albert_selected:
+        return default
+    return _albert_setting("subprocess_timeout")
+
+
+def _resolve_chat_model(model: Optional[str]):
+    """
+    Resolve the chat provider of a model with the single resolver.
+
+    Any model without the ``albert/`` prefix is routed exactly as before
+    (``provider/model`` → OpenRouter, else OpenAI).
+
+    Args:
+        model: Model name as entered.
+
+    Returns:
+        ``ProviderResolution(provider, wire_model, credential_key)``.
+
+    Raises:
+        AlbertDisabledError: ``albert/…`` while Albert is disabled.
+        ValueError: ``albert/`` without a model identifier.
+    """
+    return resolve_llm_provider(model, albert_enabled=albert_enabled())
+
+
+def _ocr_albert_active(user: User) -> bool:
+    """
+    Tell whether the Albert OCR link runs for ``user`` (Albert ON, OCR on, key).
+
+    Evaluated lazily: while Albert is disabled neither the OCR switch nor the
+    user's credentials are read.
+
+    Args:
+        user: The authenticated user.
+
+    Returns:
+        True when ``ALBERT_ENABLED``, ``OCR_ENABLE_ALBERT`` and an Albert key
+        available to the user (personal, or ``.env`` for admins) are all set.
+    """
+    if not albert_enabled():
+        return False
+    if not _albert_setting("ocr_enabled"):
+        return False
+    return bool(get_credential_or_env(user, ALBERT_CREDENTIAL_KEY))
+
+
+def _resolve_embedding_provider(value: Optional[str]) -> Optional[str]:
+    """
+    Resolve the dense embedding provider of a request.
+
+    Albert disabled: the field is ignored (None: historical behaviour, the
+    environment is left untouched), except ``albert`` which is refused.
+    Albert enabled: the form value, else the server ``EMBEDDING_PROVIDER``,
+    else ``openai``; the result must be ``openai`` or ``albert``.
+
+    Args:
+        value: The ``embedding_provider`` form field (None or empty if absent).
+
+    Returns:
+        ``'openai'`` or ``'albert'`` while Albert is enabled, else None.
+
+    Raises:
+        AlbertDisabledError: ``albert`` requested while Albert is disabled.
+        ValueError: Unknown provider while Albert is enabled.
+    """
+    requested = (value or "").strip()
+    if not albert_enabled():
+        if requested.lower() == ALBERT_DB_CHOICE:
+            raise AlbertDisabledError(
+                "embedding_provider=albert exige Albert, désactivé sur ce serveur (ALBERT_ENABLED=1 requis).",
+                model="embedding_provider=albert",
+            )
+        return None
+    raw = requested or (os.environ.get(EMBEDDING_PROVIDER_ENV) or "").strip()
+    name = raw.lower() or EMBEDDING_PROVIDERS[0]
+    if name not in EMBEDDING_PROVIDERS:
+        raise ValueError(
+            f"embedding_provider={raw!r} inconnu : valeurs admises « openai » ou « albert »."
+        )
+    return name
+
+
+def _embedding_required_keys(provider: Optional[str]) -> list:
+    """
+    Credential keys of the dense phase for a resolved embedding provider.
+
+    Args:
+        provider: Result of ``_resolve_embedding_provider``.
+
+    Returns:
+        ``['albert_api_key']`` for Albert, else ``['openai_api_key']``.
+    """
+    if provider == ALBERT_DB_CHOICE:
+        return [ALBERT_CREDENTIAL_KEY]
+    return ["openai_api_key"]
+
+
+def _sse_event(payload: Dict[str, Any]) -> str:
+    """
+    Format one Server-Sent Event carrying ``payload`` as JSON.
+
+    Args:
+        payload: The event body.
+
+    Returns:
+        The ``data: {...}`` block, blank line included.
+    """
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _sse_error_response(payload: Dict[str, Any]) -> StreamingResponse:
+    """
+    Build an SSE response made of a single event (no subprocess is started).
+
+    The payload is serialised when the response is built, so the stream never
+    depends on a variable of an enclosing ``except`` block.
+
+    Args:
+        payload: The event body (``type``, ``message`` and optional fields).
+
+    Returns:
+        The ``text/event-stream`` response.
+    """
+    event = _sse_event(payload)
+
+    async def _single_event():
+        """Yield the prepared event once."""
+        yield event
+
+    return StreamingResponse(_single_event(), media_type="text/event-stream")
+
+
+def _credential_error_payload(error: CredentialMissingError) -> Dict[str, str]:
+    """
+    SSE error payload of a missing credential, equal to the JSON routes' 403 fields.
+
+    Args:
+        error: The error raised by ``build_subprocess_env``.
+
+    Returns:
+        ``{type: error, message, credential_required}``.
+    """
+    return {"type": "error", "message": str(error), "credential_required": error.credential_key}
+
+
+def form_flag(value: Any) -> bool:
+    """
+    Interpret a raw form value as a boolean flag (``true``, ``1``, ``yes``, ``on``).
+
+    Args:
+        value: The raw form value (str, None or an upload).
+
+    Returns:
+        True for an affirmative string, False otherwise.
+    """
+    return isinstance(value, str) and value.strip().lower() in _TRUE_FORM_VALUES
+
+
+def _safe_label(text: Any) -> str:
+    """
+    Turn a session path into a file name fragment (no separator, no leading dot).
+
+    Args:
+        text: The session folder (relative path).
+
+    Returns:
+        A non-empty label made of ``[A-Za-z0-9._-]`` characters.
+    """
+    label = _SAFE_LABEL_RE.sub("_", str(text or "")).strip("._")
+    return label[:_SAFE_LABEL_MAX_CHARS] or "session"
+
+
+def _archive_albert_manifest(manifest_path: Optional[str], user_id: Any, session: str) -> Optional[str]:
+    """
+    Copy an Albert upload manifest out of ``uploads/`` (even a partial one).
+
+    The copy goes to ``ALBERT_MANIFEST_DIR/<user_id>/<session>-<ts>.jsonl``.
+    Never raises: a failure is logged and the upload response is unchanged.
+
+    Args:
+        manifest_path: Manifest written next to the upload input.
+        user_id: Id of the uploading user.
+        session: Session folder of the upload.
+
+    Returns:
+        The path of the copy, or None when there was nothing to copy.
+    """
+    try:
+        if not manifest_path or not os.path.isfile(manifest_path):
+            return None
+        target_dir = os.path.join(ALBERT_MANIFEST_DIR, str(int(user_id)))
+        os.makedirs(target_dir, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = os.path.join(target_dir, f"{_safe_label(session)}-{stamp}.jsonl")
+        shutil.copyfile(manifest_path, target)
+        logger.info(f"Albert manifest archived for user {user_id}: {target}")
+        return target
+    except Exception as exc:
+        logger.error(f"Could not archive the Albert manifest of session '{session}': {type(exc).__name__}: {exc}")
+        return None
+
+
+def albert_collection_target(form: Any) -> Tuple[Optional[Dict[str, Any]], Optional[JSONResponse]]:
+    """
+    Validate the collection fields of an albert upload (raw form values).
+
+    Args:
+        form: The request form (``albert_collection_id``,
+            ``albert_collection_name``, ``albert_create_collection``).
+
+    Returns:
+        ``(target, None)`` with ``collection_id`` (int or None),
+        ``collection_name`` (str or None) and ``create_collection`` (bool),
+        or ``(None, response)`` with a 400 response.
+    """
+    raw_id = form.get(ALBERT_FORM_COLLECTION_ID)
+    raw_name = form.get(ALBERT_FORM_COLLECTION_NAME)
+    raw_id = raw_id.strip() if isinstance(raw_id, str) else ""
+    name = raw_name.strip() if isinstance(raw_name, str) else ""
+    collection_id = None
+    if raw_id:
+        if not raw_id.isdigit() or int(raw_id) <= 0:
+            return None, JSONResponse(status_code=400, content={
+                "error": "Identifiant de collection Albert invalide (entier positif attendu)."
+            })
+        collection_id = int(raw_id)
+    if name and (len(name) > _ALBERT_NAME_MAX_CHARS or any(ord(ch) < 32 or ord(ch) == 127 for ch in name)):
+        return None, JSONResponse(status_code=400, content={
+            "error": "Nom de collection Albert invalide (255 caractères au plus, sans caractère de contrôle)."
+        })
+    if collection_id is None and not name:
+        return None, JSONResponse(status_code=400, content={
+            "error": "Collection Albert requise : identifiant ou nom exact."
+        })
+    return {
+        "collection_id": collection_id,
+        "collection_name": name or None,
+        "create_collection": form_flag(form.get(ALBERT_FORM_CREATE_COLLECTION)),
+    }, None
+
+
+def _albert_vectordb_flags(target: Dict[str, Any]) -> list:
+    """
+    CLI flags of ``rad_vectordb.py --db albert`` for a validated target.
+
+    The name is passed as ``--albert-collection-name=<name>`` so that a name
+    starting with ``-`` is never read as an option.
+
+    Args:
+        target: Result of ``albert_collection_target``.
+
+    Returns:
+        The flags, ``--albert-ack-retention`` last.
+    """
+    flags = []
+    if target.get("collection_id") is not None:
+        flags.extend(["--albert-collection-id", str(target["collection_id"])])
+    if target.get("collection_name"):
+        flags.append(f"--albert-collection-name={target['collection_name']}")
+    if target.get("create_collection"):
+        flags.append("--albert-create-collection")
+    flags.append("--albert-ack-retention")
+    return flags
+
+
+def _registered_session_denied(db: Session, session: str, user: User) -> bool:
+    """
+    Tell whether ``session`` is a registered session of a project ``user`` cannot access.
+
+    Session folders that are not registered (standalone pipeline page) keep
+    the historical behaviour (not denied).
+
+    Args:
+        db: Database session.
+        session: Session folder (relative path under uploads/).
+        user: The authenticated user.
+
+    Returns:
+        True when the folder belongs to a pipeline session of a project that
+        the user neither owns nor is a member of (administrators excepted).
+    """
+    if getattr(user, "is_admin", False):
+        return False
+    rows = db.query(PipelineSession).filter(PipelineSession.session_folder == session).all()
+    for row in rows:
+        project = db.query(Project).filter(Project.id == row.project_id).first()
+        if project is not None and not project.has_access(user.id):
+            return True
+    return False
+
+
+def _albert_session_refusal(db: Session, path: str, absolute_path: str, user: User) -> Optional[JSONResponse]:
+    """
+    Refuse a session whose texts may not be sent to Albert by ``user``.
+
+    Used by the Albert branches only (the historical routes are unchanged).
+    The folder must resolve (symbolic links followed) strictly under
+    ``UPLOAD_DIR``; a registered session of a project the user cannot access
+    is refused whatever the spelling of ``path`` (the raw value and the
+    normalised relative folder are both checked).
+
+    Args:
+        db: Database session.
+        path: Session folder as sent by the client.
+        absolute_path: ``UPLOAD_DIR`` joined with ``path`` (absolute).
+        user: The authenticated user.
+
+    Returns:
+        A 400 response when the folder is outside ``UPLOAD_DIR`` (or is
+        ``UPLOAD_DIR`` itself), a 403 response (body of ``stop_all_scripts``)
+        for a foreign registered session, else None.
+    """
+    upload_root = os.path.realpath(UPLOAD_DIR)
+    target = os.path.realpath(absolute_path)
+    try:
+        inside = target != upload_root and os.path.commonpath([upload_root, target]) == upload_root
+    except ValueError:  # different drives (Windows)
+        inside = False
+    if not inside:
+        logger.warning(f"Albert selection refused for user {user.id}: session outside uploads/ ('{path}')")
+        return JSONResponse(status_code=400, content={
+            "error": "Chemin de session invalide : le dossier doit se trouver sous uploads/."
+        })
+    folder = os.path.relpath(target, upload_root)
+    if _registered_session_denied(db, path, user) or (folder != path and _registered_session_denied(db, folder, user)):
+        logger.warning(f"Albert selection refused for user {user.id}: foreign session '{path}'")
+        return JSONResponse(status_code=403, content=dict(SESSION_DENIED_BODY))
+    return None
+
+
+def _albert_upload_credential_required(returncode: int, stdout: str) -> Optional[str]:
+    """
+    Credential named by a failed ``rad_vectordb.py --db albert`` run, or None.
+
+    The script exits 2 for an Albert account or quota error (decision 22),
+    but also for an invalid Albert configuration, Albert disabled in the
+    subprocess environment or a usage error: only the account case sends
+    the user to the key settings.
+
+    Rule (exit code 2 only):
+
+    * an ``Albert abort: kind=<kind> reason=<reason>`` line (anchored, the
+      last one wins): the key only for ``kind=account`` (its
+      ``credential_required`` value, ``albert_api_key`` by default);
+    * no such line: the key only when the ``=== Result ===`` block was
+      printed, since the script's single exit 2 after that block is the
+      account stop (every other exit 2 happens before it).
+
+    Args:
+        returncode: Exit code of the script.
+        stdout: Standard output of the script.
+
+    Returns:
+        The credential key to report, or None.
+    """
+    if returncode != 2:
+        return None
+    text = stdout or ""
+    aborts = list(_ALBERT_ABORT_RE.finditer(text))
+    if aborts:
+        kind, _reason, credential = aborts[-1].groups()
+        return (credential or ALBERT_CREDENTIAL_KEY) if kind == "account" else None
+    return ALBERT_CREDENTIAL_KEY if _RESULT_BLOCK_RE.search(text) else None
 
 
 async def run_tracked_subprocess(
@@ -110,7 +583,11 @@ async def run_tracked_subprocess(
 
 
 @router.post("/stop_all_scripts")
-async def stop_all_scripts(session: str = Form(...)):
+async def stop_all_scripts(
+    session: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     Arrête les processus de traitement d'une session spécifique.
 
@@ -123,6 +600,12 @@ async def stop_all_scripts(session: str = Form(...)):
 
     Returns:
         JSONResponse avec le statut de l'opération
+    \f
+    La route exige un utilisateur authentifié (``current_user``) et refuse
+    (403) une session enregistrée d'un projet auquel il n'a pas accès
+    (administrateurs exceptés), vérifiée avec la session de base de données
+    ``db``. Un dossier non enregistré (page pipeline autonome) garde le
+    comportement historique.
     """
     if not session or not session.strip():
         logger.warning("stop_all_scripts called without session parameter")
@@ -141,6 +624,11 @@ async def stop_all_scripts(session: str = Form(...)):
             "error": f"Session not found: {session}",
             "details": "The specified session directory does not exist."
         })
+
+    # Session enregistrée d'un projet étranger : refus (jamais d'arrêt croisé)
+    if _registered_session_denied(db, session, current_user):
+        logger.warning(f"stop_all_scripts: user {current_user.id} denied for session '{session}'")
+        return JSONResponse(status_code=403, content=dict(SESSION_DENIED_BODY))
 
     try:
         # Utiliser le ProcessManager pour arrêter uniquement les processus de cette session
@@ -283,6 +771,8 @@ async def process_dataframe(
         else:
             # Run extraction script with improved error handling
             try:
+                # Albert OCR link (Albert ON, OCR_ENABLE_ALBERT=1, key available)
+                ocr_albert = _ocr_albert_active(current_user)
                 # Build secure subprocess environment with user credentials
                 # rad_dataframe.py requires MISTRAL_API_KEY for OCR (or OPENAI_API_KEY as fallback)
                 try:
@@ -299,12 +789,24 @@ async def process_dataframe(
                         )
                         logger.info(f"Using OpenAI fallback for OCR (user {current_user.email})")
                     except CredentialMissingError:
-                        logger.warning(f"User {current_user.email} missing OCR credentials")
-                        return JSONResponse(status_code=403, content={
-                            "error": get_credential_error_message("mistral_api_key"),
-                            "credential_required": "mistral_api_key",
-                            "configure_url": "/settings/credentials"
-                        })
+                        subprocess_env = None
+                        if ocr_albert:
+                            # Third attempt: the Albert OCR link alone
+                            try:
+                                subprocess_env = build_subprocess_env(
+                                    current_user,
+                                    required_keys=[ALBERT_CREDENTIAL_KEY]
+                                )
+                                logger.info(f"Using the Albert OCR link only (user {current_user.email})")
+                            except CredentialMissingError:
+                                subprocess_env = None
+                        if subprocess_env is None:
+                            logger.warning(f"User {current_user.email} missing OCR credentials")
+                            return JSONResponse(status_code=403, content={
+                                "error": get_credential_error_message("mistral_api_key"),
+                                "credential_required": "mistral_api_key",
+                                "configure_url": "/settings/credentials"
+                            })
 
                 # Construct absolute path to the script using RAGPY_DIR
                 project_scripts_dir = os.path.join(RAGPY_DIR, "scripts")
@@ -322,7 +824,7 @@ async def process_dataframe(
                         "--output", out_csv
                     ],
                     session_folder=path,
-                    timeout=1800,
+                    timeout=_subprocess_timeout(1800, ocr_albert),
                     env=subprocess_env  # Use user-specific credentials
                 )
 
@@ -453,14 +955,17 @@ async def initial_text_chunking(
     logger.info(f"  Output dir: {absolute_processing_path}")
     logger.info(f"  Model: {model}")
 
+    # Determine required credentials based on model (single resolver:
+    # 'provider/model' → OpenRouter, other names → OpenAI, see _resolve_chat_model)
     try:
-        # Determine required credentials based on model
-        # Models with '/' format use OpenRouter, otherwise OpenAI
-        if model and '/' in model:
-            required_keys = ["openrouter_api_key"]
-        else:
-            required_keys = ["openai_api_key"]
+        resolution = _resolve_chat_model(model)
+    except ValueError as e:
+        logger.warning(f"Chunking model refused for user {current_user.email}: {e}")
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    required_keys = [resolution.credential_key]
+    chat_albert = resolution.provider == PROVIDER_ALBERT
 
+    try:
         # Build secure subprocess environment with user credentials
         try:
             subprocess_env = build_subprocess_env(current_user, required_keys=required_keys)
@@ -482,7 +987,7 @@ async def initial_text_chunking(
                 "--model", model
             ],
             session_folder=path,
-            timeout=1800,
+            timeout=_subprocess_timeout(1800, chat_albert),
             env=subprocess_env
         )
 
@@ -564,9 +1069,8 @@ async def process_dataframe_sse(
         json_files = [f for f in os.listdir(absolute_processing_path)
                       if f.lower().endswith('.json') and not f.startswith(excluded_prefixes)]
     except Exception as e:
-        async def error_generator():
-            yield f"data: {{\"type\": \"error\", \"message\": \"Failed to list directory: {str(e)}\"}}\n\n"
-        return StreamingResponse(error_generator(), media_type="text/event-stream")
+        # Event built here: the except block unbinds ``e`` when it ends.
+        return _sse_error_response({"type": "error", "message": f"Failed to list directory: {e}"})
 
     if not json_files:
         async def error_generator():
@@ -575,6 +1079,9 @@ async def process_dataframe_sse(
     
     json_path = os.path.join(absolute_processing_path, json_files[0])
     out_csv = os.path.join(absolute_processing_path, 'output.csv')
+
+    # Albert OCR link (Albert ON, OCR_ENABLE_ALBERT=1, key available)
+    ocr_albert = _ocr_albert_active(current_user)
 
     # Build secure subprocess environment with user credentials
     # rad_dataframe.py requires MISTRAL_API_KEY for OCR (or OPENAI_API_KEY as fallback)
@@ -592,9 +1099,21 @@ async def process_dataframe_sse(
             )
             logger.info(f"Using OpenAI fallback for OCR (user {current_user.email})")
         except CredentialMissingError:
-            async def error_generator():
-                yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message('mistral_api_key')}\", \"credential_required\": \"mistral_api_key\"}}\n\n"
-            return StreamingResponse(error_generator(), media_type="text/event-stream")
+            subprocess_env = None
+            if ocr_albert:
+                # Third attempt: the Albert OCR link alone
+                try:
+                    subprocess_env = build_subprocess_env(
+                        current_user,
+                        required_keys=[ALBERT_CREDENTIAL_KEY]
+                    )
+                    logger.info(f"Using the Albert OCR link only (user {current_user.email})")
+                except CredentialMissingError:
+                    subprocess_env = None
+            if subprocess_env is None:
+                async def error_generator():
+                    yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message('mistral_api_key')}\", \"credential_required\": \"mistral_api_key\"}}\n\n"
+                return StreamingResponse(error_generator(), media_type="text/event-stream")
 
     # Build command
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_dataframe.py")
@@ -605,9 +1124,11 @@ async def process_dataframe_sse(
     # Use combined parser: prioritize structured PROGRESS logs, then tqdm, then custom logs
     parser = create_combined_parser(parse_multilevel_progress, parse_tqdm_progress, parse_dataframe_logs)
 
+    timeout = _subprocess_timeout(1800, ocr_albert)
+
     # Wrap generator to add document count on complete
     async def sse_with_count():
-        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800, env=subprocess_env):
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=timeout, env=subprocess_env):
             if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
                 try:
                     if os.path.exists(out_csv):
@@ -625,6 +1146,7 @@ async def process_dataframe_sse(
 @router.post("/dense_embedding_generation")
 async def dense_embedding_generation(
     path: str = Form(...),
+    embedding_provider: str = Form(None),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -647,10 +1169,17 @@ async def dense_embedding_generation(
     output_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings.json')
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
 
+    # Embedding provider of the request (None: historical OpenAI behaviour)
+    try:
+        provider = _resolve_embedding_provider(embedding_provider)
+    except ValueError as e:
+        logger.warning(f"Embedding provider refused for user {current_user.email}: {e}")
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
     # Build secure subprocess environment with user credentials
     # Dense embedding generation requires OpenAI API key
     try:
-        subprocess_env = build_subprocess_env(current_user, required_keys=["openai_api_key"])
+        subprocess_env = build_subprocess_env(current_user, required_keys=_embedding_required_keys(provider))
     except CredentialMissingError as e:
         logger.warning(f"User {current_user.email} missing credential: {e.credential_key}")
         return JSONResponse(status_code=403, content={
@@ -658,6 +1187,8 @@ async def dense_embedding_generation(
             "credential_required": e.credential_key,
             "configure_url": "/settings/credentials"
         })
+    if provider is not None:
+        subprocess_env[EMBEDDING_PROVIDER_ENV] = provider
 
     try:
         result = await run_tracked_subprocess(
@@ -668,7 +1199,7 @@ async def dense_embedding_generation(
                 "--phase", "dense"
             ],
             session_folder=path,
-            timeout=1800,
+            timeout=_subprocess_timeout(1800, provider == ALBERT_DB_CHOICE),
             env=subprocess_env
         )
 
@@ -778,8 +1309,167 @@ async def sparse_embedding_generation(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+async def _upload_db_albert(
+    request: Request,
+    path: str,
+    absolute_processing_path: str,
+    db: Session,
+    current_user: User
+) -> JSONResponse:
+    """
+    Albert branch of ``/upload_db`` (private collection, embeddings computed server-side).
+
+    Steps: session checked by ``_albert_session_refusal`` (400 outside
+    uploads/, 403 for a registered session of a project the user cannot
+    access; nothing is read or launched); input chosen by
+    ``resolve_albert_input`` (sparse, then dense, then
+    ``output_chunks.json``); ``albert_gdpr_ack`` must be true (400 with
+    ``gdpr_ack_required`` otherwise); collection fields validated; the
+    ``albert_api_key`` credential required (403 shape of the other targets);
+    an audit entry ``ALBERT_COLLECTION_UPLOAD`` written before anything is
+    sent (refused if it cannot be written); ``rad_vectordb.py --db albert``
+    run with the Albert timeout; the manifest copied out of ``uploads/`` in a
+    ``finally`` block, even after a failure.
+
+    The ``Result`` block is parsed with the anchored patterns of the other
+    targets, plus ``Skipped (existing)``, the manifest line and, for this
+    target only, the whole ``Dedup journal:`` line (paths with spaces). A
+    failure gives 500; ``credential_required`` is added only for an Albert
+    account or quota stop (``_albert_upload_credential_required``).
+
+    Args:
+        request: The request (raw form fields ``albert_*``).
+        path: Session folder, relative to uploads/.
+        absolute_processing_path: Absolute session folder (exists).
+        db: Database session (audit log).
+        current_user: The authenticated user.
+
+    Returns:
+        The JSON response of the upload.
+    """
+    from app.models.audit import create_audit_log
+    try:
+        from scripts.rad_albert.collections import manifest_path_for, resolve_albert_input
+    except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
+        from rad_albert.collections import manifest_path_for, resolve_albert_input
+
+    # The texts leave for a third party: the folder must stay under uploads/
+    # and must not be a registered session of a project the user cannot access.
+    refusal = _albert_session_refusal(db, path, absolute_processing_path, current_user)
+    if refusal is not None:
+        return refusal
+
+    input_file = resolve_albert_input(absolute_processing_path)
+    if not input_file:
+        return JSONResponse(status_code=400, content={
+            "error": "Chunks file not found. Please complete the chunking step first."
+        })
+
+    form = await request.form()
+    if not form_flag(form.get(ALBERT_FORM_GDPR_ACK)):
+        return JSONResponse(status_code=400, content={
+            "error": ALBERT_GDPR_MESSAGE,
+            "gdpr_ack_required": True
+        })
+
+    target, error = albert_collection_target(form)
+    if error is not None:
+        return error
+
+    script_path = os.path.join(RAGPY_DIR, "scripts", "rad_vectordb.py")
+    if not os.path.exists(script_path):
+        return JSONResponse(status_code=500, content={"error": "Vector DB script not found"})
+
+    try:
+        subprocess_env = build_subprocess_env(current_user, required_keys=[ALBERT_CREDENTIAL_KEY])
+    except CredentialMissingError as e:
+        logger.warning(f"User {current_user.email} missing credential: {e.credential_key}")
+        return JSONResponse(status_code=403, content={
+            "error": str(e),
+            "credential_required": e.credential_key,
+            "configure_url": CREDENTIALS_CONFIGURE_URL
+        })
+
+    cmd = ["python3", script_path, "--input", input_file, "--db", ALBERT_DB_CHOICE]
+    cmd.extend(_albert_vectordb_flags(target))
+
+    # Audit first: nothing leaves the server without a trace of the acknowledgement
+    try:
+        create_audit_log(
+            db,
+            action=ALBERT_UPLOAD_AUDIT_ACTION,
+            user_id=current_user.id,
+            resource_type=ALBERT_COLLECTION_RESOURCE,
+            resource_id=target["collection_id"],
+            details={
+                "collection_id": target["collection_id"],
+                "collection_name": target["collection_name"],
+                "session": path,
+                "gdpr_ack": True,
+            },
+        )
+    except Exception as exc:
+        logger.error(f"Albert upload refused, audit log unavailable: {type(exc).__name__}: {exc}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return JSONResponse(status_code=500, content={
+            "error": "Journal d'audit indisponible : envoi vers Albert refusé."
+        })
+
+    manifest_source = manifest_path_for(os.path.dirname(os.path.abspath(input_file)))
+    try:
+        result = await run_tracked_subprocess(
+            cmd=cmd,
+            session_folder=path,
+            timeout=_subprocess_timeout(3600, True),
+            env=subprocess_env
+        )
+
+        stdout = result.stdout or ""
+        if result.returncode != 0:
+            stdout_tail = stdout[-2000:]
+            stderr_tail = (result.stderr or "")[-2000:]
+            details = stdout_tail.strip() or stderr_tail.strip()
+            logger.error(f"Albert upload failed (rc={result.returncode}): {details}")
+            body = {"error": "Vector DB upload failed", "details": details[:1000]}
+            # Albert account or quota error only (decision 22): a configuration
+            # or usage error (also exit 2) never points to the key settings.
+            credential = _albert_upload_credential_required(result.returncode, stdout)
+            if credential:
+                body["credential_required"] = credential
+            return JSONResponse(status_code=500, content=body)
+
+        response = {"status": "success", "message": f"Uploaded to {ALBERT_DB_CHOICE}"}
+        m = re.search(r'^Inserted:\s*(\d+)', stdout, re.MULTILINE)
+        if m:
+            response["inserted_count"] = int(m.group(1))
+        m = re.search(r'^Skipped \(dedup\):\s*(\d+)', stdout, re.MULTILINE)
+        if m and int(m.group(1)):
+            response["skipped_count"] = int(m.group(1))
+        m = re.search(r'^Dedup journal:\s*(.+)$', stdout, re.MULTILINE)
+        if m and m.group(1).strip():
+            response["journal_path"] = m.group(1).strip()
+        m = re.search(r'^Skipped \(existing\):\s*(\d+)', stdout, re.MULTILINE)
+        if m:
+            response["existing_count"] = int(m.group(1))
+        m = re.search(r'^Albert manifest:\s*(.+)$', stdout, re.MULTILINE)
+        if m and m.group(1).strip():
+            response["manifest_path"] = m.group(1).strip()
+        return JSONResponse(response)
+    except subprocess.TimeoutExpired:
+        return JSONResponse(status_code=500, content={"error": "Upload timed out"})
+    except Exception as e:
+        logger.error(f"Albert upload error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        _archive_albert_manifest(manifest_source, current_user.id, path)
+
+
 @router.post("/upload_db")
 async def upload_db(
+    request: Request,
     path: str = Form(...),
     db_choice: str = Form(...),
     pinecone_index_name: str = Form(None),
@@ -787,11 +1477,17 @@ async def upload_db(
     weaviate_class_name: str = Form(None),
     weaviate_tenant_name: str = Form(None),
     qdrant_collection_name: str = Form(None),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
     Upload embeddings to vector database using rad_vectordb.py.
     Requires credentials based on the selected database.
+    \f
+    Albert target (only while Albert is enabled, handled before the sparse
+    file check): see ``_upload_db_albert``; its fields are read from the raw
+    form. While Albert is disabled, ``db_choice=albert`` keeps the historical
+    400 (after the sparse file check).
     """
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"Vector DB upload for path: '{path}', db: {db_choice}, user: {current_user.email}")
@@ -799,6 +1495,11 @@ async def upload_db(
     if not os.path.isdir(absolute_processing_path):
         return JSONResponse(status_code=400, content={"error": f"Directory not found: {path}"})
     
+    # Albert collections: own input resolution (no vector needed), before the
+    # sparse file check, only while Albert is enabled
+    if db_choice == ALBERT_DB_CHOICE and albert_enabled():
+        return await _upload_db_albert(request, path, absolute_processing_path, db, current_user)
+
     # Input should be sparse embeddings file
     input_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings_sparse.json')
     if not os.path.exists(input_file):
@@ -941,7 +1642,7 @@ async def generate_zotero_notes_sse(
     """
     from app.utils.llm_note_generator import (
         build_note_html_async, build_abstract_text_async, sentinel_in_html,
-        TEMPLATE_MAP, NOTE_MODE_DISPLAY
+        TEMPLATE_MAP, NOTE_MODE_DISPLAY, ALBERT_ACCOUNT_ERRORS, resolve_default_llm_model
     )
     from app.utils.book_note_generator import build_book_note_async
     from app.utils.zotero_client import (
@@ -996,15 +1697,33 @@ async def generate_zotero_notes_sse(
             openai_key = get_credential_or_env(current_user, "openai_api_key")
             openrouter_key = get_credential_or_env(current_user, "openrouter_api_key")
 
-            # Validate based on model type
-            if model and '/' in model:
-                if not openrouter_key:
-                    yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message('openrouter_api_key')}\", \"credential_required\": \"openrouter_api_key\"}}\n\n"
-                    return
+            # Effective model: the form field; while Albert is enabled, an empty
+            # field means the web default (read off the event loop). While Albert
+            # is disabled an empty field is kept as is (no .env read): the
+            # historical rule applies (empty -> OpenAI key) and the builders
+            # resolve the default themselves, as before. The credential checked
+            # is the one of the provider resolved by the single resolver.
+            if model or not albert_enabled():
+                effective_model = model
             else:
-                if not openai_key:
-                    yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message('openai_api_key')}\", \"credential_required\": \"openai_api_key\"}}\n\n"
-                    return
+                effective_model = await asyncio.to_thread(resolve_default_llm_model)
+            try:
+                resolution = _resolve_chat_model(effective_model)
+            except ValueError as e:
+                yield _sse_event({"type": "error", "message": str(e)})
+                return
+            albert_key = None
+            if resolution.provider == PROVIDER_ALBERT:
+                albert_key = get_credential_or_env(current_user, ALBERT_CREDENTIAL_KEY)
+                provider_key = albert_key
+            elif resolution.provider == PROVIDER_OPENROUTER:
+                provider_key = openrouter_key
+            else:
+                provider_key = openai_key
+            if not provider_key:
+                required = resolution.credential_key
+                yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message(required)}\", \"credential_required\": \"{required}\"}}\n\n"
+                return
 
             # Get Zotero credentials (optional - for sync to library)
             zotero_api_key = get_credential_or_env(current_user, "zotero_api_key") or ""
@@ -1064,6 +1783,9 @@ async def generate_zotero_notes_sse(
             # Storage for generated notes (if local mode or for backup)
             generated_notes = []
 
+            # Albert account or quota error that stopped the job (None otherwise)
+            account_error = None
+
             # Process each document
             for idx, row in df.iterrows():
                 doc_num = idx + 1
@@ -1107,19 +1829,21 @@ async def generate_zotero_notes_sse(
                             sentinel, note_html = await build_book_note_async(
                                 metadata=metadata,
                                 text_content=texteocr,
-                                model=model,
+                                model=effective_model,
                                 openai_api_key=openai_key,
                                 openrouter_api_key=openrouter_key,
+                                albert_api_key=albert_key,
                             )
                         else:
                             sentinel, note_html = await build_note_html_async(
                                 metadata=metadata,
                                 text_content=texteocr,
-                                model=model,
+                                model=effective_model,
                                 use_llm=True,
                                 mode=note_mode,
                                 openai_api_key=openai_key,
-                                openrouter_api_key=openrouter_key
+                                openrouter_api_key=openrouter_key,
+                                albert_api_key=albert_key
                             )
 
                         # Store generated note
@@ -1183,9 +1907,10 @@ async def generate_zotero_notes_sse(
                         summary_text = await build_abstract_text_async(
                             metadata=metadata,
                             text_content=texteocr,
-                            model=model,
+                            model=effective_model,
                             openai_api_key=openai_key,
-                            openrouter_api_key=openrouter_key
+                            openrouter_api_key=openrouter_key,
+                            albert_api_key=albert_key
                         )
 
                         # Store generated summary
@@ -1228,6 +1953,11 @@ async def generate_zotero_notes_sse(
 
                     yield f"data: {{\"type\": \"progress\", \"current\": {doc_num}, \"total\": {total_items}, \"item\": \"{safe_title}\", \"status\": \"{status}\", \"message\": \"Processed {doc_num}/{total_items}: {safe_title}\"}}\n\n"
 
+                except ALBERT_ACCOUNT_ERRORS as e:
+                    # Albert account or quota error: the whole job stops (decision 22)
+                    account_error = e
+                    logger.error(f"Albert account error on document {doc_num}, stopping the notes job: {e}")
+                    break
                 except Exception as e:
                     errors += 1
                     error_msg = str(e).replace('"', '\\"').replace('\n', ' ')[:100]
@@ -1237,7 +1967,7 @@ async def generate_zotero_notes_sse(
                 # Small delay to prevent overwhelming the API
                 await asyncio.sleep(0.1)
 
-            # Save generated notes to file for backup/review
+            # Save generated notes to file for backup/review (also before an Albert stop)
             if generated_notes:
                 notes_file = os.path.join(absolute_processing_path, 'generated_notes.json')
                 try:
@@ -1246,6 +1976,14 @@ async def generate_zotero_notes_sse(
                     logger.info(f"Saved {len(generated_notes)} notes to {notes_file}")
                 except Exception as e:
                     logger.warning(f"Could not save notes file: {e}")
+
+            if account_error is not None:
+                yield _sse_event({
+                    "type": "error",
+                    "message": str(account_error),
+                    "credential_required": getattr(account_error, "credential_required", ALBERT_CREDENTIAL_KEY),
+                })
+                return
 
             # Completion event with summary
             summary = {
@@ -1301,19 +2039,20 @@ async def initial_text_chunking_sse(
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     model = model or "gpt-4o-mini"
 
-    # Determine required credentials based on model
-    if model and '/' in model:
-        required_keys = ["openrouter_api_key"]
-    else:
-        required_keys = ["openai_api_key"]
+    # Determine required credentials based on model (single resolver)
+    try:
+        resolution = _resolve_chat_model(model)
+    except ValueError as e:
+        return _sse_error_response({"type": "error", "message": str(e)})
+    required_keys = [resolution.credential_key]
+    chat_albert = resolution.provider == PROVIDER_ALBERT
 
-    # Build secure subprocess environment with user credentials
+    # Build secure subprocess environment with user credentials. The error
+    # event is built here: the except block unbinds ``e`` when it ends.
     try:
         subprocess_env = build_subprocess_env(current_user, required_keys=required_keys)
     except CredentialMissingError as e:
-        async def error_generator():
-            yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\", \"credential_required\": \"{e.credential_key}\"}}\n\n"
-        return StreamingResponse(error_generator(), media_type="text/event-stream")
+        return _sse_error_response(_credential_error_payload(e))
 
     cmd = [
         "python3", "-u", script_path,  # -u for unbuffered output
@@ -1328,9 +2067,10 @@ async def initial_text_chunking_sse(
 
     # Wrap generator to add chunk count on complete
     output_file = os.path.join(absolute_processing_path, 'output_chunks.json')
+    timeout = _subprocess_timeout(1800, chat_albert)
 
     async def sse_with_count():
-        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800, env=subprocess_env):
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=timeout, env=subprocess_env):
             # Intercept complete event to add count
             if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
                 try:
@@ -1350,6 +2090,7 @@ async def initial_text_chunking_sse(
 @router.post("/dense_embedding_generation_sse")
 async def dense_embedding_generation_sse(
     path: str = Form(...),
+    embedding_provider: str = Form(None),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -1370,13 +2111,20 @@ async def dense_embedding_generation_sse(
             yield f"data: {{\"type\": \"error\", \"message\": \"output_chunks.json not found\"}}\n\n"
         return StreamingResponse(error_generator(), media_type="text/event-stream")
 
-    # Build secure subprocess environment with user credentials
+    # Embedding provider of the request (None: historical OpenAI behaviour)
     try:
-        subprocess_env = build_subprocess_env(current_user, required_keys=["openai_api_key"])
+        provider = _resolve_embedding_provider(embedding_provider)
+    except ValueError as e:
+        return _sse_error_response({"type": "error", "message": str(e)})
+
+    # Build secure subprocess environment with user credentials. The error
+    # event is built here: the except block unbinds ``e`` when it ends.
+    try:
+        subprocess_env = build_subprocess_env(current_user, required_keys=_embedding_required_keys(provider))
     except CredentialMissingError as e:
-        async def error_generator():
-            yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\", \"credential_required\": \"{e.credential_key}\"}}\n\n"
-        return StreamingResponse(error_generator(), media_type="text/event-stream")
+        return _sse_error_response(_credential_error_payload(e))
+    if provider is not None:
+        subprocess_env[EMBEDDING_PROVIDER_ENV] = provider
 
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     cmd = [
@@ -1392,9 +2140,10 @@ async def dense_embedding_generation_sse(
     # Wrap generator to add chunk count on complete
     output_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings.json')
     logger.info(f"Dense embedding expecting output at: {output_file}")
+    timeout = _subprocess_timeout(1800, provider == ALBERT_DB_CHOICE)
 
     async def sse_with_count():
-        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=1800, env=subprocess_env):
+        async for event in run_subprocess_with_sse(cmd, parser, session_folder=path, timeout=timeout, env=subprocess_env):
             if '"type": "complete"' in event and '"message": "Process completed successfully"' in event:
                 try:
                     logger.info(f"Dense complete event received, checking for output file: {output_file}")

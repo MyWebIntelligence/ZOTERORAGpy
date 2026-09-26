@@ -61,13 +61,17 @@ def dense_embedding_task(
     input_file: str,
     output_dir: str,
     session_id: int,
-    user_id: int = None
+    user_id: int = None,
+    embedding_provider: str = None
 ) -> dict:
     """
     Generate dense embeddings using OpenAI text-embedding-3-large.
 
     Runs ``rad_chunk.py --phase dense`` on output_chunks.json with the
-    OpenAI key of ``user_id`` (required, as the HTTP route).
+    OpenAI key of ``user_id`` (required, as the HTTP route). With
+    ``embedding_provider='albert'`` (resolved by the submitting route while
+    Albert is enabled), the Albert key is required instead, and the
+    provider is written to ``EMBEDDING_PROVIDER`` (Albert timeout).
 
     Args:
         self: Celery task instance (bound)
@@ -75,6 +79,8 @@ def dense_embedding_task(
         output_dir: Directory for output JSON file
         session_id: Database session ID for status tracking
         user_id: ID of the user who submitted the task (required)
+        embedding_provider: Resolved provider (``openai``/``albert``), or
+            None for the historical OpenAI path (environment untouched)
 
     Returns:
         dict: {
@@ -107,14 +113,14 @@ def dense_embedding_task(
         logger.info(f"Starting dense embedding task: {input_file}")
 
         user = runner.load_user(user_id)
-        env = runner.build_task_env(user, runner.STAGE_DENSE)
+        env = runner.build_task_env(user, runner.STAGE_DENSE, embedding_provider=embedding_provider)
         cmd = runner.dense_argv(input_file, output_dir)
 
         result = runner.run_script(
             cmd,
             env,
             on_progress=runner.make_progress_reporter(self, 'Generating embeddings'),
-            timeout=runner.DENSE_TIMEOUT
+            timeout=runner.task_timeout(runner.DENSE_TIMEOUT, embedding_provider == runner.ALBERT_DB_CHOICE)
         )
         runner.check_script_result(result, cmd, env)
 

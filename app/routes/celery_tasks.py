@@ -26,6 +26,15 @@ Security:
       when the owner registry is unavailable).
     - ``/status`` and ``/workers`` are reserved to administrators.
 
+Albert (DINUM, opt-in): same rules as the HTTP routes. A recoding model or
+an embedding provider selecting Albert while it is disabled gives a 400
+without queueing; the ``albert`` upload target (fields read from the raw
+form, never declared, so the OpenAPI schema stays unchanged) is handled only
+while Albert is enabled, before the sparse file check, and requires the
+retention acknowledgement (audited at submission). A submission selecting
+Albert is queued with ``apply_async`` and time limits above the Albert
+script timeout; any other one keeps ``.delay`` and the global limits.
+
 Environment Variables:
     ENABLE_CELERY: Set to 'true' to enable Celery mode (default: false)
 
@@ -42,9 +51,9 @@ Endpoints:
 """
 import os
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -55,7 +64,7 @@ from app.celery_app import (
     revoke_task
 )
 from app.core.config import UPLOAD_DIR
-from app.core.credentials import CredentialMissingError
+from app.core.credentials import CredentialMissingError, albert_enabled
 from app.database.session import get_db
 from app.middleware.auth import get_current_active_user, require_admin
 from app.models.user import User
@@ -66,6 +75,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/celery", tags=["celery"])
 
 CREDENTIALS_CONFIGURE_URL = "/settings/credentials"
+# Upload target handled by _submit_albert_upload (Albert enabled only).
+ALBERT_DB_CHOICE = "albert"
 
 
 def _check_celery_available() -> None:
@@ -162,17 +173,69 @@ def _check_credentials(user: User, stage: str, **params) -> Optional[JSONRespons
     Args:
         user: The current user
         stage: Pipeline stage (``runner.STAGES``)
-        **params: Stage parameters (``model``, ``db_choice``)
+        **params: Stage parameters (``model``, ``db_choice``, ``embedding_provider``)
 
     Returns:
-        The 403 response when a credential is missing, else None
+        The 403 response when a credential is missing, a 400 response when
+        the selection is refused (an Albert model or provider while Albert
+        is disabled, an unknown provider), else None
     """
     try:
         _runner().build_task_env(user, stage, **params)
     except CredentialMissingError as e:
         logger.warning(f"User {user.id} missing credential: {e.credential_key}")
         return _credential_error(e)
+    except ValueError as e:
+        logger.warning(f"User {user.id} selection refused for stage {stage}: {e}")
+        return JSONResponse(status_code=400, content={"error": str(e)})
     return None
+
+
+def _albert_upload_target(form: Any) -> Tuple[Optional[Dict[str, Any]], Optional[JSONResponse]]:
+    """
+    Validate the raw form fields of an albert upload (same rules as the HTTP route).
+
+    Args:
+        form: The request form
+
+    Returns:
+        ``(target, None)`` with ``collection_id``, ``collection_name`` and
+        ``create_collection``, or ``(None, response)`` with a 400 response
+        (acknowledgement missing: ``gdpr_ack_required``)
+    """
+    from app.routes.processing import ALBERT_FORM_GDPR_ACK, ALBERT_GDPR_MESSAGE, albert_collection_target, form_flag
+
+    if not form_flag(form.get(ALBERT_FORM_GDPR_ACK)):
+        return None, JSONResponse(status_code=400, content={
+            "error": ALBERT_GDPR_MESSAGE,
+            "gdpr_ack_required": True
+        })
+    return albert_collection_target(form)
+
+
+def _queue_task(task: Any, payload: Dict[str, Any], albert_selected: bool) -> Any:
+    """
+    Queue a pipeline task with keyword arguments only.
+
+    A task that does not select Albert is queued exactly as before
+    (``task.delay(**payload)``, global Celery time limits). A task that
+    selects Albert (``albert/`` recoding model, ``embedding_provider=albert``,
+    active Albert OCR link, ``db_choice=albert``) is queued with
+    ``apply_async`` and the time limits of ``runner.albert_time_limits()``,
+    above the Albert script timeout, so that the global soft limit (1 h)
+    never kills a longer Albert job.
+
+    Args:
+        task: The Celery task.
+        payload: Keyword arguments of the task (no secret).
+        albert_selected: True when the submission selects Albert.
+
+    Returns:
+        The ``AsyncResult`` of the queued task.
+    """
+    if not albert_selected:
+        return task.delay(**payload)
+    return task.apply_async(kwargs=payload, **_runner().albert_time_limits())
 
 
 def _record_owner(task_id: str, user: User) -> None:
@@ -261,20 +324,21 @@ async def submit_extraction_task(
     json_path = os.path.join(absolute_path, json_files[0])
     output_path = os.path.join(absolute_path, 'output.csv')
 
-    denied = _check_credentials(current_user, _runner().STAGE_EXTRACTION)
+    runner = _runner()
+    denied = _check_credentials(current_user, runner.STAGE_EXTRACTION)
     if denied is not None:
         return denied
 
     # Submit task
     from app.tasks.extraction import process_dataframe_task
 
-    task = process_dataframe_task.delay(
+    task = _queue_task(process_dataframe_task, dict(
         json_path=json_path,
         base_dir=absolute_path,
         output_path=output_path,
         session_id=session_id,
         user_id=current_user.id
-    )
+    ), runner.ocr_albert_active(current_user))
     _record_owner(task.id, current_user)
 
     logger.info(f"Submitted extraction task {task.id} for session {session_id}")
@@ -327,13 +391,13 @@ async def submit_chunking_task(
 
     from app.tasks.chunking import initial_chunking_task
 
-    task = initial_chunking_task.delay(
+    task = _queue_task(initial_chunking_task, dict(
         input_csv=input_csv,
         output_dir=absolute_path,
         session_id=session_id,
         model=model,
         user_id=current_user.id
-    )
+    ), runner.chunking_selects_albert(model))
     _record_owner(task.id, current_user)
 
     logger.info(f"Submitted chunking task {task.id} for session {session_id}")
@@ -349,6 +413,7 @@ async def submit_chunking_task(
 async def submit_dense_embedding_task(
     path: str = Form(...),
     session_id: int = Form(...),
+    embedding_provider: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -363,6 +428,10 @@ async def submit_dense_embedding_task(
 
     Returns:
         JSONResponse with task_id
+    \f
+    ``embedding_provider``: dense embedding provider, same rule as the HTTP
+    route (ignored while Albert is disabled, except ``albert``: 400). A task
+    selecting Albert is queued with the Albert time limits (``_queue_task``).
     """
     _check_celery_available()
 
@@ -375,18 +444,26 @@ async def submit_dense_embedding_task(
             detail="output_chunks.json not found. Complete chunking step first."
         )
 
-    denied = _check_credentials(current_user, _runner().STAGE_DENSE)
+    runner = _runner()
+    try:
+        provider = runner.resolve_embedding_provider(embedding_provider)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    params = {} if provider is None else {"embedding_provider": provider}
+    denied = _check_credentials(current_user, runner.STAGE_DENSE, **params)
     if denied is not None:
         return denied
 
     from app.tasks.embeddings import dense_embedding_task
 
-    task = dense_embedding_task.delay(
+    task = _queue_task(dense_embedding_task, dict(
         input_file=input_file,
         output_dir=absolute_path,
         session_id=session_id,
-        user_id=current_user.id
-    )
+        user_id=current_user.id,
+        **params
+    ), provider == runner.ALBERT_DB_CHOICE)
     _record_owner(task.id, current_user)
 
     logger.info(f"Submitted dense embedding task {task.id} for session {session_id}")
@@ -447,8 +524,107 @@ async def submit_sparse_embedding_task(
     })
 
 
+async def _submit_albert_upload(
+    request: Request,
+    path: str,
+    session_id: int,
+    absolute_path: str,
+    db: Session,
+    current_user: User
+) -> JSONResponse:
+    """
+    Queue an upload to an Albert collection (Albert enabled only).
+
+    Same checks as the albert branch of the HTTP ``/upload_db`` route: input
+    chosen by ``resolve_albert_input`` (sparse, dense, then plain chunks),
+    retention acknowledgement required (400 ``gdpr_ack_required``),
+    collection fields validated, ``albert_api_key`` required (403). The
+    acknowledgement is written to the audit log before queueing
+    (``ALBERT_COLLECTION_UPLOAD``); the task is queued with the Albert time
+    limits (``_queue_task``), never auto-retries and refuses a redelivered
+    message.
+
+    Args:
+        request: The request (raw form fields ``albert_*``)
+        path: Session folder, relative to uploads/
+        session_id: Database session ID
+        absolute_path: Absolute session folder
+        db: Database session (audit log)
+        current_user: Authenticated user (owner of the task)
+
+    Returns:
+        JSONResponse with task_id, or an error response
+    """
+    from app.models.audit import create_audit_log
+    from app.routes.processing import ALBERT_COLLECTION_RESOURCE, ALBERT_UPLOAD_AUDIT_ACTION
+    from scripts.rad_albert.collections import resolve_albert_input
+
+    runner = _runner()
+    input_file = resolve_albert_input(absolute_path)
+    if not input_file:
+        raise HTTPException(
+            status_code=400,
+            detail="Chunks file not found. Complete the chunking step first."
+        )
+
+    target, error = _albert_upload_target(await request.form())
+    if error is not None:
+        return error
+
+    denied = _check_credentials(current_user, runner.STAGE_VECTORDB, db_choice=runner.ALBERT_DB_CHOICE)
+    if denied is not None:
+        return denied
+
+    try:
+        create_audit_log(
+            db,
+            action=ALBERT_UPLOAD_AUDIT_ACTION,
+            user_id=current_user.id,
+            resource_type=ALBERT_COLLECTION_RESOURCE,
+            resource_id=target["collection_id"],
+            details={
+                "collection_id": target["collection_id"],
+                "collection_name": target["collection_name"],
+                "session": path,
+                "gdpr_ack": True,
+            },
+        )
+    except Exception as exc:
+        logger.error(f"Albert upload refused, audit log unavailable: {type(exc).__name__}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return JSONResponse(status_code=500, content={
+            "error": "Journal d'audit indisponible : envoi vers Albert refusé."
+        })
+
+    from app.tasks.vectordb import upload_to_vectordb_task
+
+    task = _queue_task(upload_to_vectordb_task, dict(
+        input_file=input_file,
+        session_id=session_id,
+        db_choice=runner.ALBERT_DB_CHOICE,
+        user_id=current_user.id,
+        albert_collection_id=target["collection_id"],
+        albert_collection_name=target["collection_name"],
+        albert_create_collection=target["create_collection"],
+        albert_gdpr_ack=True
+    ), True)
+    _record_owner(task.id, current_user)
+
+    logger.info(f"Submitted Albert upload task {task.id} for session {session_id}")
+
+    return JSONResponse({
+        "task_id": task.id,
+        "status": "queued",
+        "message": f"Upload task queued for {runner.ALBERT_DB_CHOICE}"
+    })
+
+
 @router.post("/upload_vectordb")
 async def submit_vectordb_upload_task(
+    request: Request,
     path: str = Form(...),
     session_id: int = Form(...),
     db_choice: str = Form(...),
@@ -477,10 +653,18 @@ async def submit_vectordb_upload_task(
 
     Returns:
         JSONResponse with task_id
+    \f
+    The albert target is handled by ``_submit_albert_upload`` while Albert is
+    enabled, before the sparse file check (raw form fields); otherwise the
+    historical checks (sparse file, then allowed choices) apply unchanged.
     """
     _check_celery_available()
 
     absolute_path = _session_directory(db, path, session_id, current_user)
+
+    if db_choice == ALBERT_DB_CHOICE and albert_enabled():
+        return await _submit_albert_upload(request, path, session_id, absolute_path, db, current_user)
+
     input_file = os.path.join(absolute_path, 'output_chunks_with_embeddings_sparse.json')
 
     if not os.path.exists(input_file):

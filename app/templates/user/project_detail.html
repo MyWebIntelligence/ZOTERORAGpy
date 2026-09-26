@@ -270,7 +270,7 @@
                     <input type="text" class="form-input" id="llmModel" placeholder="{{ default_llm_model }}" value="">
                     <small class="form-help">
                         Laissez vide pour le défaut (<code>{{ default_llm_model }}</code>).
-                        Format: <code>provider/model</code> → OpenRouter, <code>model</code> → OpenAI
+                        Format: <code>provider/model</code> → OpenRouter, <code>model</code> → OpenAI{% if albert_enabled %}, <code>albert/&lt;modèle&gt;</code> → Albert (DINUM){% endif %}
                     </small>
                 </div>
 

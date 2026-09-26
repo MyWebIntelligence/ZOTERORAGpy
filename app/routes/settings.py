@@ -34,8 +34,10 @@ Albert (DINUM) Note:
     (``albert_enabled()``, see ``_admin_form_env_keys``). It is never returned
     in clear: /get_credentials sends ``••••`` plus its last 4 characters, and
     /save_credentials ignores a value starting with that mask (an empty string
-    clears the key). ``GET /api/albert/status`` and ``GET /api/albert/models``
-    are served by ``_AlbertGatedRoute``: while Albert is disabled they answer
+    clears the key). ``GET /api/albert/status``, ``GET /api/albert/models``,
+    ``GET /api/albert/collections`` (private collections, paginated) and
+    ``DELETE /api/albert/collections/{id}?confirm=true`` (audited) are served
+    by ``_AlbertGatedRoute``: while Albert is disabled they answer
     exactly like an unknown route (404 ``{"detail": "Not Found"}`` for every
     method, no trailing-slash redirect) and they never appear in the OpenAPI
     schema. Each call makes a single attempt with a short timeout.
@@ -100,6 +102,12 @@ _SECONDS_PER_DAY = 86400
 # /api/albert/*: HTTP timeout (seconds) of the single upstream attempt, so a
 # "Tester la connexion" click never holds a worker thread for long.
 _ALBERT_WEB_TIMEOUT = 15.0
+# /api/albert/collections: page size (default and maximum).
+_ALBERT_COLLECTIONS_PER_PAGE = 20
+_ALBERT_COLLECTIONS_MAX_PER_PAGE = 100
+# DELETE /api/albert/collections/{id}: accepted values of ?confirm=
+_CONFIRM_VALUES = ("1", "true", "yes", "on")
+ALBERT_DELETE_AUDIT_ACTION = "ALBERT_COLLECTION_DELETE"
 
 # Unicode categories refused in a /save_credentials value: control characters
 # (C0, DEL, C1 including NEL) and the line / paragraph separators.
@@ -741,14 +749,16 @@ def _albert_key_or_403(current_user: User) -> Tuple[Optional[str], Optional[JSON
     )
 
 
-def _albert_call(method_name: str, cfg: Any, api_key: str) -> Any:
+def _albert_call(method_name: str, cfg: Any, api_key: str, *args: Any, **kwargs: Any) -> Any:
     """
-    Run one read-only Albert call (``me`` or ``models``); executed in a worker thread.
+    Run one Albert call (``me``, ``models``, collections); executed in a worker thread.
 
     Args:
         method_name: Name of the ``AlbertClient`` method to call.
         cfg: Server configuration (``AlbertConfig``).
         api_key: The caller's Albert key.
+        *args: Positional arguments of the client method.
+        **kwargs: Keyword arguments of the client method.
 
     Returns:
         The value returned by the client method.
@@ -758,7 +768,7 @@ def _albert_call(method_name: str, cfg: Any, api_key: str) -> Any:
     """
     client = _albert_client_factory(cfg, api_key)
     try:
-        return getattr(client, method_name)()
+        return getattr(client, method_name)(*args, **kwargs)
     finally:
         close = getattr(client, "close", None)
         if callable(close):
@@ -766,7 +776,11 @@ def _albert_call(method_name: str, cfg: Any, api_key: str) -> Any:
 
 
 async def _run_albert_call(
-    method_name: str, api_key: str, current_user: User
+    method_name: str,
+    api_key: str,
+    current_user: User,
+    call_args: Tuple[Any, ...] = (),
+    call_kwargs: Optional[dict] = None,
 ) -> Tuple[Any, Optional[JSONResponse]]:
     """
     Call Albert off the event loop and turn failures into JSON error responses.
@@ -781,6 +795,8 @@ async def _run_albert_call(
         method_name: Name of the ``AlbertClient`` method to call.
         api_key: The caller's Albert key.
         current_user: The authenticated user (logged by id only).
+        call_args: Positional arguments of the client method.
+        call_kwargs: Keyword arguments of the client method.
 
     Returns:
         ``(result, None)`` on success, otherwise ``(None, error_response)``.
@@ -804,7 +820,10 @@ async def _run_albert_call(
         })
 
     try:
-        return await run_in_threadpool(_albert_call, method_name, cfg, api_key), None
+        result = await run_in_threadpool(
+            _albert_call, method_name, cfg, api_key, *call_args, **(call_kwargs or {})
+        )
+        return result, None
     except AlbertQuotaExhausted as exc:
         logger.warning(f"Albert {method_name} for user {current_user.id}: quota exhausted (HTTP {exc.status})")
         return None, JSONResponse(status_code=502, content={
@@ -1022,6 +1041,250 @@ async def list_albert_models(
 
     models = _albert_models_summary(listing)
     return JSONResponse({"success": True, "models": models, "count": len(models)})
+
+
+def _albert_collection_summary(collection: Any) -> dict:
+    """
+    Keep the displayable fields of an Albert collection (never its owner).
+
+    Args:
+        collection: A ``/v1/collections`` entry (dict or object).
+
+    Returns:
+        ``{id, name, description, visibility, documents, created, updated}``.
+    """
+    documents = _field(collection, "documents")
+    created = _field(collection, "created")
+    updated = _field(collection, "updated")
+    return {
+        "id": _field(collection, "id"),
+        "name": _field(collection, "name"),
+        "description": _field(collection, "description"),
+        "visibility": _field(collection, "visibility"),
+        "documents": documents if _is_number(documents) else None,
+        "created": created if _is_number(created) else None,
+        "updated": updated if _is_number(updated) else None,
+    }
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    """
+    Parse a strictly positive integer from a query value.
+
+    Args:
+        value: The raw value (int or str).
+
+    Returns:
+        The integer, or None when the value is not a strictly positive integer.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    text = str(value or "").strip()
+    if not text.isdigit():
+        return None
+    number = int(text)
+    return number if number > 0 else None
+
+
+@albert_router.get("/api/albert/collections", include_in_schema=False)
+async def list_albert_collections(
+    page: str = "1",
+    per_page: str = str(_ALBERT_COLLECTIONS_PER_PAGE),
+    _albert_on: None = Depends(_require_albert_enabled),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    List the caller's private Albert collections, one page at a time.
+
+    **AUTHENTICATED**, and only while Albert is enabled (404 otherwise). Same
+    key policy (403 without a key), single attempt and error mapping as
+    ``/api/albert/status``. Only collections whose visibility is confirmed
+    ``private`` are listed (RAGpy never writes to another kind); the owner
+    field is never returned.
+
+    Args:
+        page: Page number, starting at 1.
+        per_page: Collections per page (1 to 100).
+        _albert_on: Albert gate (404 while ``albert_enabled()`` is false).
+        current_user: The authenticated user (injected by get_current_active_user).
+
+    Returns:
+        JSON ``{success, collections, total, page, per_page, pages}``.
+
+    Raises:
+        HTTPException 404: If Albert is disabled.
+        HTTPException 401: If not authenticated.
+    """
+    from scripts.rad_albert.collections import is_private
+
+    page_number = _positive_int(page)
+    page_size = _positive_int(per_page)
+    if page_number is None or page_size is None or page_size > _ALBERT_COLLECTIONS_MAX_PER_PAGE:
+        return JSONResponse(status_code=400, content={
+            "error": f"Pagination invalide : page >= 1 et 1 <= per_page <= {_ALBERT_COLLECTIONS_MAX_PER_PAGE}.",
+        })
+
+    api_key, error = _albert_key_or_403(current_user)
+    if error is not None:
+        return error
+
+    listing, error = await _run_albert_call(
+        "list_collections", api_key, current_user, call_kwargs={"visibility": "private"}
+    )
+    if error is not None:
+        return error
+
+    private = [c for c in (listing or []) if is_private(c)]
+    private.sort(key=lambda c: (str(_field(c, "name") or ""), str(_field(c, "id") or "")))
+    total = len(private)
+    start = (page_number - 1) * page_size
+    collections = [_albert_collection_summary(c) for c in private[start:start + page_size]]
+    return JSONResponse({
+        "success": True,
+        "collections": collections,
+        "total": total,
+        "page": page_number,
+        "per_page": page_size,
+        "pages": (total + page_size - 1) // page_size,
+    })
+
+
+@albert_router.delete("/api/albert/collections/{collection_id}", include_in_schema=False)
+async def delete_albert_collection(
+    collection_id: str,
+    confirm: str = "",
+    _albert_on: None = Depends(_require_albert_enabled),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Delete one of the caller's Albert collections (documents and chunks included).
+
+    **AUTHENTICATED**, and only while Albert is enabled (404 otherwise). The
+    deletion is irreversible, so ``?confirm=true`` is required (400 with
+    ``confirm_required`` otherwise). Same key policy, single attempt and
+    error mapping as ``/api/albert/status``; the upstream API only lets the
+    owner of a collection delete it. The audit entry
+    (``ALBERT_COLLECTION_DELETE``) is written **before** Albert is called
+    (500 and no call when it cannot be written), then completed with the
+    outcome (success or not).
+
+    Args:
+        collection_id: Albert collection id (strictly positive integer).
+        confirm: Must be ``true`` (or ``1``, ``yes``).
+        _albert_on: Albert gate (404 while ``albert_enabled()`` is false).
+        db: Database session (audit log).
+        current_user: The authenticated user (injected by get_current_active_user).
+
+    Returns:
+        JSON ``{success, deleted}``.
+
+    Raises:
+        HTTPException 404: If Albert is disabled.
+        HTTPException 401: If not authenticated.
+    """
+    cid = _positive_int(collection_id)
+    if cid is None:
+        return JSONResponse(status_code=400, content={
+            "error": "Identifiant de collection Albert invalide (entier positif attendu).",
+        })
+    if str(confirm or "").strip().lower() not in _CONFIRM_VALUES:
+        return JSONResponse(status_code=400, content={
+            "error": (
+                "Suppression définitive de la collection Albert (documents et chunks compris) : "
+                "confirmer avec confirm=true."
+            ),
+            "confirm_required": True,
+        })
+
+    api_key, error = _albert_key_or_403(current_user)
+    if error is not None:
+        return error
+
+    # Audit first: an irreversible deletion never happens without a trace.
+    entry = _audit_albert_deletion_request(db, current_user, cid)
+    if entry is None:
+        return JSONResponse(status_code=500, content={
+            "error": "Journal d'audit indisponible : suppression de la collection Albert refusée.",
+        })
+
+    _result, error = await _run_albert_call("delete_collection", api_key, current_user, call_args=(cid,))
+    _audit_albert_deletion_outcome(db, entry, cid, success=error is None)
+    if error is not None:
+        return error
+    logger.info(f"Albert collection {cid} deleted by user {current_user.id}")
+    return JSONResponse({"success": True, "deleted": cid})
+
+
+def _audit_albert_deletion_request(db: Session, current_user: User, collection_id: int) -> Optional[Any]:
+    """
+    Write the audit entry of an Albert collection deletion before Albert is called.
+
+    The entry is written as not (yet) successful, with the outcome
+    ``requested``; ``_audit_albert_deletion_outcome`` completes it after the
+    call. If the process stops in between, the entry still records the
+    request.
+
+    Args:
+        db: Database session.
+        current_user: The user who asked for the deletion.
+        collection_id: The collection id.
+
+    Returns:
+        The ``AuditLog`` entry, or None when it could not be written (the
+        deletion must then be refused).
+    """
+    from app.models.audit import create_audit_log
+
+    try:
+        return create_audit_log(
+            db,
+            action=ALBERT_DELETE_AUDIT_ACTION,
+            user_id=current_user.id,
+            resource_type="albert_collection",
+            resource_id=collection_id,
+            details={"collection_id": collection_id, "outcome": "requested"},
+            success=False,
+            error_message="Suppression demandée, résultat en attente de la réponse d'Albert.",
+        )
+    except Exception as exc:
+        logger.error(f"Albert collection deletion refused, audit log unavailable: {type(exc).__name__}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _audit_albert_deletion_outcome(db: Session, entry: Any, collection_id: int, *, success: bool) -> None:
+    """
+    Record the outcome of an Albert collection deletion in its audit entry (never raises).
+
+    A failure to update is logged: the entry written before the call then
+    keeps the outcome ``requested`` (never shown as a success).
+
+    Args:
+        db: Database session.
+        entry: The entry returned by ``_audit_albert_deletion_request``.
+        collection_id: The collection id.
+        success: Whether Albert accepted the deletion.
+    """
+    try:
+        entry.success = 1 if success else 0
+        entry.error_message = None if success else "Suppression refusée ou en échec côté Albert."
+        entry.details = {"collection_id": collection_id, "outcome": "deleted" if success else "failed"}
+        db.commit()
+    except Exception as exc:
+        logger.error(
+            f"Audit outcome of the Albert collection {collection_id} deletion not recorded "
+            f"(deleted: {success}): {type(exc).__name__}"
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 # The /api/albert/* routes join the module router last (after every historical

@@ -68,6 +68,37 @@ class SessionListResponse(BaseModel):
 
 # --- Helper functions ---
 
+# Vector space fields written in the chunks only outside the default OpenAI
+# space (for instance Albert bge-m3, 1024 dimensions).
+EMBEDDING_SPACE_FIELDS = ("embedding_provider", "embedding_model", "embedding_dim")
+
+
+def _embedding_space_fields(chunks) -> dict:
+    """
+    Return the vector space fields present in a chunks file, if any.
+
+    The first chunk carrying at least one of ``EMBEDDING_SPACE_FIELDS`` gives
+    the values (a file holds one space only: the connectors refuse mixed
+    files). Files of the default space have none of these fields, so the
+    result is empty and the session status JSON is unchanged.
+
+    Args:
+        chunks: The parsed chunks file (a list of dicts).
+
+    Returns:
+        A dict holding the fields found (possibly empty).
+    """
+    if not isinstance(chunks, list):
+        return {}
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        found = {name: chunk[name] for name in EMBEDDING_SPACE_FIELDS if name in chunk}
+        if found:
+            return found
+    return {}
+
+
 def verify_project_access(db: Session, project_id: int, user: User) -> Project:
     """
     Verifies that a user has access to a specific project.
@@ -744,6 +775,8 @@ async def get_session_files(
             with open(dense_path, 'r', encoding='utf-8') as f:
                 chunks = json.load(f)
             files_status["dense_embedding"]["chunk_count"] = len(chunks)
+            # embedding_* exposed only when present (non-default space)
+            files_status["dense_embedding"].update(_embedding_space_fields(chunks))
         except Exception:
             pass
 
@@ -757,6 +790,8 @@ async def get_session_files(
             with open(sparse_path, 'r', encoding='utf-8') as f:
                 chunks = json.load(f)
             files_status["sparse_embedding"]["chunk_count"] = len(chunks)
+            # embedding_* exposed only when present (non-default space)
+            files_status["sparse_embedding"].update(_embedding_space_fields(chunks))
         except Exception:
             pass
 

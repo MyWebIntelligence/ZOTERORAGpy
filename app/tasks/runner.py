@@ -32,23 +32,41 @@ Retry policy: only ``TaskInfrastructureError`` (database unavailable, process
 spawn failure) is listed in ``INFRASTRUCTURE_ERRORS``, the ``autoretry_for``
 of every pipeline task. A non-zero exit, a timeout, a missing credential or
 a revocation is deterministic and never retried.
+
+Albert (DINUM, opt-in, ``ALBERT_ENABLED=1``), same rules as the HTTP routes:
+    - chunking keys from ``resolve_llm_provider`` (``albert/`` model while
+      Albert is disabled: ``AlbertDisabledError``, a ``ValueError``);
+    - extraction: third attempt with ``albert_api_key`` when the Albert OCR
+      link is active for the user;
+    - dense: ``EMBEDDING_PROVIDER`` resolved like the route and set in the
+      environment explicitly;
+    - vectordb: the ``albert`` target (``--albert-*`` flags), never retried;
+    - ``task_timeout``: ``ALBERT_SUBPROCESS_TIMEOUT`` only when the task
+      selects Albert, the historical timeout otherwise;
+    - ``albert_time_limits``: Celery time limits passed at submission
+      (``apply_async``) when the task selects Albert, above that timeout.
 """
 import errno
 import logging
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence
 
 from app.core.config import RAGPY_DIR
 from app.core.credentials import (
     CREDENTIAL_ENV_MAPPING,
     CredentialMissingError,
+    albert_enabled,
     build_subprocess_env,
+    get_credential_or_env,
 )
 from app.database.session import SessionLocal
 from app.models.user import User
@@ -89,6 +107,26 @@ VECTORDB_CHOICES = tuple(VECTORDB_REQUIRED_KEYS)
 VECTORDB_INSERTED_PATTERN = r'^Inserted:\s*(\d+)'
 VECTORDB_SKIPPED_PATTERN = r'^Skipped \(dedup\):\s*(\d+)'
 VECTORDB_JOURNAL_PATTERN = r'^Dedup journal:\s*(\S+)'
+
+# Albert target (the albert branch of the /upload_db route): extra lines, and
+# the whole "Dedup journal:" line (paths with spaces) for this target only.
+ALBERT_DB_CHOICE = "albert"
+ALBERT_CREDENTIAL_KEY = "albert_api_key"
+ALBERT_EXISTING_PATTERN = r'^Skipped \(existing\):\s*(\d+)'
+ALBERT_MANIFEST_PATTERN = r'^Albert manifest:\s*(.+)$'
+ALBERT_JOURNAL_PATTERN = r'^Dedup journal:\s*(.+)$'
+# Copies of the upload manifests, out of uploads/ (same place as the route).
+ALBERT_MANIFEST_DIR = os.path.join(RAGPY_DIR, "data", "albert_manifests")
+_SAFE_LABEL_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_SAFE_LABEL_MAX_CHARS = 120
+
+# Seconds added to ALBERT_SUBPROCESS_TIMEOUT for the Celery time limits of a
+# task that selects Albert (soft: + margin, hard: + 2 * margin).
+ALBERT_TIME_LIMIT_MARGIN = 300
+
+# Dense embedding providers (form field / server EMBEDDING_PROVIDER).
+EMBEDDING_PROVIDER_ENV = "EMBEDDING_PROVIDER"
+EMBEDDING_PROVIDERS = ("openai", "albert")
 
 # Task owner registry.
 OWNER_KEY_PREFIX = "ragpy:celery_owner:"
@@ -223,21 +261,194 @@ def load_user(user_id: Any, *, session_factory: Optional[Callable[[], Any]] = No
     return user
 
 
+def _albert_modules() -> SimpleNamespace:
+    """Import the stdlib Albert helpers lazily (configuration, errors, resolver).
+
+    Returns:
+        A namespace with ``AlbertConfig``, ``FIELD_ENV_NAMES``,
+        ``AlbertDisabledError``, ``resolve_llm_provider`` and ``PROVIDER_ALBERT``.
+    """
+    from scripts.rad_albert.config import AlbertConfig, FIELD_ENV_NAMES
+    from scripts.rad_albert.errors import AlbertDisabledError
+    from scripts.rad_providers import PROVIDER_ALBERT, resolve_llm_provider
+
+    return SimpleNamespace(
+        AlbertConfig=AlbertConfig,
+        FIELD_ENV_NAMES=FIELD_ENV_NAMES,
+        AlbertDisabledError=AlbertDisabledError,
+        resolve_llm_provider=resolve_llm_provider,
+        PROVIDER_ALBERT=PROVIDER_ALBERT,
+    )
+
+
+def albert_setting(field_name: str) -> Any:
+    """Read one ``AlbertConfig`` field from its environment variable only.
+
+    Same rule as the HTTP routes: the configuration is built from a mapping
+    holding that single variable (parser and default of
+    ``AlbertConfig.from_env``), so nothing else is read or validated.
+
+    Args:
+        field_name: Name of an ``AlbertConfig`` field.
+
+    Returns:
+        The parsed value of the field.
+    """
+    modules = _albert_modules()
+    env_name = modules.FIELD_ENV_NAMES[field_name]
+    raw = os.environ.get(env_name)
+    mapping = {} if raw is None else {env_name: raw}
+    return getattr(modules.AlbertConfig.from_env(mapping), field_name)
+
+
+def task_timeout(default: float, albert_selected: bool) -> float:
+    """Timeout of a pipeline script (same rule as ``processing._subprocess_timeout``).
+
+    Args:
+        default: The historical timeout of the stage (``*_TIMEOUT``).
+        albert_selected: True when the task selects Albert.
+
+    Returns:
+        ``ALBERT_SUBPROCESS_TIMEOUT`` when Albert is selected, else ``default``.
+    """
+    if not albert_selected:
+        return default
+    return albert_setting("subprocess_timeout")
+
+
+def albert_time_limits() -> Dict[str, int]:
+    """Celery time limits of a task that selects Albert (``apply_async`` options).
+
+    The global limits of ``app/celery_app.py`` (soft 3600 s, hard 7200 s)
+    would stop an Albert task long before its script timeout
+    (``ALBERT_SUBPROCESS_TIMEOUT``, 21600 s by default). The soft limit is
+    that timeout plus ``ALBERT_TIME_LIMIT_MARGIN``, so ``run_script``'s own
+    timeout (process group killed, ``ScriptTimeoutError``) always fires
+    first; the hard limit adds the margin once more.
+
+    Returns:
+        ``{'soft_time_limit': timeout + margin, 'time_limit': timeout + 2 * margin}``.
+    """
+    timeout = int(albert_setting("subprocess_timeout"))
+    return {
+        "soft_time_limit": timeout + ALBERT_TIME_LIMIT_MARGIN,
+        "time_limit": timeout + 2 * ALBERT_TIME_LIMIT_MARGIN,
+    }
+
+
+def resolve_chat_model(model: Optional[str]) -> Any:
+    """Resolve the chat provider of a recoding model (single resolver).
+
+    Args:
+        model: Recoding model (empty means the default model).
+
+    Returns:
+        ``ProviderResolution(provider, wire_model, credential_key)``.
+
+    Raises:
+        AlbertDisabledError: ``albert/…`` while Albert is disabled.
+        ValueError: ``albert/`` without a model identifier.
+    """
+    return _albert_modules().resolve_llm_provider(model or DEFAULT_CHUNKING_MODEL, albert_enabled=albert_enabled())
+
+
+def chunking_selects_albert(model: Optional[str]) -> bool:
+    """True when the recoding model selects Albert (``albert/<id>``, Albert ON).
+
+    Args:
+        model: Recoding model.
+
+    Returns:
+        True for an Albert resolution; False otherwise (refused models included).
+    """
+    try:
+        return resolve_chat_model(model).provider == _albert_modules().PROVIDER_ALBERT
+    except ValueError:
+        return False
+
+
 def chunking_required_keys(model: Optional[str]) -> List[str]:
     """Credential keys required to recode with ``model`` (HTTP route rule).
 
-    A model containing ``/`` routes to OpenRouter, any other one to OpenAI
-    (``legacy_provider`` of ``scripts/rad_providers.py``).
+    The single resolver decides: ``albert/<id>`` → ``albert_api_key`` (Albert
+    ON), a model containing ``/`` → OpenRouter, any other one → OpenAI.
 
     Args:
         model: Recoding model (empty means the default model).
 
     Returns:
         A one-element list of credential keys.
-    """
-    from scripts.rad_providers import CREDENTIAL_KEYS, legacy_provider
 
-    return [CREDENTIAL_KEYS[legacy_provider(model or DEFAULT_CHUNKING_MODEL)]]
+    Raises:
+        AlbertDisabledError: ``albert/…`` while Albert is disabled.
+        ValueError: ``albert/`` without a model identifier.
+    """
+    return [resolve_chat_model(model).credential_key]
+
+
+def resolve_embedding_provider(value: Optional[str]) -> Optional[str]:
+    """Resolve the dense embedding provider (same rule as the HTTP route).
+
+    Albert disabled: ignored (None), except ``albert`` which is refused.
+    Albert enabled: the given value, else the server ``EMBEDDING_PROVIDER``,
+    else ``openai``; the result must be ``openai`` or ``albert``.
+
+    Args:
+        value: Requested provider (form field), or None.
+
+    Returns:
+        ``'openai'`` or ``'albert'`` while Albert is enabled, else None.
+
+    Raises:
+        AlbertDisabledError: ``albert`` requested while Albert is disabled.
+        ValueError: Unknown provider while Albert is enabled.
+    """
+    albert_disabled_error = _albert_modules().AlbertDisabledError
+    requested = (value or "").strip()
+    if not albert_enabled():
+        if requested.lower() == ALBERT_DB_CHOICE:
+            raise albert_disabled_error(
+                "embedding_provider=albert exige Albert, désactivé sur ce serveur (ALBERT_ENABLED=1 requis).",
+                model="embedding_provider=albert",
+            )
+        return None
+    raw = requested or (os.environ.get(EMBEDDING_PROVIDER_ENV) or "").strip()
+    name = raw.lower() or EMBEDDING_PROVIDERS[0]
+    if name not in EMBEDDING_PROVIDERS:
+        raise ValueError(
+            f"embedding_provider={raw!r} inconnu : valeurs admises « openai » ou « albert »."
+        )
+    return name
+
+
+def ocr_albert_active(user: User) -> bool:
+    """True when the Albert OCR link runs for ``user`` (Albert ON, OCR on, key).
+
+    Args:
+        user: The submitting user.
+
+    Returns:
+        True when ``ALBERT_ENABLED``, ``OCR_ENABLE_ALBERT`` and an Albert key
+        available to the user are all set (nothing is read while Albert is OFF).
+    """
+    if not albert_enabled():
+        return False
+    if not albert_setting("ocr_enabled"):
+        return False
+    return bool(get_credential_or_env(user, ALBERT_CREDENTIAL_KEY))
+
+
+def _require_albert_enabled(what: str) -> None:
+    """Raise ``AlbertDisabledError`` when Albert is disabled on this worker.
+
+    Args:
+        what: The Albert selection, quoted in the message.
+
+    Raises:
+        AlbertDisabledError: Albert is disabled.
+    """
+    if not albert_enabled():
+        raise _albert_modules().AlbertDisabledError(model=what)
 
 
 def build_task_env(
@@ -246,30 +457,37 @@ def build_task_env(
     *,
     model: Optional[str] = None,
     db_choice: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the subprocess environment of a pipeline stage for ``user``.
 
     Credential requirements are those of the HTTP routes:
 
-    - extraction: ``mistral_api_key``, else ``openai_api_key``; when both are
+    - extraction: ``mistral_api_key``, else ``openai_api_key``, else (Albert
+      OCR link active for the user) ``albert_api_key``; when all are
       missing, ``CredentialMissingError('mistral_api_key')``;
     - chunking: ``chunking_required_keys(model)``;
-    - dense: ``openai_api_key``;
+    - dense: ``openai_api_key``, or ``albert_api_key`` for
+      ``embedding_provider='albert'``; a resolved provider is also written to
+      ``EMBEDDING_PROVIDER`` (None: environment untouched, historical path);
     - sparse: none (isolation only);
-    - vectordb: ``VECTORDB_REQUIRED_KEYS[db_choice]``.
+    - vectordb: ``VECTORDB_REQUIRED_KEYS[db_choice]``, or ``albert_api_key``
+      for the ``albert`` target (Albert ON only).
 
     Args:
         user: The submitting user.
         stage: One of ``STAGES``.
         model: Recoding model (chunking only).
         db_choice: Target database (vectordb only).
+        embedding_provider: Resolved dense provider (dense only, None = default).
 
     Returns:
         The environment returned by ``build_subprocess_env``.
 
     Raises:
         CredentialMissingError: A required credential is missing.
-        ValueError: Unknown stage or database.
+        AlbertDisabledError: Albert selected while it is disabled.
+        ValueError: Unknown stage, database or provider.
     """
     if stage == STAGE_EXTRACTION:
         try:
@@ -278,6 +496,11 @@ def build_task_env(
             try:
                 return build_subprocess_env(user, required_keys=["openai_api_key"])
             except CredentialMissingError:
+                if ocr_albert_active(user):
+                    try:
+                        return build_subprocess_env(user, required_keys=[ALBERT_CREDENTIAL_KEY])
+                    except CredentialMissingError:
+                        pass
                 raise CredentialMissingError(
                     credential_key="mistral_api_key",
                     is_admin=bool(getattr(user, "is_admin", False)),
@@ -285,10 +508,23 @@ def build_task_env(
     if stage == STAGE_CHUNKING:
         return build_subprocess_env(user, required_keys=chunking_required_keys(model))
     if stage == STAGE_DENSE:
-        return build_subprocess_env(user, required_keys=["openai_api_key"])
+        if embedding_provider is None:
+            return build_subprocess_env(user, required_keys=["openai_api_key"])
+        if embedding_provider not in EMBEDDING_PROVIDERS:
+            raise ValueError(f"Unknown embedding provider: {embedding_provider}")
+        if embedding_provider == ALBERT_DB_CHOICE:
+            _require_albert_enabled("embedding_provider=albert")
+            env = build_subprocess_env(user, required_keys=[ALBERT_CREDENTIAL_KEY])
+        else:
+            env = build_subprocess_env(user, required_keys=["openai_api_key"])
+        env[EMBEDDING_PROVIDER_ENV] = embedding_provider
+        return env
     if stage == STAGE_SPARSE:
         return build_subprocess_env(user)
     if stage == STAGE_VECTORDB:
+        if db_choice == ALBERT_DB_CHOICE:
+            _require_albert_enabled("db_choice=albert")
+            return build_subprocess_env(user, required_keys=[ALBERT_CREDENTIAL_KEY])
         if db_choice not in VECTORDB_REQUIRED_KEYS:
             raise ValueError(f"Unknown database type: {db_choice}")
         return build_subprocess_env(user, required_keys=list(VECTORDB_REQUIRED_KEYS[db_choice]))
@@ -353,8 +589,18 @@ def vectordb_argv(
     weaviate_class_name: Optional[str] = None,
     weaviate_tenant_name: Optional[str] = None,
     qdrant_collection_name: Optional[str] = None,
+    albert_collection_id: Optional[int] = None,
+    albert_collection_name: Optional[str] = None,
+    albert_create_collection: bool = False,
+    albert_ack_retention: bool = False,
 ) -> List[str]:
-    """argv of ``rad_vectordb.py`` (route ``POST /upload_db``, ``--class`` included)."""
+    """argv of ``rad_vectordb.py`` (route ``POST /upload_db``, ``--class`` included).
+
+    For the ``albert`` target, the flags are those of the route: the id as
+    ``--albert-collection-id ID``, the name as ``--albert-collection-name=NAME``
+    (a name starting with ``-`` is never read as an option), then
+    ``--albert-create-collection`` and ``--albert-ack-retention``.
+    """
     cmd = [PYTHON_EXECUTABLE, script_path("rad_vectordb.py"), "--input", input_file, "--db", db_choice]
     if db_choice == "pinecone":
         if pinecone_index_name:
@@ -369,6 +615,15 @@ def vectordb_argv(
     elif db_choice == "qdrant":
         if qdrant_collection_name:
             cmd.extend(["--collection", qdrant_collection_name])
+    elif db_choice == ALBERT_DB_CHOICE:
+        if albert_collection_id is not None:
+            cmd.extend(["--albert-collection-id", str(int(albert_collection_id))])
+        if albert_collection_name:
+            cmd.append(f"--albert-collection-name={albert_collection_name}")
+        if albert_create_collection:
+            cmd.append("--albert-create-collection")
+        if albert_ack_retention:
+            cmd.append("--albert-ack-retention")
     return cmd
 
 
@@ -687,6 +942,88 @@ def parse_vectordb_stdout(stdout: Optional[str]) -> Dict[str, Any]:
     if m:
         parsed["journal_path"] = m.group(1)
     return parsed
+
+
+def parse_albert_stdout(stdout: Optional[str]) -> Dict[str, Any]:
+    """Parse the ``=== Result ===`` block of ``rad_vectordb.py --db albert``.
+
+    Same anchored patterns as the albert branch of the ``/upload_db`` route:
+    those of ``parse_vectordb_stdout`` for the counts, the whole
+    ``Dedup journal:`` line (paths with spaces), ``Skipped (existing)`` and
+    the ``Albert manifest:`` line.
+
+    Args:
+        stdout: Standard output of the script.
+
+    Returns:
+        ``parse_vectordb_stdout`` keys plus ``existing_count`` (int|None) and
+        ``manifest_path`` (str|None).
+    """
+    text = stdout or ""
+    parsed = parse_vectordb_stdout(text)
+    m = re.search(ALBERT_JOURNAL_PATTERN, text, re.MULTILINE)
+    parsed["journal_path"] = (m.group(1).strip() or None) if m else None
+    m = re.search(ALBERT_EXISTING_PATTERN, text, re.MULTILINE)
+    parsed["existing_count"] = int(m.group(1)) if m else None
+    m = re.search(ALBERT_MANIFEST_PATTERN, text, re.MULTILINE)
+    parsed["manifest_path"] = (m.group(1).strip() or None) if m else None
+    return parsed
+
+
+def _safe_label(text: Any) -> str:
+    """Turn a session path into a file name fragment (no separator, no leading dot).
+
+    Args:
+        text: The session folder (path or name).
+
+    Returns:
+        A non-empty label made of ``[A-Za-z0-9._-]`` characters.
+    """
+    label = _SAFE_LABEL_RE.sub("_", str(text or "")).strip("._")
+    return label[:_SAFE_LABEL_MAX_CHARS] or "session"
+
+
+def albert_manifest_source(input_file: str) -> str:
+    """Manifest written by ``rad_vectordb.py --db albert`` next to its input.
+
+    Args:
+        input_file: The upload input file.
+
+    Returns:
+        ``<input dir>/albert_manifest.jsonl``.
+    """
+    from scripts.rad_albert.collections import manifest_path_for
+
+    return manifest_path_for(os.path.dirname(os.path.abspath(input_file)))
+
+
+def archive_albert_manifest(manifest_path: Optional[str], user_id: Any, session_label: str) -> Optional[str]:
+    """Copy an Albert upload manifest out of ``uploads/`` (even a partial one).
+
+    Same destination as the HTTP route:
+    ``ALBERT_MANIFEST_DIR/<user_id>/<session>-<ts>.jsonl``. Never raises.
+
+    Args:
+        manifest_path: Manifest written next to the upload input.
+        user_id: Id of the uploading user.
+        session_label: Session folder (or name) of the upload.
+
+    Returns:
+        The path of the copy, or None when there was nothing to copy.
+    """
+    try:
+        if not manifest_path or not os.path.isfile(manifest_path):
+            return None
+        target_dir = os.path.join(ALBERT_MANIFEST_DIR, str(int(user_id)))
+        os.makedirs(target_dir, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = os.path.join(target_dir, f"{_safe_label(session_label)}-{stamp}.jsonl")
+        shutil.copyfile(manifest_path, target)
+        logger.info("Albert manifest archived for user %s: %s", user_id, target)
+        return target
+    except Exception as exc:
+        logger.error("Could not archive the Albert manifest: %s", type(exc).__name__)
+        return None
 
 
 # ----------------------------------------------------------------------

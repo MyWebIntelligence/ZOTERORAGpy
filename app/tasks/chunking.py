@@ -65,8 +65,9 @@ def initial_chunking_task(
     Chunk CSV text content and optionally recode with GPT.
 
     Runs ``rad_chunk.py --phase initial --model <model>`` with the
-    credentials of ``user_id`` (OpenRouter key for a ``provider/model``
-    slug, OpenAI key otherwise, as the HTTP route).
+    credentials of ``user_id`` (single resolver, as the HTTP route: Albert
+    key for ``albert/<id>`` while Albert is enabled, OpenRouter key for a
+    ``provider/model`` slug, OpenAI key otherwise).
 
     Args:
         self: Celery task instance (bound)
@@ -115,7 +116,8 @@ def initial_chunking_task(
             cmd,
             env,
             on_progress=runner.make_progress_reporter(self, 'Chunking document'),
-            timeout=runner.CHUNKING_TIMEOUT
+            # albert/<id> model: Albert timeout (route rule)
+            timeout=runner.task_timeout(runner.CHUNKING_TIMEOUT, runner.chunking_selects_albert(model))
         )
         runner.check_script_result(result, cmd, env)
 

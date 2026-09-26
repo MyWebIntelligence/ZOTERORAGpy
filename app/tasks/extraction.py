@@ -66,8 +66,9 @@ def process_dataframe_task(
     Process Zotero JSON export and PDFs to generate CSV with extracted text.
 
     Runs ``rad_dataframe.py --json --dir --output`` with the credentials of
-    ``user_id`` (Mistral, else OpenAI, as the HTTP route). It updates task
-    state with progress information for real-time monitoring.
+    ``user_id`` (Mistral, else OpenAI, else the Albert key when the Albert
+    OCR link is active, as the HTTP route). It updates task state with
+    progress information for real-time monitoring.
 
     Args:
         self: Celery task instance (bound)
@@ -114,7 +115,8 @@ def process_dataframe_task(
             cmd,
             env,
             on_progress=runner.make_progress_reporter(self, 'Processing document'),
-            timeout=runner.EXTRACTION_TIMEOUT
+            # Albert OCR link active for the user: Albert timeout (route rule)
+            timeout=runner.task_timeout(runner.EXTRACTION_TIMEOUT, runner.ocr_albert_active(user))
         )
         runner.check_script_result(result, cmd, env)
 

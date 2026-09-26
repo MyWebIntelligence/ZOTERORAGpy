@@ -38,11 +38,11 @@ from app.models.pipeline_session import PipelineSession, SessionStatus
 from app.models.project import Project
 from app.middleware.auth import get_current_active_user
 from app.models.user import User
-from app.core.credentials import get_credential_or_env, get_credential_error_message
+from app.core.credentials import get_credential_or_env, get_credential_error_message, albert_enabled
 from app.utils.publishorperish_parser import parse_pop_json
 from app.utils.citation_fetcher import fetch_citation_content
 from app.utils.citation_filter import filter_citation_with_llm
-from app.utils.llm_note_generator import get_llm_semaphore
+from app.utils.llm_note_generator import get_llm_semaphore, ALBERT_ACCOUNT_ERRORS
 from app.utils.parallel_citation_processor import (
     process_citations_parallel,
     DEFAULT_BATCH_SIZE
@@ -70,8 +70,82 @@ from app.utils.state_persistence import (
 from app.models.background_task import TaskType
 from app.services.background_task_manager import background_task_manager
 
+try:
+    from scripts.rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, resolve_llm_provider
+except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
+    from rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, resolve_llm_provider
+
 # Setup logger
 logger = logging.getLogger(__name__)
+
+# Albert (DINUM) credential, used only for an ``albert/<id>`` model.
+ALBERT_CREDENTIAL_KEY = "albert_api_key"
+
+
+def _resolve_citation_model(model_name):
+    """
+    Resolve the chat provider of a citation model with the single resolver.
+
+    The ``albert/`` prefix is tested first; any other name is routed exactly
+    as before (``provider/model`` → OpenRouter, else OpenAI).
+
+    Args:
+        model_name: Model of the citation configuration.
+
+    Returns:
+        ``ProviderResolution(provider, wire_model, credential_key)``.
+
+    Raises:
+        AlbertDisabledError: ``albert/…`` while Albert is disabled (a ``ValueError``).
+        ValueError: ``albert/`` without a model identifier.
+    """
+    return resolve_llm_provider(model_name, albert_enabled=albert_enabled())
+
+
+def _citation_albert_key(resolution, current_user):
+    """
+    Albert key of the user for an Albert resolution, else None.
+
+    Args:
+        resolution: Result of ``_resolve_citation_model``.
+        current_user: The authenticated user (personal key, ``.env`` for admins).
+
+    Returns:
+        The key (possibly None when missing) for Albert, None for another provider.
+    """
+    if resolution.provider != PROVIDER_ALBERT:
+        return None
+    return get_credential_or_env(current_user, ALBERT_CREDENTIAL_KEY)
+
+
+def _sse_json_event(payload):
+    """
+    Format one Server-Sent Event carrying ``payload`` as JSON.
+
+    Args:
+        payload: The event body.
+
+    Returns:
+        The ``data: {...}`` block, blank line included.
+    """
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _albert_account_error_event(error):
+    """
+    SSE error event of an Albert account or quota error (the job stops).
+
+    Args:
+        error: ``AlbertAuthError`` or ``AlbertQuotaExhausted`` (message already redacted).
+
+    Returns:
+        The ``{type: error, message, credential_required}`` event.
+    """
+    return _sse_json_event({
+        "type": "error",
+        "message": str(error),
+        "credential_required": getattr(error, "credential_required", ALBERT_CREDENTIAL_KEY),
+    })
 
 # Main router for project-related endpoints
 router = APIRouter(prefix="/api/projects", tags=["Citations"])
@@ -127,6 +201,13 @@ async def upload_pop_json(
             status_code=403,
             detail="You don't have permission to import citations for this project"
         )
+
+    # Validate the model with the single resolver before anything is written
+    # (an albert/ model while Albert is disabled is refused here)
+    try:
+        _resolve_citation_model(model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Generate unique session folder using uploaded filename as suffix
     unique_id = str(uuid.uuid4().hex)[:8]
@@ -323,9 +404,22 @@ async def filter_citations_sse(
             openai_api_key = get_credential_or_env(current_user, "openai_api_key")
             openrouter_api_key = get_credential_or_env(current_user, "openrouter_api_key")
 
-            # Validate credentials based on model type
+            # Validate credentials based on model type (single resolver)
             model_name = config.get("model", DEFAULT_LLM_MODEL)
-            if "/" in model_name:  # OpenRouter model format (e.g., google/gemini-2.5-flash)
+            try:
+                resolution = _resolve_citation_model(model_name)
+            except ValueError as e:
+                yield _sse_json_event({"type": "error", "message": str(e)})
+                return
+            albert_api_key = _citation_albert_key(resolution, current_user)
+            if resolution.provider == PROVIDER_ALBERT:
+                if not albert_api_key:
+                    error_msg = get_credential_error_message(ALBERT_CREDENTIAL_KEY)
+                    yield _sse_json_event({
+                        "type": "error", "message": error_msg, "credential_required": ALBERT_CREDENTIAL_KEY
+                    })
+                    return
+            elif resolution.provider == PROVIDER_OPENROUTER:  # e.g., google/gemini-2.5-flash
                 if not openrouter_api_key:
                     error_msg = get_credential_error_message("openrouter_api_key")
                     yield f'data: {{"type": "error", "message": "{error_msg}", "credential_required": "openrouter_api_key"}}\n\n'
@@ -377,7 +471,8 @@ async def filter_citations_sse(
                 },
                 openai_api_key=openai_api_key,
                 openrouter_api_key=openrouter_api_key,
-                batch_size=effective_batch_size
+                batch_size=effective_batch_size,
+                albert_api_key=albert_api_key
             ):
                 if event_type == "init":
                     # Include resume info in init event
@@ -471,6 +566,11 @@ async def filter_citations_sse(
             skipped_count = len(preview_results["skipped"])
             yield f'data: {{"type": "complete", "relevant": {relevant_count}, "skipped": {skipped_count}}}\n\n'
 
+        except ALBERT_ACCOUNT_ERRORS as e:
+            # Albert account or quota error: the whole job stops (processed
+            # citations stay in the progressive state for a later resume)
+            logger.error(f"Albert account error in filter_citations_sse, job stopped: {e}")
+            yield _albert_account_error_event(e)
         except Exception as e:
             logger.error(f"Unexpected error in filter_citations_sse: {e}", exc_info=True)
             yield f'data: {{"type": "error", "message": "Unexpected error: {str(e)}"}}\n\n'
@@ -1058,12 +1158,28 @@ async def batch_import_citations_sse(
             zotero_user_id = get_credential_or_env(current_user, "zotero_user_id")
             zotero_group_id = get_credential_or_env(current_user, "zotero_group_id")
 
-            # Validate credentials
+            # Validate credentials (single resolver)
             model_name = config.get("model", DEFAULT_LLM_MODEL)
-            if "/" in model_name and not openrouter_api_key:
-                yield f'data: {{"type": "error", "message": "OpenRouter API key required", "credential_required": "openrouter_api_key"}}\n\n'
+            try:
+                resolution = _resolve_citation_model(model_name)
+            except ValueError as e:
+                yield _sse_json_event({"type": "error", "message": str(e)})
                 return
-            elif "/" not in model_name and not openai_api_key:
+            albert_api_key = _citation_albert_key(resolution, current_user)
+            albert_job = resolution.provider == PROVIDER_ALBERT
+            if albert_job:
+                if not albert_api_key:
+                    yield _sse_json_event({
+                        "type": "error",
+                        "message": get_credential_error_message(ALBERT_CREDENTIAL_KEY),
+                        "credential_required": ALBERT_CREDENTIAL_KEY,
+                    })
+                    return
+            elif resolution.provider == PROVIDER_OPENROUTER:
+                if not openrouter_api_key:
+                    yield f'data: {{"type": "error", "message": "OpenRouter API key required", "credential_required": "openrouter_api_key"}}\n\n'
+                    return
+            elif not openai_api_key:
                 yield f'data: {{"type": "error", "message": "OpenAI API key required", "credential_required": "openai_api_key"}}\n\n'
                 return
 
@@ -1170,7 +1286,10 @@ async def batch_import_citations_sse(
 
                     # Filter with LLM
                     try:
-                        async with semaphore:
+                        if albert_job:
+                            # Albert: filter_citation_with_llm holds the global
+                            # semaphore during each send only (run_llm_slot); an
+                            # outer acquisition here would nest it.
                             filter_result = await filter_citation_with_llm(
                                 citation=citation_dict,
                                 web_content=content,
@@ -1181,8 +1300,23 @@ async def batch_import_citations_sse(
                                 collection_description=config.get("collection_description", ""),
                                 model=model_name,
                                 openai_api_key=openai_api_key,
-                                openrouter_api_key=openrouter_api_key
+                                openrouter_api_key=openrouter_api_key,
+                                albert_api_key=albert_api_key
                             )
+                        else:
+                            async with semaphore:
+                                filter_result = await filter_citation_with_llm(
+                                    citation=citation_dict,
+                                    web_content=content,
+                                    web_content_source=source,
+                                    project_name=config["project_name"],
+                                    project_description=config["project_description"],
+                                    collection_name=config["collection_name"],
+                                    collection_description=config.get("collection_description", ""),
+                                    model=model_name,
+                                    openai_api_key=openai_api_key,
+                                    openrouter_api_key=openrouter_api_key
+                                )
 
                         if isinstance(filter_result, dict):
                             batch_results.append({
@@ -1195,6 +1329,9 @@ async def batch_import_citations_sse(
                             batch_skipped += 1
                             yield f'data: {{"type": "filter_progress", "current": {global_idx + 1}, "status": "skipped"}}\n\n'
 
+                    except ALBERT_ACCOUNT_ERRORS:
+                        # Albert account or quota error: stop the whole job
+                        raise
                     except Exception as e:
                         logger.error(f"LLM filtering failed for citation {global_idx}: {e}")
                         batch_errors += 1
@@ -1296,6 +1433,11 @@ async def batch_import_citations_sse(
             # Final completion event
             yield f'data: {{"type": "complete", "total_created": {total_created}, "total_skipped": {total_skipped}, "total_errors": {total_errors}}}\n\n'
 
+        except ALBERT_ACCOUNT_ERRORS as e:
+            # Albert account or quota error: the whole job stops (items already
+            # created in Zotero stay; the next run skips them as duplicates)
+            logger.error(f"Albert account error in batch_import_citations_sse, job stopped: {e}")
+            yield _albert_account_error_event(e)
         except Exception as e:
             logger.error(f"Unexpected error in batch_import_citations_sse: {e}", exc_info=True)
             yield f'data: {{"type": "error", "message": "Unexpected error: {str(e)}"}}\n\n'
@@ -1588,12 +1730,24 @@ async def filter_citations_background(
     openrouter_api_key = get_credential_or_env(current_user, "openrouter_api_key")
 
     model_name = config.get("model", DEFAULT_LLM_MODEL)
-    if "/" in model_name and not openrouter_api_key:
-        raise HTTPException(
-            status_code=400,
-            detail=get_credential_error_message("openrouter_api_key")
-        )
-    elif "/" not in model_name and not openai_api_key:
+    try:
+        resolution = _resolve_citation_model(model_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    albert_api_key = _citation_albert_key(resolution, current_user)
+    if resolution.provider == PROVIDER_ALBERT:
+        if not albert_api_key:
+            raise HTTPException(
+                status_code=400,
+                detail=get_credential_error_message(ALBERT_CREDENTIAL_KEY)
+            )
+    elif resolution.provider == PROVIDER_OPENROUTER:
+        if not openrouter_api_key:
+            raise HTTPException(
+                status_code=400,
+                detail=get_credential_error_message("openrouter_api_key")
+            )
+    elif not openai_api_key:
         raise HTTPException(
             status_code=400,
             detail=get_credential_error_message("openai_api_key")
@@ -1679,7 +1833,8 @@ async def filter_citations_background(
                 },
                 openai_api_key=openai_api_key,
                 openrouter_api_key=openrouter_api_key,
-                batch_size=effective_batch_size
+                batch_size=effective_batch_size,
+                albert_api_key=albert_api_key
             ):
                 if event_type == "progress":
                     processor_idx = event_data["current"] - 1
