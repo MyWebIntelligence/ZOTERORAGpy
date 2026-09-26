@@ -20,11 +20,19 @@ app/utils/book_prompt.md:
 
 Concurrency: all LLM calls go through the global `get_llm_semaphore()` so that
 a multi-chapter book respects MAX_CONCURRENT_LLM_CALLS just like article calls.
+The three LLM sites use `run_llm_slot`: for OpenAI/OpenRouter the semaphore is
+held around the executor call exactly as before; for an `albert/…` model the
+semaphores are held during each send only and the backoff is slept outside.
+
+Albert account errors (`AlbertAuthError`, `AlbertQuotaExhausted`) are never
+swallowed by the best-effort `except Exception` of the phases: they abort the
+whole book note and reach the route.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -35,12 +43,65 @@ from enum import Enum
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.utils.llm_note_generator import (
+    ALBERT_JOB_ABORT_ERRORS,
+    ALBERT_NOTES_ROLE,
     SENTINEL_PREFIX,
     _generate_with_llm,
+    agenerate_with_albert,
+    albert_route_async,
     get_llm_semaphore,
+    run_llm_slot,
 )
 
 logger = logging.getLogger(__name__)
+
+# Albert roles of the book phases (scripts/rad_albert/catalog.py): Phase 1 asks
+# for a JSON structure, Phases 2 and 3 write the reading note itself.
+ALBERT_BOOK_STRUCTURE_ROLE = "book_structure"
+ALBERT_BOOK_NOTE_ROLE = ALBERT_NOTES_ROLE
+
+# JSON schema of the Phase 1 answer: every field of the output format of the
+# Phase 1 prompt (book_prompt.md), all required, no other property. A guided
+# decoder that forbids undeclared properties therefore keeps every field read
+# by `_merge_llm_structure`. Nullable values use `anyOf` with `null`.
+_ALBERT_NULLABLE_STRING = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+_ALBERT_STRING_LIST = {"type": "array", "items": {"type": "string"}}
+ALBERT_BOOK_CHAPTER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "num": {"type": "integer"},
+        "title": {"type": "string"},
+        "authors": _ALBERT_STRING_LIST,
+        "pages": {"type": "array", "items": {"anyOf": [{"type": "integer"}, {"type": "null"}]}},
+        "is_paratext": {"type": "boolean"},
+        "is_long_paratext": {"type": "boolean"},
+        "to_exclude": {"type": "boolean"},
+    },
+    "required": ["num", "title", "authors", "pages", "is_paratext", "is_long_paratext", "to_exclude"],
+    "additionalProperties": False,
+}
+ALBERT_BOOK_STRUCTURE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "book_type": {"type": "string"},
+        "primary_authors": _ALBERT_STRING_LIST,
+        "editor": _ALBERT_NULLABLE_STRING,
+        "confidence": {"type": "string"},
+        "structure_signal": {"type": "string"},
+        "chapters": {"type": "array", "items": ALBERT_BOOK_CHAPTER_SCHEMA},
+    },
+    "required": ["book_type", "primary_authors", "editor", "confidence", "structure_signal", "chapters"],
+    "additionalProperties": False,
+}
+
+# Structured output of Phase 1 on Albert. D10 retains `json_schema`: the P10
+# probe validated it on the volume model (ministral) and on gpt-oss, whereas
+# `json_object` was validated on ministral only. The same format is therefore
+# valid for an explicit `albert/gpt-oss-120b` model and for the role chain.
+ALBERT_BOOK_STRUCTURE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {"name": "book_structure", "schema": ALBERT_BOOK_STRUCTURE_SCHEMA, "strict": True},
+}
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -818,6 +879,77 @@ def _build_initial_structure(full_text: str, metadata: Dict) -> BookStructure:
 
 
 # --------------------------------------------------------------------------- #
+# LLM slot shared by the three phases
+# --------------------------------------------------------------------------- #
+
+async def _book_llm_call(
+    prompt: str,
+    *,
+    model: Optional[str],
+    temperature: float,
+    openai_api_key: Optional[str],
+    openrouter_api_key: Optional[str],
+    albert_api_key: Optional[str],
+    albert_role: str,
+    albert_response_format: Optional[Dict] = None,
+) -> str:
+    """
+    Run one book-note LLM call in a slot of the global semaphore (`run_llm_slot`).
+
+    OpenAI/OpenRouter: `_generate_with_llm` runs in the executor while the
+    global semaphore is held, exactly as before. Albert (`albert/…` model, or
+    an `albert/…` default model): `agenerate_with_albert` with the given role;
+    each send holds the semaphores only while it runs, and no other provider
+    is ever called.
+
+    Args:
+        prompt: Filled phase prompt.
+        model: Model identifier (None = web default).
+        temperature: Sampling temperature.
+        openai_api_key: Per-user OpenAI key.
+        openrouter_api_key: Per-user OpenRouter key.
+        albert_api_key: Per-user Albert key (used only for an Albert model).
+        albert_role: Albert role of the phase (`book_structure` or `notes`).
+        albert_response_format: Structured output format on Albert, or None.
+
+    Returns:
+        The raw LLM answer.
+
+    Raises:
+        AlbertAuthError: Albert account error (aborts the whole book note).
+        Exception: Any other LLM failure.
+    """
+    semaphore = get_llm_semaphore()
+    # No `.env` read on the loop: `build_book_note_async` already passes the
+    # resolved default while Albert is enabled; while it is disabled, an empty
+    # model keeps the historical path (default resolved in the executor).
+    albert, model = await albert_route_async(model)
+    if albert is not None:
+        return await agenerate_with_albert(
+            prompt,
+            albert.wire_model,
+            semaphore=semaphore,
+            temperature=temperature,
+            mode="book",
+            albert_api_key=albert_api_key,
+            role=albert_role,
+            response_format=albert_response_format,
+        )
+    return await run_llm_slot(
+        semaphore,
+        functools.partial(
+            _generate_with_llm,
+            prompt,
+            model=model,
+            temperature=temperature,
+            mode="book",
+            openai_api_key=openai_api_key,
+            openrouter_api_key=openrouter_api_key,
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Phase 1 — LLM-driven structure detection (refine Phase 0)
 # --------------------------------------------------------------------------- #
 
@@ -830,6 +962,7 @@ async def _phase1_detect_structure(
     model: Optional[str],
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
+    albert_api_key: Optional[str] = None,
 ) -> Optional[Dict]:
     """
     Run Phase 1 LLM call. Returns parsed JSON or None on failure.
@@ -839,6 +972,10 @@ async def _phase1_detect_structure(
     `<!-- Page N -->` markers, which lets it return precise start/end pages
     per chapter — including for back-of-book ToCs (Lot E). Otherwise, falls
     back to a char-based excerpt of the front of `full_text`.
+
+    On Albert, the call uses the `book_structure` role and the JSON schema of
+    `ALBERT_BOOK_STRUCTURE_RESPONSE_FORMAT` (D10).
+    Albert account errors are raised (never turned into None).
     """
     if pages:
         first_pages = _first_n_pages(pages, PHASE1_TOC_PAGES)
@@ -865,24 +1002,22 @@ async def _phase1_detect_structure(
         "LAST_PAGES": last_pages,
     })
 
-    semaphore = get_llm_semaphore()
-    async with semaphore:
-        loop = asyncio.get_event_loop()
-        try:
-            raw = await loop.run_in_executor(
-                None,
-                lambda: _generate_with_llm(
-                    prompt,
-                    model=model,
-                    temperature=0.0,
-                    mode="book",
-                    openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key,
-                ),
-            )
-        except Exception as exc:
-            logger.warning("Phase 1 (book structure) LLM call failed: %s", exc)
-            return None
+    try:
+        raw = await _book_llm_call(
+            prompt,
+            model=model,
+            temperature=0.0,
+            openai_api_key=openai_api_key,
+            openrouter_api_key=openrouter_api_key,
+            albert_api_key=albert_api_key,
+            albert_role=ALBERT_BOOK_STRUCTURE_ROLE,
+            albert_response_format=ALBERT_BOOK_STRUCTURE_RESPONSE_FORMAT,
+        )
+    except ALBERT_JOB_ABORT_ERRORS:
+        raise
+    except Exception as exc:
+        logger.warning("Phase 1 (book structure) LLM call failed: %s", exc)
+        return None
 
     # Strip code fences if the model wrapped the JSON.
     raw = raw.strip()
@@ -1202,9 +1337,13 @@ async def _phase2_analyse_chapter(
     model: Optional[str],
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
+    albert_api_key: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Run one Phase 2 LLM call. Returns (html_block, short_summary).
+
+    On Albert, the call uses the `notes` role; errors propagate to
+    `build_book_note_async`, which aborts on Albert account errors.
     """
     if not chapter.text or len(chapter.text.strip()) < 50:
         # Empty chapter — produce a minimal HTML block.
@@ -1236,20 +1375,15 @@ async def _phase2_analyse_chapter(
         "LANGUAGE": str(book_meta.get("language_label", "français")),
     })
 
-    semaphore = get_llm_semaphore()
-    async with semaphore:
-        loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(
-            None,
-            lambda: _generate_with_llm(
-                prompt,
-                model=model,
-                temperature=0.2,
-                mode="book",
-                openai_api_key=openai_api_key,
-                openrouter_api_key=openrouter_api_key,
-            ),
-        )
+    raw = await _book_llm_call(
+        prompt,
+        model=model,
+        temperature=0.2,
+        openai_api_key=openai_api_key,
+        openrouter_api_key=openrouter_api_key,
+        albert_api_key=albert_api_key,
+        albert_role=ALBERT_BOOK_NOTE_ROLE,
+    )
 
     # Split HTML block from "SUMMARY:" line.
     summary = ""
@@ -1301,8 +1435,14 @@ async def _phase3_synthesise(
     model: Optional[str],
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
+    albert_api_key: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """Run Phase 3 LLM call. Returns (section_a_html, section_b_html)."""
+    """
+    Run Phase 3 LLM call. Returns (section_a_html, section_b_html).
+
+    On Albert, the call uses the `notes` role; errors propagate to
+    `build_book_note_async`, which aborts on Albert account errors.
+    """
     prompt = _fill_placeholders(phase3_template, {
         "TITLE": str(book_meta.get("title", "")),
         "PRIMARY_AUTHORS": ", ".join(structure.primary_authors) or "Auteur(s) inconnu(s)",
@@ -1318,20 +1458,15 @@ async def _phase3_synthesise(
         "LANGUAGE": str(book_meta.get("language_label", "français")),
     })
 
-    semaphore = get_llm_semaphore()
-    async with semaphore:
-        loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(
-            None,
-            lambda: _generate_with_llm(
-                prompt,
-                model=model,
-                temperature=0.2,
-                mode="book",
-                openai_api_key=openai_api_key,
-                openrouter_api_key=openrouter_api_key,
-            ),
-        )
+    raw = await _book_llm_call(
+        prompt,
+        model=model,
+        temperature=0.2,
+        openai_api_key=openai_api_key,
+        openrouter_api_key=openrouter_api_key,
+        albert_api_key=albert_api_key,
+        albert_role=ALBERT_BOOK_NOTE_ROLE,
+    )
 
     # Expected delimiters: ===SECTION_A=== ... ===SECTION_B=== ... ===END===
     section_a = ""
@@ -1487,6 +1622,7 @@ async def build_book_note_async(
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
     progress_cb: Optional[Callable[[str, int, int, str], Awaitable[None]]] = None,
+    albert_api_key: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Generate a complete [LIVRE] reading note for a book.
@@ -1496,9 +1632,11 @@ async def build_book_note_async(
             Optional: publisher, doi, url, itemType, numPages.
         text_content: full OCR text of the book (texteocr column).
         model: LLM model identifier. If None, uses the env default.
+            `albert/<id>` selects Albert (sovereign provider, opt-in).
         openai_api_key: per-user OpenAI key (security model — see core/credentials.py).
         openrouter_api_key: per-user OpenRouter key.
         progress_cb: async callable(stage, current, total, label) for SSE updates.
+        albert_api_key: per-user Albert key, used only for an Albert model.
 
     Returns:
         (sentinel, note_html) tuple matching the build_note_html_async contract.
@@ -1506,9 +1644,18 @@ async def build_book_note_async(
     Raises:
         ValueError: if no usable LLM credentials.
         RuntimeError: if book_prompt.md is malformed.
+        AlbertDisabledError: `albert/…` model while Albert is disabled.
+        AlbertAuthError: Albert account error in any phase (the book note is
+            aborted, never completed with placeholder sections).
     """
     if not text_content or not text_content.strip():
         raise ValueError("Empty text_content for book note generation.")
+
+    # Fail fast on an `albert/…` model while Albert is disabled (no LLM call,
+    # no degraded note); any other model is routed as before. The default model
+    # is resolved here once (off the loop, only while Albert is enabled) and
+    # passed to every phase; while Albert is disabled an empty model is kept.
+    _albert, model = await albert_route_async(model)
 
     full_prompt = _load_book_prompt()
     phase1_tpl = _extract_phase_prompt(full_prompt, "phase1")
@@ -1557,6 +1704,7 @@ async def build_book_note_async(
         model=model,
         openai_api_key=openai_api_key,
         openrouter_api_key=openrouter_api_key,
+        albert_api_key=albert_api_key,
     )
     if llm_payload:
         structure = _merge_llm_structure(initial_structure, llm_payload, text_content)
@@ -1701,7 +1849,10 @@ async def build_book_note_async(
                 model=model,
                 openai_api_key=openai_api_key,
                 openrouter_api_key=openrouter_api_key,
+                albert_api_key=albert_api_key,
             )
+        except ALBERT_JOB_ABORT_ERRORS:
+            raise
         except Exception as exc:
             logger.error("Phase 2: chapter %d failed: %s", chapter.num, exc)
             block = (
@@ -1723,7 +1874,10 @@ async def build_book_note_async(
             model=model,
             openai_api_key=openai_api_key,
             openrouter_api_key=openrouter_api_key,
+            albert_api_key=albert_api_key,
         )
+    except ALBERT_JOB_ABORT_ERRORS:
+        raise
     except Exception as exc:
         logger.error("Phase 3 failed, using minimal sections: %s", exc)
         section_a = (

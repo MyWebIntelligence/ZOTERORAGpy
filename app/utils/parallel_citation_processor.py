@@ -29,9 +29,20 @@ Usage:
     async for event_type, event_data in process_citations_parallel(citations, config, ...):
         if event_type == "progress":
             yield sse_event(event_data)
+
+Albert (modèle ``albert/<id>``, optionnel) :
+    - la clé ``albert_api_key`` est transmise au pré-filtre et au filtrage complet ;
+    - à la première erreur de compte Albert (``AlbertAuthError``,
+      ``AlbertQuotaExhausted``), les tâches restantes sont annulées et
+      l'exception remonte à la route (arrêt du job entier) ;
+    - le délai de garde de 120 s n'arrête pas la boucle tant qu'une tâche
+      Albert tourne (réessais longs), et un signal d'arrêt resté dans la file
+      après la boucle est relancé : une erreur de compte n'est jamais perdue ;
+    - aucune acquisition imbriquée du sémaphore LLM global sur la branche Albert.
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 from typing import List, Dict, Tuple, AsyncGenerator, Optional, Any
@@ -49,6 +60,12 @@ DEFAULT_MAX_CHARS = 10000
 # Format "provider/model" → OpenRouter (e.g., google/gemini-2.5-flash)
 # Format "model" → OpenAI direct (e.g., gpt-4o-mini)
 DEFAULT_LLM_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
+
+# Délai de garde (secondes) sans nouveau résultat dans la file. Chemin
+# historique : la boucle s'arrête. Branche Albert : un avertissement est
+# journalisé et l'attente continue tant qu'une tâche tourne (les réessais
+# Albert, 429 avec Retry-After ou 503, peuvent dépasser ce délai).
+RESULT_WAIT_TIMEOUT = 120.0
 
 
 @dataclass
@@ -72,13 +89,116 @@ class CitationProcessingResult:
     error_message: Optional[str] = None
 
 
+@dataclass
+class _JobAbort:
+    """
+    Signal déposé dans la file des résultats : erreur qui arrête le job entier.
+
+    Attributes:
+        index: Index de la citation qui a rencontré l'erreur
+        error: Exception à relancer vers la route (erreur de compte Albert, ou
+            modèle ``albert/…`` demandé alors qu'Albert est désactivé)
+    """
+    index: int
+    error: BaseException
+
+
+def _albert_selected(model: Optional[str]) -> bool:
+    """
+    Indique si le modèle sélectionne Albert, avec le résolveur du filtre de citations.
+
+    Même résolution que ``pre_filter_citation`` et ``filter_citation_with_llm``
+    (``resolve_llm_route``, sans modèle par défaut) : aucune lecture du
+    ``.env``, et aucune configuration lue pour un modèle sans préfixe
+    ``albert/``. Un ``albert/…`` refusé (Albert désactivé, identifiant vide)
+    compte comme Albert : chaque appel de filtre relève alors l'erreur lui-même.
+
+    Args:
+        model: Modèle de la configuration du job
+
+    Returns:
+        True pour un modèle ``albert/…``, False sinon
+    """
+    from app.utils.llm_note_generator import PROVIDER_ALBERT, resolve_llm_route
+
+    try:
+        return resolve_llm_route(model).provider == PROVIDER_ALBERT
+    except ValueError:  # AlbertDisabledError ou « albert/ » sans identifiant
+        return True
+
+
+async def _next_albert_item(
+    results_queue: asyncio.Queue,
+    tasks: List["asyncio.Task[Any]"],
+    processed_count: int,
+    total: int
+) -> Optional[Any]:
+    """
+    Prochain élément de la file sur la branche Albert, sans abandon sur délai.
+
+    Même garde que le chemin historique (``asyncio.wait_for`` de
+    ``RESULT_WAIT_TIMEOUT`` secondes), mais son expiration n'arrête pas la
+    boucle tant qu'une tâche tourne : un avertissement est journalisé et
+    l'attente reprend. Une erreur de compte levée après de longs réessais (429
+    avec Retry-After, puis ``AlbertQuotaExhausted``) atteint donc toujours la
+    boucle principale, et aucun résultat tardif n'est perdu (une lecture
+    annulée par la garde laisse l'élément dans la file).
+
+    Args:
+        results_queue: File des résultats (``CitationProcessingResult`` ou ``_JobAbort``)
+        tasks: Tâches de traitement des citations
+        processed_count: Résultats déjà lus (journal)
+        total: Nombre total de citations (journal)
+
+    Returns:
+        L'élément suivant, ou None quand toutes les tâches sont terminées et la
+        file vide (tâche interrompue sans résultat)
+    """
+    while True:
+        try:
+            return await asyncio.wait_for(results_queue.get(), timeout=RESULT_WAIT_TIMEOUT)
+        except asyncio.TimeoutError:
+            running = sum(1 for task in tasks if not task.done())
+            if not running and results_queue.empty():
+                return None
+            if running:
+                logger.warning(
+                    f"No citation result for {RESULT_WAIT_TIMEOUT:g} s (processed {processed_count}/{total}); "
+                    f"{running} Albert task(s) still running (retries), still waiting"
+                )
+
+
+def _drain_job_abort(results_queue: asyncio.Queue) -> Optional[_JobAbort]:
+    """
+    Vide la file et renvoie le premier signal d'arrêt du job qu'elle contient.
+
+    Appelée après la boucle principale, une fois toutes les tâches terminées :
+    un ``_JobAbort`` déposé après la sortie de boucle (délai de garde du chemin
+    historique) n'est jamais perdu. Les résultats tardifs restent ignorés,
+    comme avant.
+
+    Args:
+        results_queue: File des résultats
+
+    Returns:
+        Le premier ``_JobAbort`` trouvé, ou None
+    """
+    abort = None
+    while not results_queue.empty():
+        item = results_queue.get_nowait()
+        if abort is None and isinstance(item, _JobAbort):
+            abort = item
+    return abort
+
+
 async def process_citations_parallel(
     citations: List[Any],
     config: Dict[str, str],
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
     batch_size: int = DEFAULT_BATCH_SIZE,
-    max_concurrent_fetches: int = MAX_CONCURRENT_FETCHES
+    max_concurrent_fetches: int = MAX_CONCURRENT_FETCHES,
+    albert_api_key: Optional[str] = None
 ) -> AsyncGenerator[Tuple[str, Dict[str, Any]], None]:
     """
     Traite les citations en parallèle avec streaming SSE immédiat.
@@ -95,12 +215,19 @@ async def process_citations_parallel(
         openrouter_api_key: Clé API OpenRouter (optionnelle)
         batch_size: Nombre de citations traitées en parallèle (défaut: 10)
         max_concurrent_fetches: Max fetches web simultanés (défaut: 10)
+        albert_api_key: Clé API Albert (optionnelle, modèle ``albert/<id>`` seulement)
 
     Yields:
         Tuples (event_type, event_data):
         - ("init", {"total": N, "batch_size": M})
         - ("progress", {"current": i, "total": N, "status": str, "title": str, ...})
         - ("complete", {"relevant": X, "skipped": Y})
+
+    Raises:
+        AlbertAuthError: première erreur de compte Albert (clé invalide ou
+            absente, compte expiré, budget ou quota épuisé) ; les tâches
+            restantes sont annulées avant la relance.
+        AlbertDisabledError: modèle ``albert/…`` alors qu'Albert est désactivé.
 
     Example:
         >>> async for event_type, event_data in process_citations_parallel(
@@ -122,6 +249,12 @@ async def process_citations_parallel(
     )
 
     yield ("init", {"total": total, "batch_size": batch_size})
+
+    # Erreurs qui arrêtent le job entier (jamais levées hors branche Albert)
+    from app.utils.llm_note_generator import ALBERT_JOB_ABORT_ERRORS
+
+    # Branche Albert : pas d'abandon sur délai de garde tant qu'une tâche tourne
+    albert_job = _albert_selected(config.get("model", DEFAULT_LLM_MODEL))
 
     # Utiliser une Queue pour streamer les résultats dès qu'ils arrivent
     results_queue: asyncio.Queue = asyncio.Queue()
@@ -157,7 +290,8 @@ async def process_citations_parallel(
                 collection_description=config.get("collection_description", ""),
                 model=config.get("model", DEFAULT_LLM_MODEL),
                 openai_api_key=openai_api_key,
-                openrouter_api_key=openrouter_api_key
+                openrouter_api_key=openrouter_api_key,
+                albert_api_key=albert_api_key
             )
 
             if not is_relevant:
@@ -190,7 +324,8 @@ async def process_citations_parallel(
                     collection_description=config.get("collection_description", ""),
                     model=config.get("model", DEFAULT_LLM_MODEL),
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key
+                    openrouter_api_key=openrouter_api_key,
+                    albert_api_key=albert_api_key
                 )
 
                 if isinstance(result, dict):
@@ -199,6 +334,11 @@ async def process_citations_parallel(
                 else:
                     status = "skipped"
 
+        except ALBERT_JOB_ABORT_ERRORS as exc:
+            # Erreur de compte Albert : arrêt du job entier (signal à la boucle principale)
+            logger.error(f"Albert account error on citation {idx}, aborting the job: {exc}")
+            await results_queue.put(_JobAbort(index=idx, error=exc))
+            return
         except Exception as e:
             logger.error(f"Processing failed for citation {idx}: {e}")
             status = "error"
@@ -236,7 +376,28 @@ async def process_citations_parallel(
     while processed_count < total:
         # Attendre le prochain résultat (avec timeout pour éviter deadlock)
         try:
-            result = await asyncio.wait_for(results_queue.get(), timeout=120.0)
+            if albert_job:
+                # Branche Albert : attente jusqu'à la fin des tâches (réessais longs)
+                result = await _next_albert_item(results_queue, tasks, processed_count, total)
+                if result is None:
+                    logger.error(
+                        f"Citation tasks ended without a result (processed {processed_count}/{total})"
+                    )
+                    break
+            else:
+                result = await asyncio.wait_for(results_queue.get(), timeout=RESULT_WAIT_TIMEOUT)
+
+            if isinstance(result, _JobAbort):
+                # Arrêt du job : annuler les tâches restantes, puis relancer vers la route
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                logger.error(
+                    f"Citation job aborted after {processed_count}/{total} results "
+                    f"(citation {result.index}): {type(result.error).__name__}"
+                )
+                raise result.error
+
             processed_count += 1
 
             if result.status == "relevant":
@@ -265,6 +426,15 @@ async def process_citations_parallel(
 
     # S'assurer que toutes les tâches sont terminées
     await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Erreur de compte arrivée après la sortie de boucle : jamais perdue
+    late_abort = _drain_job_abort(results_queue)
+    if late_abort is not None:
+        logger.error(
+            f"Citation job aborted after {processed_count}/{total} results "
+            f"(citation {late_abort.index}): {type(late_abort.error).__name__}"
+        )
+        raise late_abort.error
 
     logger.info(
         f"Streaming parallel processing complete: {global_relevant} relevant, "
@@ -350,13 +520,16 @@ async def _filter_batch_parallel(
     config: Dict[str, str],
     start_idx: int,
     openai_api_key: Optional[str],
-    openrouter_api_key: Optional[str]
+    openrouter_api_key: Optional[str],
+    albert_api_key: Optional[str] = None
 ) -> List[CitationProcessingResult]:
     """
     Filter un batch de citations avec LLM en parallèle.
 
     Utilise le semaphore global LLM pour contrôler la concurrence
-    et respecter les rate limits API.
+    et respecter les rate limits API. Sur la branche Albert, le semaphore
+    global n'est pas tenu ici : ``filter_citation_with_llm`` l'acquiert
+    lui-même pendant chaque envoi (``run_llm_slot``), sans acquisition imbriquée.
 
     Args:
         citations: Batch de citations
@@ -365,14 +538,23 @@ async def _filter_batch_parallel(
         start_idx: Index de départ dans la liste complète
         openai_api_key: Clé API OpenAI
         openrouter_api_key: Clé API OpenRouter
+        albert_api_key: Clé API Albert (modèle ``albert/<id>`` seulement)
 
     Returns:
         Liste de CitationProcessingResult dans le même ordre
+
+    Raises:
+        AlbertAuthError: erreur de compte Albert (arrêt du job entier).
+        AlbertDisabledError: modèle ``albert/…`` alors qu'Albert est désactivé.
     """
     from app.utils.citation_filter import filter_citation_with_llm
-    from app.utils.llm_note_generator import get_llm_semaphore
+    from app.utils.llm_note_generator import ALBERT_JOB_ABORT_ERRORS, get_llm_semaphore
 
     semaphore = get_llm_semaphore()
+    model = config.get("model", "gpt-4o-mini")
+    # Branche Albert : pas de semaphore externe (sinon acquisition imbriquée).
+    # Même résolution que filter_citation_with_llm, sans lecture du .env.
+    llm_slot = contextlib.nullcontext() if _albert_selected(model) else semaphore
 
     async def filter_one(
         idx: int,
@@ -389,7 +571,7 @@ async def _filter_batch_parallel(
 
         global_idx = start_idx + idx
 
-        async with semaphore:
+        async with llm_slot:
             logger.debug(f"Filtering citation {global_idx + 1}: {c.get('title', '')[:30]}...")
 
             try:
@@ -403,7 +585,8 @@ async def _filter_batch_parallel(
                     collection_description=config.get("collection_description", ""),
                     model=config.get("model", "gpt-4o-mini"),
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key
+                    openrouter_api_key=openrouter_api_key,
+                    albert_api_key=albert_api_key
                 )
 
                 # Déterminer le statut basé sur le résultat
@@ -423,6 +606,8 @@ async def _filter_batch_parallel(
                         web_source=source
                     )
 
+            except ALBERT_JOB_ABORT_ERRORS:
+                raise
             except Exception as e:
                 logger.error(
                     f"LLM filter failed for citation {global_idx}: "
@@ -444,6 +629,11 @@ async def _filter_batch_parallel(
 
     # Exécuter en parallèle (contrôlé par le semaphore global)
     results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Erreur de compte Albert : arrêt du job entier (jamais sur les autres fournisseurs)
+    for result in results:
+        if isinstance(result, ALBERT_JOB_ABORT_ERRORS):
+            raise result
 
     # Traiter les exceptions non gérées
     processed_results = []

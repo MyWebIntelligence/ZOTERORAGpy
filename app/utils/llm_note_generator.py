@@ -8,20 +8,72 @@ produce academic-style reading notes.
 
 Key Features:
 - Prompt Engineering: Dynamically builds prompts based on document metadata and language.
-- Multi-Provider Support: Supports both OpenAI and OpenRouter.
+- Multi-Provider Support: Supports OpenAI and OpenRouter, plus Albert (DINUM) as an
+  opt-in third provider selected by an explicit ``albert/<id>`` model name.
 - Concurrency Control: Uses a global semaphore to limit concurrent API calls.
 - Idempotence: Generates unique sentinels to track generated notes.
 - Fallback Mechanism: Provides a template-based fallback if LLM generation fails.
+
+Albert (sovereign provider, OFF by default):
+- ``resolve_llm_route`` is the single provider resolver (``albert/`` prefix first,
+  then the historical ``provider/model`` → OpenRouter heuristic).
+- A request that selected Albert never falls back to OpenAI or OpenRouter; the
+  ``gpt-4o-mini`` fallback is reserved to the OpenAI/OpenRouter branch.
+- One retry layer only (``scripts/rad_albert/retry.py``): the historical
+  ``max_attempts`` loop is bypassed on the Albert branch.
+- ``run_llm_slot`` holds the global semaphore (then the Albert semaphore) during
+  one attempt only; the limiter is acquired and the backoff slept outside them.
+- Account errors (``AlbertAuthError``, ``AlbertQuotaExhausted``) always reach the
+  caller; a transient error that exhausted its retries falls back to the template.
 """
 
 import os
 import uuid
+import math
+import weakref
 import logging
 import asyncio
+import functools
+import importlib
 import html as html_module
-from typing import Dict, Tuple, Optional
+from dataclasses import dataclass
+from datetime import date
+from typing import Any, Callable, Dict, List, Tuple, Optional
 from openai import OpenAI
 from dotenv import load_dotenv, dotenv_values, find_dotenv
+
+try:
+    from scripts.rad_albert.config import AlbertConfig
+    from scripts.rad_albert.errors import (
+        AlbertAuthError,
+        AlbertDisabledError,
+        AlbertModelBusy,
+        AlbertQuotaExhausted,
+        AlbertTruncatedError,
+    )
+    from scripts.rad_providers import (
+        ALBERT_PREFIX,
+        PROVIDER_ALBERT,
+        PROVIDER_OPENROUTER,
+        ProviderResolution,
+        resolve_llm_provider,
+    )
+except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
+    from rad_albert.config import AlbertConfig
+    from rad_albert.errors import (
+        AlbertAuthError,
+        AlbertDisabledError,
+        AlbertModelBusy,
+        AlbertQuotaExhausted,
+        AlbertTruncatedError,
+    )
+    from rad_providers import (
+        ALBERT_PREFIX,
+        PROVIDER_ALBERT,
+        PROVIDER_OPENROUTER,
+        ProviderResolution,
+        resolve_llm_provider,
+    )
 
 # Load environment variables from .env file
 load_dotenv()
@@ -204,6 +256,655 @@ def _get_llm_clients(
         logger.debug("OpenRouter client initialized for note generation")
 
     return openai_client, openrouter_client, default_model
+
+
+# =============================================================================
+# Albert (DINUM) — sovereign chat provider, opt-in (ALBERT_ENABLED=1)
+# =============================================================================
+
+# Account errors: never retried, never swallowed, they stop the whole job and
+# reach the route (``credential_required = albert_api_key``).
+ALBERT_ACCOUNT_ERRORS = (AlbertAuthError, AlbertQuotaExhausted)
+
+# Errors that abort a whole multi-call job (book note, citation batch): account
+# errors, plus an ``albert/`` model requested while Albert is disabled.
+ALBERT_JOB_ABORT_ERRORS = (AlbertAuthError, AlbertQuotaExhausted, AlbertDisabledError)
+
+# System message of the Albert note calls (same wording as the OpenAI branch).
+ALBERT_NOTE_SYSTEM_PROMPT = "Tu es un assistant spécialisé en rédaction de fiches de lecture académiques."
+
+# Roles of the Albert model catalog (scripts/rad_albert/catalog.py).
+ALBERT_NOTES_ROLE = "notes"
+ALBERT_LONG_CONTEXT_ROLE = "long_context"
+
+# Prompt size estimate (characters per token) and share of the model context
+# beyond which the call switches to the ``long_context`` role.
+ALBERT_CHARS_PER_TOKEN_ESTIMATE = 3.2
+ALBERT_CONTEXT_MARGIN = 0.9
+
+# Floor of the answer budget in "short" mode (before the reasoning headroom,
+# which the Albert client adds itself for a reasoning model such as gpt-oss).
+ALBERT_SHORT_MIN_TOKENS = 4096
+
+# Empty answer with finish_reason=length: one retry with this budget factor and
+# this reasoning effort, then an error (never an empty note).
+ALBERT_TRUNCATION_BUDGET_FACTOR = 1.5
+ALBERT_TRUNCATION_RETRY_EFFORT = "low"
+
+
+# Package that provided AlbertConfig and the error classes above
+# (``scripts.rad_albert`` or ``rad_albert``): the submodules imported lazily
+# below come from the same package, so the error classes always match.
+_ALBERT_PACKAGE = AlbertConfig.__module__.rsplit(".", 1)[0]
+
+
+def _albert_module(name: str) -> Any:
+    """
+    Import lazily a submodule of the Albert package already in use.
+
+    The httpx-based modules (``client``) and the other helpers (``catalog``,
+    ``limiter``, ``retry``) are only loaded when Albert is selected.
+
+    Args:
+        name: Submodule name (``client``, ``catalog``, ``limiter``, ``retry``).
+
+    Returns:
+        The imported module.
+    """
+    return importlib.import_module(f"{_ALBERT_PACKAGE}.{name}")
+
+
+def resolve_llm_route(model: Optional[str]) -> ProviderResolution:
+    """
+    Resolve the chat provider of a model name (single resolver of the web side).
+
+    The ``albert/`` prefix is tested first (case-insensitive); the Albert switch
+    (``ALBERT_ENABLED``) is only read for such a name, so any other model is
+    routed exactly as before (``provider/model`` → OpenRouter, else OpenAI) and
+    no configuration is read.
+
+    Args:
+        model: Model name as entered (``None`` is treated as ``""``).
+
+    Returns:
+        ``ProviderResolution(provider, wire_model, credential_key)``.
+
+    Raises:
+        AlbertDisabledError: ``albert/…`` requested while Albert is disabled.
+        ValueError: ``albert/`` without a model identifier.
+    """
+    text = "" if model is None else str(model)
+    albert_enabled = False
+    if text[:len(ALBERT_PREFIX)].lower() == ALBERT_PREFIX:
+        albert_enabled = AlbertConfig.from_env().enabled
+    return resolve_llm_provider(text, albert_enabled=albert_enabled)
+
+
+def albert_route(model: Optional[str]) -> Optional[ProviderResolution]:
+    """
+    Return the Albert resolution of the effective model, or ``None``.
+
+    An empty model means the web default (``resolve_default_llm_model``), so an
+    ``albert/…`` default model is honoured like an explicit one. While Albert is
+    disabled, an empty model returns ``None`` without reading ``.env``: the
+    historical path resolves the default itself (once, in the executor) and
+    raises ``AlbertDisabledError`` there for an ``albert/…`` default.
+
+    Args:
+        model: Model name as entered, or ``None``/``""`` for the default.
+
+    Returns:
+        The resolution when the effective model selects Albert, otherwise
+        ``None`` (OpenAI/OpenRouter: the historical code path applies).
+
+    Raises:
+        AlbertDisabledError: explicit ``albert/…`` requested while Albert is disabled.
+        ValueError: ``albert/`` without a model identifier.
+    """
+    if not model and not AlbertConfig.from_env().enabled:
+        return None
+    effective = model if model else resolve_default_llm_model()
+    resolution = resolve_llm_route(effective)
+    return resolution if resolution.provider == PROVIDER_ALBERT else None
+
+
+async def albert_route_async(model: Optional[str]) -> Tuple[Optional[ProviderResolution], Optional[str]]:
+    """
+    Event-loop version of ``albert_route``: ``.env`` is never read on the loop thread.
+
+    * explicit model: ``albert_route(model)`` (no file read), model unchanged;
+    * empty model, Albert disabled: ``(None, model)`` without any file read (the
+      historical path resolves the default once, in the executor, as before);
+    * empty model, Albert enabled: the web default is resolved once, in a worker
+      thread, and returned so that the caller passes it on (the executor side
+      then routes the very same model).
+
+    Args:
+        model: Model name as entered, or ``None``/``""`` for the default.
+
+    Returns:
+        ``(resolution, model)``: the Albert resolution or ``None``, and the model
+        to pass on (the resolved default when it was read, otherwise ``model``).
+
+    Raises:
+        AlbertDisabledError: explicit ``albert/…`` requested while Albert is disabled.
+        ValueError: ``albert/`` without a model identifier.
+    """
+    if model or not AlbertConfig.from_env().enabled:
+        return albert_route(model), model
+    effective = await asyncio.to_thread(resolve_default_llm_model)
+    return albert_route(effective), effective
+
+
+def albert_wire_id(wire_model: Optional[str]) -> Optional[str]:
+    """
+    Return the pinned model id sent to Albert for a wire model name.
+
+    A known alias (``openweight-large``, ``openai/gpt-oss-120b``…) is mapped to
+    its pinned id with the static catalog (no network call), because the API
+    echoes the requested alias in ``response.model``; an unknown name is kept.
+
+    Args:
+        wire_model: Model name without the ``albert/`` prefix (or ``None``).
+
+    Returns:
+        The pinned id, the name unchanged, or ``None`` for an empty name.
+    """
+    if not wire_model or not str(wire_model).strip():
+        return None
+    return _albert_module("catalog").canonical_id(wire_model)
+
+
+def _get_albert_client(albert_api_key: Optional[str], *, use_limiter: bool = True):
+    """
+    Build an Albert client from the key passed by the caller (never from the environment).
+
+    The key is the one resolved for the current user by the route
+    (``get_credential_or_env``: personal key, ``.env`` fallback for admins
+    only). The client module (httpx) is imported lazily, so it is never loaded
+    while Albert is not selected.
+
+    Args:
+        albert_api_key: The caller's Albert key; ``None`` or empty raises.
+        use_limiter: ``False`` when the proactive limiter is acquired by the
+            caller (``run_llm_slot``), outside the semaphores.
+
+    Returns:
+        An ``AlbertClient`` configured from ``AlbertConfig.from_env()``.
+
+    Raises:
+        AlbertMissingKeyError: No key (an ``AlbertAuthError``: account error,
+            ``credential_required = albert_api_key``).
+    """
+    AlbertClient = _albert_module("client").AlbertClient
+    return AlbertClient(
+        AlbertConfig.from_env(),
+        albert_api_key if albert_api_key is not None else "",
+        use_limiter=use_limiter,
+    )
+
+
+_albert_llm_semaphore: Optional[asyncio.Semaphore] = None
+_albert_llm_semaphore_loop: Optional["weakref.ReferenceType[asyncio.AbstractEventLoop]"] = None
+
+
+def get_albert_llm_semaphore() -> asyncio.Semaphore:
+    """
+    Get the Albert web semaphore (lazy, ``ALBERT_NOTES_CONCURRENCY`` slots).
+
+    It caps the Albert calls of the process (notes, book notes, citation
+    filter) and is always acquired after the global LLM semaphore. It is
+    created again when the running event loop changes (an asyncio semaphore is
+    bound to one loop); in the server there is a single loop.
+
+    Returns:
+        The asyncio semaphore of the running loop.
+    """
+    global _albert_llm_semaphore, _albert_llm_semaphore_loop
+    loop = asyncio.get_running_loop()
+    bound = _albert_llm_semaphore_loop() if _albert_llm_semaphore_loop is not None else None
+    if _albert_llm_semaphore is None or bound is not loop:
+        size = AlbertConfig.from_env().notes_concurrency
+        _albert_llm_semaphore = asyncio.Semaphore(size)
+        _albert_llm_semaphore_loop = weakref.ref(loop)
+        logger.debug(f"Albert LLM semaphore initialized: max {size} concurrent calls")
+    return _albert_llm_semaphore
+
+
+@dataclass(frozen=True)
+class AlbertSlotPolicy:
+    """
+    Retry policy of an Albert LLM slot (``run_llm_slot``, decision 15).
+
+    Attributes:
+        retry: ``RetryPolicy`` of the single retry layer (not ``single_attempt``:
+            each attempt of the thunk is a single send, the loop is here).
+        limiter: Proactive limiter of the role, acquired outside the semaphores.
+        tokens: Estimated input tokens of one attempt (TPM budget).
+        sleep: Backoff sleep (default ``asyncio.sleep``), outside the semaphores.
+        rng: Random generator of the backoff jitter.
+        label: Label added to the retry logs.
+    """
+
+    retry: Any
+    limiter: Any = None
+    tokens: int = 0
+    sleep: Optional[Callable[[float], Any]] = None
+    rng: Any = None
+    label: Optional[str] = None
+
+
+def albert_slot_policy(role: str, tokens: int = 0, *, cfg: Any = None) -> AlbertSlotPolicy:
+    """
+    Build the slot policy of an Albert role from the server configuration.
+
+    Args:
+        role: Albert role (``notes``, ``citation``, ``book_structure``,
+            ``long_context``…), which selects the limiter budget.
+        tokens: Estimated input tokens of one attempt.
+        cfg: ``AlbertConfig`` (default: ``AlbertConfig.from_env()``).
+
+    Returns:
+        The policy: full retry policy, process-wide limiter of the role.
+    """
+    cfg = cfg if cfg is not None else AlbertConfig.from_env()
+    return AlbertSlotPolicy(
+        retry=_albert_module("retry").RetryPolicy.from_config(cfg),
+        limiter=_albert_module("limiter").get_limiter(role, cfg),
+        tokens=int(tokens or 0),
+        label=role,
+    )
+
+
+def albert_estimate_tokens(payload: Any, cfg: Any = None) -> int:
+    """
+    Estimate the input tokens of a prompt or a message list (limiter budget).
+
+    Args:
+        payload: Prompt text or chat messages.
+        cfg: ``AlbertConfig`` (default: ``AlbertConfig.from_env()``).
+
+    Returns:
+        The estimate (``ALBERT_TOKEN_ESTIMATOR``), >= 0.
+    """
+    cfg = cfg if cfg is not None else AlbertConfig.from_env()
+    return _albert_module("limiter").estimate_input_tokens(payload, estimator=cfg.token_estimator)
+
+
+async def run_llm_slot(semaphore: Any, thunk: Callable[[], Any], *, albert_policy: Optional[AlbertSlotPolicy] = None) -> Any:
+    """
+    Run one blocking LLM call in a slot of the global LLM semaphore.
+
+    Without ``albert_policy`` (OpenAI, OpenRouter) this is strictly the
+    historical code: the semaphore is held while ``thunk`` runs in the default
+    executor, and any exception propagates.
+
+    With ``albert_policy`` (Albert), in this order, for each attempt:
+
+    1. the limiter of the role is acquired outside any semaphore
+       (``asyncio.to_thread``);
+    2. one single attempt (``thunk``, run in a thread) under the global
+       semaphore, then under the Albert semaphore (``ALBERT_NOTES_CONCURRENCY``),
+       always acquired in this order and released right after the send;
+    3. on a transient error, the backoff is slept outside both semaphores
+       (``asyncio.sleep``), then a new attempt.
+
+    This is the single retry layer of the Albert web path
+    (``rad_albert.retry.acall_with_retry``); the event loop is never blocked.
+
+    Args:
+        semaphore: The global LLM semaphore (``get_llm_semaphore()``).
+        thunk: Blocking callable without argument; on the Albert path it must
+            make exactly one send (``single_attempt=True``).
+        albert_policy: Albert slot policy, ``None`` for OpenAI/OpenRouter.
+
+    Returns:
+        The value returned by ``thunk``.
+
+    Raises:
+        Exception: Whatever ``thunk`` raises (after the retries on Albert:
+            account, permanent and truncation errors are never retried).
+    """
+    if albert_policy is None:
+        async with semaphore:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, thunk)
+    acall_with_retry = _albert_module("retry").acall_with_retry
+    return await acall_with_retry(
+        thunk,
+        policy=albert_policy.retry,
+        semaphore=[semaphore, get_albert_llm_semaphore()],
+        limiter=albert_policy.limiter,
+        tokens=albert_policy.tokens,
+        sleep=albert_policy.sleep,
+        rng=albert_policy.rng,
+        label=albert_policy.label,
+    )
+
+
+@dataclass(frozen=True)
+class AlbertChatRequest:
+    """
+    One Albert chat request of the web side (notes, book notes).
+
+    Attributes:
+        messages: Chat messages (system + user).
+        model: Pinned model id placed first, or ``None`` for the role chain.
+        role: Albert role (fallback chain on repeated 503, limiter, timeout).
+        max_tokens: Answer budget before the reasoning headroom (added by the
+            client for a reasoning model).
+        temperature: Sampling temperature.
+        response_format: Structured output format (``json_object`` or
+            ``json_schema``, D10), or ``None``.
+    """
+
+    messages: List[Dict[str, str]]
+    model: Optional[str]
+    role: str
+    max_tokens: int
+    temperature: Optional[float]
+    response_format: Optional[Dict[str, Any]] = None
+
+
+def _albert_role_for_prompt(messages: List[Dict[str, str]], model: Optional[str], role: str) -> Tuple[str, Optional[str]]:
+    """
+    Switch to the ``long_context`` role when the prompt is too long for the model.
+
+    The prompt size is estimated at ``len / 3.2`` tokens; beyond 0.9 × the
+    context of the target model (the explicit model, else the primary model of
+    the role), the call uses the ``long_context`` role chain (262 144 tokens).
+
+    Args:
+        messages: Chat messages.
+        model: Explicit pinned model id, or ``None``.
+        role: Requested Albert role.
+
+    Returns:
+        ``(role, model)`` unchanged, or ``("long_context", None)``.
+    """
+    if role == ALBERT_LONG_CONTEXT_ROLE:
+        return role, model
+    albert_catalog = _albert_module("catalog")
+    target = model or albert_catalog.primary_model(role, today=date.today())
+    context = albert_catalog.context_length(target) if target else None
+    if not context:
+        return role, model
+    chars = sum(len(str(m.get("content") or "")) for m in messages)
+    estimate = chars / ALBERT_CHARS_PER_TOKEN_ESTIMATE
+    if estimate > ALBERT_CONTEXT_MARGIN * context:
+        logger.warning(
+            f"Albert: prompt estimated at {int(estimate)} tokens (> {ALBERT_CONTEXT_MARGIN:.0%} of the "
+            f"{context}-token context of {target}), using the {ALBERT_LONG_CONTEXT_ROLE} role"
+        )
+        return ALBERT_LONG_CONTEXT_ROLE, None
+    return role, model
+
+
+def albert_chat_request(
+    prompt: str,
+    wire_model: Optional[str],
+    *,
+    mode: str = "extended",
+    temperature: Optional[float] = 0.2,
+    role: str = ALBERT_NOTES_ROLE,
+    response_format: Optional[Dict[str, Any]] = None,
+) -> AlbertChatRequest:
+    """
+    Build the Albert chat request of a note prompt.
+
+    Budget: ``NOTE_MODE_MAX_TOKENS[mode]`` (floor ``ALBERT_SHORT_MIN_TOKENS`` in
+    short mode); the Albert client adds the reasoning headroom
+    (``ALBERT_REASONING_HEADROOM``) and the reasoning effort for gpt-oss.
+
+    Args:
+        prompt: User prompt.
+        wire_model: Model name without the ``albert/`` prefix (alias accepted),
+            or ``None`` for the role chain.
+        mode: Note mode (``extended``, ``short``, ``pedagogique``,
+            ``evaluation``, ``book``).
+        temperature: Sampling temperature.
+        role: Albert role.
+        response_format: Structured output format, or ``None``.
+
+    Returns:
+        The request.
+    """
+    messages = [
+        {"role": "system", "content": ALBERT_NOTE_SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+    role, model = _albert_role_for_prompt(messages, albert_wire_id(wire_model), role)
+    max_tokens = NOTE_MODE_MAX_TOKENS.get(mode, 16000)
+    if mode == "short":
+        max_tokens = max(max_tokens, ALBERT_SHORT_MIN_TOKENS)
+    return AlbertChatRequest(
+        messages=messages,
+        model=model,
+        role=role,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        response_format=response_format,
+    )
+
+
+def _albert_retry_budget(max_tokens: int) -> int:
+    """Answer budget of the single retry after an empty truncated answer (× 1.5)."""
+    return int(math.ceil(max_tokens * ALBERT_TRUNCATION_BUDGET_FACTOR))
+
+
+def _albert_answer_text(result: Any) -> str:
+    """
+    Return the stripped text of an Albert chat result, never an empty note.
+
+    Only ``message.content`` is ever used (the ``reasoning`` field of gpt-oss
+    is never taken as content).
+
+    Args:
+        result: ``ChatResult`` returned by ``AlbertClient.chat``.
+
+    Returns:
+        The stripped content.
+
+    Raises:
+        ValueError: Empty content (finish reason other than ``length``).
+    """
+    finish = getattr(result, "finish_reason", None)
+    served = getattr(result, "model", None)
+    text = str(result if result is not None else "").strip()
+    if not text:
+        raise ValueError(f"Albert returned empty response (finish_reason={finish}). Model: {served}")
+    if finish in ("length", "content_filter"):
+        logger.warning(f"Albert answer truncated (finish_reason={finish}, model {served})")
+    return text
+
+
+def _generate_with_albert(
+    prompt: str,
+    wire_model: Optional[str],
+    *,
+    temperature: float,
+    mode: str,
+    albert_api_key: Optional[str],
+    role: str = ALBERT_NOTES_ROLE,
+    response_format: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Generate note content with Albert, synchronously (single retry layer: the client's).
+
+    The client retries transient errors (backoff outside any semaphore, limiter
+    of the role) and falls back along the role chain after repeated 503. An
+    empty answer with ``finish_reason=length`` gets one retry with a budget
+    × 1.5 and a ``low`` reasoning effort, then raises. There is no fallback to
+    OpenAI or OpenRouter.
+
+    Args:
+        prompt: User prompt.
+        wire_model: Model name without the ``albert/`` prefix.
+        temperature: Sampling temperature.
+        mode: Note mode (budget).
+        albert_api_key: The caller's Albert key.
+        role: Albert role.
+        response_format: Structured output format, or ``None``.
+
+    Returns:
+        The generated content.
+
+    Raises:
+        AlbertAuthError: Account error (invalid key, expired account, budget,
+            quota), including a missing key.
+        AlbertTruncatedError: Empty truncated answer twice.
+        AlbertError: Other classified errors, after the retries.
+        ValueError: Empty answer.
+    """
+    request = albert_chat_request(
+        prompt, wire_model, mode=mode, temperature=temperature, role=role, response_format=response_format
+    )
+    client = _get_albert_client(albert_api_key)
+    logger.info(f"Using Albert with model: {request.model or '(role ' + request.role + ')'}")
+    try:
+        def call(max_tokens: int, reasoning_effort: Optional[str]) -> Any:
+            """One Albert chat call (client retries and role fallback included)."""
+            return client.chat(
+                request.messages,
+                request.model,
+                role=request.role,
+                max_tokens=max_tokens,
+                temperature=request.temperature,
+                response_format=request.response_format,
+                reasoning_effort=reasoning_effort,
+            )
+
+        try:
+            result = call(request.max_tokens, None)
+        except AlbertTruncatedError:
+            budget = _albert_retry_budget(request.max_tokens)
+            logger.warning(
+                f"Albert returned an empty truncated answer (finish_reason=length); "
+                f"single retry with max_tokens={budget} and reasoning effort '{ALBERT_TRUNCATION_RETRY_EFFORT}'"
+            )
+            result = call(budget, ALBERT_TRUNCATION_RETRY_EFFORT)
+    finally:
+        client.close()
+    return _albert_answer_text(result)
+
+
+async def _albert_slot_chat(
+    client: Any,
+    request: AlbertChatRequest,
+    semaphore: Any,
+    *,
+    max_tokens: int,
+    reasoning_effort: Optional[str],
+) -> Any:
+    """
+    One Albert chat call through ``run_llm_slot``, with the role fallback on 503.
+
+    Each model of the chain (explicit model first, then the role chain) is
+    tried with single-attempt sends retried by ``run_llm_slot``; after
+    ``ALBERT_BUSY_RETRIES`` answers « Model is too busy », the next model of
+    the chain is used (``ALBERT_MODEL_FALLBACK=0`` keeps the first model only).
+
+    Args:
+        client: ``AlbertClient`` built without its own limiter.
+        request: The chat request.
+        semaphore: The global LLM semaphore.
+        max_tokens: Answer budget of this call.
+        reasoning_effort: Reasoning effort (``None`` = server configuration).
+
+    Returns:
+        The ``ChatResult``.
+
+    Raises:
+        AlbertModelBusy: Every model of the chain stayed busy.
+        AlbertError: Other classified errors, after the retries.
+    """
+    chain = client.chat_chain(request.role, request.model)
+    policy = albert_slot_policy(
+        request.role, albert_estimate_tokens(request.messages, client.cfg), cfg=client.cfg
+    )
+    for index, wire in enumerate(chain):
+        thunk = functools.partial(
+            client.chat,
+            request.messages,
+            wire,
+            role=request.role,
+            max_tokens=max_tokens,
+            temperature=request.temperature,
+            response_format=request.response_format,
+            reasoning_effort=reasoning_effort,
+            single_attempt=True,
+        )
+        try:
+            return await run_llm_slot(semaphore, thunk, albert_policy=policy)
+        except AlbertModelBusy:
+            if index + 1 < len(chain):
+                logger.warning(
+                    f"Albert: model {wire} busy (503), falling back to {chain[index + 1]} (role {request.role})"
+                )
+                continue
+            raise
+    raise AlbertModelBusy(detail=f"no model available for role {request.role}")
+
+
+async def agenerate_with_albert(
+    prompt: str,
+    wire_model: Optional[str],
+    *,
+    semaphore: Any,
+    temperature: float,
+    mode: str,
+    albert_api_key: Optional[str],
+    role: str = ALBERT_NOTES_ROLE,
+    response_format: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Generate note content with Albert from the event loop (``run_llm_slot``).
+
+    Same contract as ``_generate_with_albert``, but each send holds the global
+    semaphore then the Albert semaphore only during the send; the limiter is
+    acquired and the backoff slept outside them.
+
+    Args:
+        prompt: User prompt.
+        wire_model: Model name without the ``albert/`` prefix.
+        semaphore: The global LLM semaphore (``get_llm_semaphore()``).
+        temperature: Sampling temperature.
+        mode: Note mode (budget).
+        albert_api_key: The caller's Albert key.
+        role: Albert role (``notes``, ``book_structure``…).
+        response_format: Structured output format, or ``None``.
+
+    Returns:
+        The generated content.
+
+    Raises:
+        AlbertAuthError: Account error, including a missing key.
+        AlbertTruncatedError: Empty truncated answer twice.
+        AlbertError: Other classified errors, after the retries.
+        ValueError: Empty answer.
+    """
+    request = albert_chat_request(
+        prompt, wire_model, mode=mode, temperature=temperature, role=role, response_format=response_format
+    )
+    client = _get_albert_client(albert_api_key, use_limiter=False)
+    logger.info(f"Using Albert with model: {request.model or '(role ' + request.role + ')'}")
+    try:
+        try:
+            result = await _albert_slot_chat(
+                client, request, semaphore, max_tokens=request.max_tokens, reasoning_effort=None
+            )
+        except AlbertTruncatedError:
+            budget = _albert_retry_budget(request.max_tokens)
+            logger.warning(
+                f"Albert returned an empty truncated answer (finish_reason=length); "
+                f"single retry with max_tokens={budget} and reasoning effort '{ALBERT_TRUNCATION_RETRY_EFFORT}'"
+            )
+            result = await _albert_slot_chat(
+                client, request, semaphore, max_tokens=budget, reasoning_effort=ALBERT_TRUNCATION_RETRY_EFFORT
+            )
+    finally:
+        client.close()
+    return _albert_answer_text(result)
 
 
 def _detect_language(metadata: Dict) -> str:
@@ -424,15 +1125,17 @@ def _generate_with_llm(
     temperature: float = 0.2,
     mode: str = "extended",
     openai_api_key: Optional[str] = None,
-    openrouter_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None,
+    albert_api_key: Optional[str] = None
 ) -> str:
     """
     Generate note content using LLM.
 
     Args:
         prompt: The prompt to send to the LLM
-        model: Model name (e.g., "gpt-4o-mini" or "google/gemini-2.5-flash").
-               If None, uses the default model (resolve_default_llm_model).
+        model: Model name (e.g., "gpt-4o-mini", "google/gemini-2.5-flash" or
+               "albert/gpt-oss-120b"). If None, uses the default model
+               (resolve_default_llm_model).
         temperature: Sampling temperature (0.0 to 1.0)
         mode: Note generation mode. Determines max_tokens:
               - "extended": 16000 tokens
@@ -443,14 +1146,26 @@ def _generate_with_llm(
                         (no environment fallback).
         openrouter_api_key: Optional OpenRouter API key. If None, no OpenRouter
                             client (no environment fallback).
+        albert_api_key: Optional Albert key, used only for an ``albert/…``
+                        model (never read from the environment).
 
     Returns:
         Generated HTML content
 
     Raises:
         ValueError: If no LLM client is available
+        AlbertDisabledError: ``albert/…`` model while Albert is disabled
+        AlbertAuthError: Albert account error (no fallback to another provider)
         Exception: If the API call fails
     """
+    # Single resolver, before the provider branch: an explicit albert/ model
+    # goes to Albert, outside the historical retry loop below.
+    resolution = resolve_llm_route(model) if model else None
+    if resolution is not None and resolution.provider == PROVIDER_ALBERT:
+        return _generate_with_albert(
+            prompt, resolution.wire_model, temperature=temperature, mode=mode, albert_api_key=albert_api_key
+        )
+
     # Get clients from the credentials passed by the caller (no env fallback)
     openai_client, openrouter_client, default_model = _get_llm_clients(
         openai_api_key=openai_api_key,
@@ -461,9 +1176,14 @@ def _generate_with_llm(
     if not model:
         model = default_model
         logger.info(f"No model specified, using default: {model}")
+        resolution = resolve_llm_route(model)
+        if resolution.provider == PROVIDER_ALBERT:
+            return _generate_with_albert(
+                prompt, resolution.wire_model, temperature=temperature, mode=mode, albert_api_key=albert_api_key
+            )
 
-    # Detect which client to use based on model format
-    use_openrouter = "/" in model  # OpenRouter models have format "provider/model"
+    # Detect which client to use (OpenRouter models have format "provider/model")
+    use_openrouter = resolution.provider == PROVIDER_OPENROUTER
 
     if use_openrouter:
         if not openrouter_client:
@@ -619,7 +1339,8 @@ def build_note_html(
     use_llm: bool = True,
     mode: str = "extended",
     openai_api_key: Optional[str] = None,
-    openrouter_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None,
+    albert_api_key: Optional[str] = None
 ) -> Tuple[str, str]:
     """
     Build a reading note in HTML format with a unique sentinel.
@@ -630,7 +1351,7 @@ def build_note_html(
         metadata: Dictionary with item metadata (title, authors, abstract, etc.)
         text_content: Full text content (texteocr). If None, will use abstract only.
         model: LLM model to use. If None, uses the default model (resolve_default_llm_model).
-               Examples: "gpt-4o-mini", "google/gemini-2.5-flash"
+               Examples: "gpt-4o-mini", "google/gemini-2.5-flash", "albert/gpt-oss-120b"
         use_llm: Whether to use LLM or fallback to template (default: True)
         mode: Note generation mode. One of:
               - "extended": Full analysis [FICHE] (2500-3000 words)
@@ -641,6 +1362,9 @@ def build_note_html(
                         If None, no OpenAI client (no environment fallback).
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
                            If None, no OpenRouter client (no environment fallback).
+        albert_api_key: Optional Albert key, used only for an ``albert/…`` model.
+                        Albert account errors are raised (never replaced by the
+                        template); other Albert failures fall back to the template.
 
     Returns:
         Tuple of (sentinel, note_html):
@@ -681,8 +1405,12 @@ def build_note_html(
     language = _detect_language(metadata)
     logger.info(f"Generating note in language: {language} (mode: {mode})")
 
+    # Albert is available as soon as the model selects it (a missing key is an
+    # account error raised below, never a silent template)
+    albert_selected = use_llm and resolve_llm_route(model).provider == PROVIDER_ALBERT
+
     # Generate the note body
-    if use_llm and (openai_client or openrouter_client):
+    if use_llm and (openai_client or openrouter_client or albert_selected):
         try:
             # Use text_content if available, otherwise use abstract
             content = text_content or metadata.get("abstract", "")
@@ -698,10 +1426,13 @@ def build_note_html(
                     model=model,
                     mode=mode,
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key
+                    openrouter_api_key=openrouter_api_key,
+                    albert_api_key=albert_api_key
                 )
                 # Add mode prefix to first h2 heading
                 body_html = _add_note_prefix(body_html, mode)
+        except ALBERT_JOB_ABORT_ERRORS:
+            raise
         except Exception as e:
             logger.error(f"LLM generation failed, using template fallback: {e}")
             body_html = _fallback_template(metadata, language)
@@ -724,7 +1455,8 @@ def build_abstract_text(
     text_content: Optional[str] = None,
     model: Optional[str] = None,
     openai_api_key: Optional[str] = None,
-    openrouter_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None,
+    albert_api_key: Optional[str] = None
 ) -> str:
     """
     Build an abstract/summary text to enrich Zotero's abstractNote field.
@@ -740,6 +1472,7 @@ def build_abstract_text(
                         If None, no OpenAI client (no environment fallback).
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
                            If None, no OpenRouter client (no environment fallback).
+        albert_api_key: Optional Albert key, used only for an ``albert/…`` model.
 
     Returns:
         Plain text summary string (200-350 words)
@@ -771,8 +1504,11 @@ def build_abstract_text(
     language = _detect_language(metadata)
     logger.info(f"Generating abstract summary in language: {language}")
 
+    # Albert is available as soon as the model selects it
+    albert_selected = resolve_llm_route(model).provider == PROVIDER_ALBERT
+
     # Check if LLM is available
-    if not (openai_client or openrouter_client):
+    if not (openai_client or openrouter_client or albert_selected):
         logger.error("No LLM client available for abstract generation")
         raise ValueError("No LLM client available (neither OpenAI nor OpenRouter). Check your API keys in Settings.")
 
@@ -793,7 +1529,8 @@ def build_abstract_text(
             model=model,
             mode="short",
             openai_api_key=openai_api_key,
-            openrouter_api_key=openrouter_api_key
+            openrouter_api_key=openrouter_api_key,
+            albert_api_key=albert_api_key
         )
 
         # Clean up the response - remove any HTML tags that might have slipped through
@@ -857,13 +1594,15 @@ async def build_note_html_async(
     use_llm: bool = True,
     mode: str = "extended",
     openai_api_key: Optional[str] = None,
-    openrouter_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None,
+    albert_api_key: Optional[str] = None
 ) -> Tuple[str, str]:
     """
     Async version of build_note_html with global concurrency control.
 
     Uses a semaphore to limit concurrent LLM calls across all users.
-    See build_note_html for full documentation.
+    See build_note_html for full documentation. With an ``albert/…`` model, the
+    semaphore is held during each send only (``run_llm_slot``).
 
     Args:
         metadata: Dictionary with item metadata (title, authors, abstract, etc.)
@@ -877,8 +1616,18 @@ async def build_note_html_async(
               - "evaluation": Peer review evaluation grid [EVAL]
         openai_api_key: Optional OpenAI API key for secure credential passing.
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
+        albert_api_key: Optional Albert key, used only for an ``albert/…`` model.
     """
     semaphore = get_llm_semaphore()
+
+    albert = None
+    if use_llm:
+        # Default model resolved off the loop, and only while Albert is enabled
+        albert, model = await albert_route_async(model)
+    if albert is not None:
+        return await _build_note_html_albert_async(
+            metadata, text_content, albert, mode=mode, albert_api_key=albert_api_key, semaphore=semaphore
+        )
 
     async with semaphore:
         remaining = semaphore._value
@@ -895,7 +1644,8 @@ async def build_note_html_async(
                     use_llm=use_llm,
                     mode=mode,
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key
+                    openrouter_api_key=openrouter_api_key,
+                    albert_api_key=albert_api_key
                 )
             )
             return result
@@ -908,19 +1658,29 @@ async def build_abstract_text_async(
     text_content: Optional[str] = None,
     model: Optional[str] = None,
     openai_api_key: Optional[str] = None,
-    openrouter_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None,
+    albert_api_key: Optional[str] = None
 ) -> str:
     """
     Async version of build_abstract_text with global concurrency control.
 
     Uses a semaphore to limit concurrent LLM calls across all users.
-    See build_abstract_text for full documentation.
+    See build_abstract_text for full documentation. With an ``albert/…``
+    model, the semaphore is held during each send only (``run_llm_slot``).
 
     Args:
         openai_api_key: Optional OpenAI API key for secure credential passing.
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
+        albert_api_key: Optional Albert key, used only for an ``albert/…`` model.
     """
     semaphore = get_llm_semaphore()
+
+    # Default model resolved off the loop, and only while Albert is enabled
+    albert, model = await albert_route_async(model)
+    if albert is not None:
+        return await _build_abstract_text_albert_async(
+            metadata, text_content, albert, albert_api_key=albert_api_key, semaphore=semaphore
+        )
 
     async with semaphore:
         remaining = semaphore._value
@@ -935,9 +1695,132 @@ async def build_abstract_text_async(
                     text_content=text_content,
                     model=model,
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key
+                    openrouter_api_key=openrouter_api_key,
+                    albert_api_key=albert_api_key
                 )
             )
             return result
         finally:
             logger.debug("Released LLM slot")
+
+
+async def _build_note_html_albert_async(
+    metadata: Dict,
+    text_content: Optional[str],
+    albert: ProviderResolution,
+    *,
+    mode: str,
+    albert_api_key: Optional[str],
+    semaphore: Any,
+) -> Tuple[str, str]:
+    """
+    Albert branch of ``build_note_html_async`` (same contract as ``build_note_html``).
+
+    The LLM call goes through ``agenerate_with_albert`` (``run_llm_slot``: the
+    global and Albert semaphores are held during each send only). Account
+    errors are raised; any other failure falls back to the template, as on the
+    OpenAI/OpenRouter path.
+
+    Args:
+        metadata: Item metadata.
+        text_content: Full text, or ``None`` (abstract used instead).
+        albert: Albert resolution of the model.
+        mode: Note generation mode.
+        albert_api_key: The caller's Albert key.
+        semaphore: The global LLM semaphore.
+
+    Returns:
+        ``(sentinel, note_html)``.
+
+    Raises:
+        AlbertAuthError: Account error (invalid or missing key, expired
+            account, budget or quota exhausted).
+    """
+    if mode not in TEMPLATE_MAP:
+        logger.warning(f"Unknown mode '{mode}', falling back to 'extended'")
+        mode = "extended"
+
+    language = _detect_language(metadata)
+    logger.info(f"Generating note in language: {language} (mode: {mode})")
+
+    try:
+        content = text_content or metadata.get("abstract", "")
+        if not content:
+            logger.warning("No text content or abstract available, using template fallback")
+            body_html = _fallback_template(metadata, language)
+        else:
+            prompt = _build_prompt(metadata, content, language, mode=mode)
+            body_html = await agenerate_with_albert(
+                prompt,
+                albert.wire_model,
+                semaphore=semaphore,
+                temperature=0.2,
+                mode=mode,
+                albert_api_key=albert_api_key,
+            )
+            body_html = _add_note_prefix(body_html, mode)
+    except ALBERT_JOB_ABORT_ERRORS:
+        raise
+    except Exception as e:
+        logger.error(f"LLM generation failed, using template fallback: {e}")
+        body_html = _fallback_template(metadata, language)
+
+    sentinel = f"{SENTINEL_PREFIX}{uuid.uuid4()}"
+    note_html = f"<!-- {sentinel} -->\n{body_html}"
+    logger.info(f"Generated note with sentinel: {sentinel}")
+    return sentinel, note_html
+
+
+async def _build_abstract_text_albert_async(
+    metadata: Dict,
+    text_content: Optional[str],
+    albert: ProviderResolution,
+    *,
+    albert_api_key: Optional[str],
+    semaphore: Any,
+) -> str:
+    """
+    Albert branch of ``build_abstract_text_async`` (same contract as ``build_abstract_text``).
+
+    Args:
+        metadata: Item metadata.
+        text_content: Full text, or ``None`` (abstract used instead).
+        albert: Albert resolution of the model.
+        albert_api_key: The caller's Albert key.
+        semaphore: The global LLM semaphore.
+
+    Returns:
+        The plain text summary.
+
+    Raises:
+        ValueError: No text content available.
+        AlbertAuthError: Account error.
+        Exception: Any other generation failure (re-raised, as on the
+            OpenAI/OpenRouter path).
+    """
+    import re
+
+    language = _detect_language(metadata)
+    logger.info(f"Generating abstract summary in language: {language}")
+
+    content = text_content or metadata.get("abstract", "")
+    if not content:
+        logger.warning("No text content or abstract available for summary generation")
+        raise ValueError("No text content available to generate summary")
+
+    try:
+        prompt = _build_prompt(metadata, content, language, mode="short")
+        summary = await agenerate_with_albert(
+            prompt,
+            albert.wire_model,
+            semaphore=semaphore,
+            temperature=0.2,
+            mode="short",
+            albert_api_key=albert_api_key,
+        )
+        summary = re.sub(r'<[^>]+>', '', summary).strip()
+        logger.info(f"Generated abstract summary (length: {len(summary)} chars)")
+        return summary
+    except Exception as e:
+        logger.error(f"Abstract generation failed: {e}")
+        raise

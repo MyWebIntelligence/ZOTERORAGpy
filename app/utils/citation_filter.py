@@ -26,6 +26,17 @@ Output Format:
 }
 OR "NA" for irrelevant citations
 
+Albert (opt-in, ``albert/<id>`` model):
+- ``_call_llm_api`` makes one single send (``single_attempt``), max_tokens 1500
+  (+ the reasoning headroom and a ``low`` effort for gpt-oss); an empty answer
+  raises ``AlbertTruncatedError``. OpenAI/OpenRouter are never called.
+- ``pre_filter_citation`` and ``filter_citation_with_llm`` go through
+  ``run_llm_slot`` (single retry layer, no sleep while holding a semaphore,
+  no nested acquisition), outside the historical ``max_retries`` loop, with
+  the role fallback on repeated 503 answers (``citation`` role chain).
+- Pre-filter answers are read as an exact token (first word in {RELEVANT, NA},
+  otherwise the citation is kept); account errors are raised, never fail-open.
+
 Author: RAGpy Team
 Date: 2025-12-05
 """
@@ -35,13 +46,26 @@ import json
 import re
 import asyncio
 import logging
+import unicodedata
 from typing import Dict, Union, List, Optional, Tuple, Any
 from pathlib import Path
 from pydantic import BaseModel, field_validator
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from app.utils.llm_note_generator import get_llm_semaphore, _get_llm_clients
+from app.utils.llm_note_generator import (
+    ALBERT_ACCOUNT_ERRORS,
+    PROVIDER_ALBERT,
+    PROVIDER_OPENROUTER,
+    AlbertChatRequest,
+    AlbertTruncatedError,
+    _albert_slot_chat,
+    _get_albert_client,
+    _get_llm_clients,
+    albert_wire_id,
+    get_llm_semaphore,
+    resolve_llm_route,
+)
 
 # Load environment variables
 load_dotenv()
@@ -51,7 +75,17 @@ logger = logging.getLogger(__name__)
 # Default LLM model (uses OpenRouter format by default)
 # Format "provider/model" → OpenRouter (e.g., google/gemini-2.5-flash)
 # Format "model" → OpenAI direct (e.g., gpt-4o-mini)
+# Format "albert/<id>" → Albert (DINUM), when ALBERT_ENABLED=1
 DEFAULT_LLM_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
+
+# Albert branch: role of the model catalog, answer budget (the client adds the
+# reasoning headroom for gpt-oss) and reasoning effort of the filter calls.
+ALBERT_CITATION_ROLE = "citation"
+ALBERT_CITATION_MAX_TOKENS = 1500
+ALBERT_CITATION_REASONING_EFFORT = "low"
+
+# Exact tokens accepted from the Albert pre-filter answer.
+PREFILTER_TOKENS = ("RELEVANT", "NA")
 
 # Valid Zotero item types
 VALID_ZOTERO_TYPES = {
@@ -461,31 +495,43 @@ def _call_llm_api(
     model: str = DEFAULT_LLM_MODEL,
     temperature: float = 0.2,
     openai_api_key: Optional[str] = None,
-    openrouter_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None,
+    albert_api_key: Optional[str] = None
 ) -> str:
     """
-    Call LLM API (synchronous wrapper for OpenAI/OpenRouter).
+    Call LLM API (synchronous wrapper for OpenAI/OpenRouter/Albert).
 
     Args:
         prompt: Formatted prompt
-        model: Model identifier
+        model: Model identifier ("albert/<id>" selects Albert)
         temperature: Sampling temperature (0-1)
         openai_api_key: Optional OpenAI API key (falls back to env for admin users)
         openrouter_api_key: Optional OpenRouter API key (falls back to env for admin users)
+        albert_api_key: Optional Albert key, used only for an Albert model
+            (single send: the retries belong to ``run_llm_slot``)
 
     Returns:
         Raw LLM response text
 
     Raises:
         ValueError: If API call fails or no clients available
+        AlbertDisabledError: ``albert/…`` model while Albert is disabled
+        AlbertError: Albert failure (classified; never replaced by OpenAI)
     """
+    # Single resolver, before any OpenAI/OpenRouter client is built
+    resolution = resolve_llm_route(model)
+    if resolution.provider == PROVIDER_ALBERT:
+        return _call_albert_api(
+            prompt, resolution.wire_model, temperature=temperature, albert_api_key=albert_api_key
+        )
+
     openai_client, openrouter_client, default_model = _get_llm_clients(
         openai_api_key=openai_api_key,
         openrouter_api_key=openrouter_api_key
     )
 
     # Determine which client to use
-    if "/" in model:  # OpenRouter format
+    if resolution.provider == PROVIDER_OPENROUTER:  # OpenRouter format
         if not openrouter_client:
             raise ValueError("OpenRouter client not available (missing OPENROUTER_API_KEY)")
         client = openrouter_client
@@ -514,6 +560,159 @@ def _call_llm_api(
         raise ValueError(f"LLM API error: {str(e)}")
 
 
+def _call_albert_api(
+    prompt: str,
+    wire_model: str,
+    *,
+    temperature: float,
+    albert_api_key: Optional[str]
+) -> str:
+    """
+    Albert branch of ``_call_llm_api``: one single send, no retry, no limiter.
+
+    The retries, the limiter (acquired outside the semaphores) and the backoff
+    (slept outside the semaphores) belong to ``run_llm_slot`` in the async
+    callers. Budget: ``ALBERT_CITATION_MAX_TOKENS``; for a reasoning model
+    (gpt-oss) the client adds the reasoning headroom and the ``low`` effort is
+    sent. Only ``message.content`` is used (never the ``reasoning`` field).
+
+    Args:
+        prompt: Formatted prompt
+        wire_model: Model name without the ``albert/`` prefix
+        temperature: Sampling temperature
+        albert_api_key: The caller's Albert key
+
+    Returns:
+        The stripped answer text
+
+    Raises:
+        AlbertTruncatedError: Empty answer (``content`` None or blank)
+        AlbertAuthError: Account error, including a missing key
+        AlbertError: Other classified errors (single attempt)
+    """
+    client = _get_albert_client(albert_api_key, use_limiter=False)
+    try:
+        result = client.chat(
+            [{"role": "user", "content": prompt}],
+            albert_wire_id(wire_model),
+            role=ALBERT_CITATION_ROLE,
+            max_tokens=ALBERT_CITATION_MAX_TOKENS,
+            temperature=temperature,
+            reasoning_effort=ALBERT_CITATION_REASONING_EFFORT,
+            single_attempt=True,
+        )
+    finally:
+        client.close()
+    return _albert_citation_text(result)
+
+
+def _albert_citation_text(result: Any) -> str:
+    """
+    Stripped text of an Albert citation-filter answer, never an empty answer.
+
+    Only ``message.content`` is used (never the ``reasoning`` field of gpt-oss);
+    ``content`` None or blank raises, whatever the finish reason.
+
+    Args:
+        result: ``ChatResult`` returned by ``AlbertClient.chat``
+
+    Returns:
+        The stripped answer text
+
+    Raises:
+        AlbertTruncatedError: Empty answer (``content`` None or blank)
+    """
+    content = getattr(result, "content", result)
+    text = str(content).strip() if content is not None else ""
+    if not text:
+        raise AlbertTruncatedError(
+            f"Réponse Albert vide pour le filtre de citations "
+            f"(finish_reason={getattr(result, 'finish_reason', None)}, modèle {getattr(result, 'model', None)}).",
+            status=200,
+            endpoint="/v1/chat/completions",
+        )
+    logger.debug(f"Albert response received ({len(text)} chars)")
+    return text
+
+
+async def _albert_citation_call(
+    prompt: str,
+    model: str,
+    *,
+    temperature: float,
+    albert_api_key: Optional[str]
+) -> str:
+    """
+    One Albert citation-filter call from the event loop, with the role fallback on 503.
+
+    Same request as ``_call_albert_api`` (``citation`` role, budget
+    ``ALBERT_CITATION_MAX_TOKENS``, ``low`` effort for a reasoning model),
+    sent through ``_albert_slot_chat`` like the notes: each model of the chain
+    (explicit model first, then the ``citation`` role chain) gets single-attempt
+    sends retried by ``run_llm_slot`` (limiter and backoff outside the
+    semaphores); after ``ALBERT_BUSY_RETRIES`` answers « Model is too busy »,
+    the next model of the chain is used (``ALBERT_MODEL_FALLBACK=0`` keeps the
+    first model only). A 404 never triggers a fallback, and OpenAI or
+    OpenRouter are never called.
+
+    Args:
+        prompt: Formatted prompt
+        model: ``albert/<id>`` model
+        temperature: Sampling temperature
+        albert_api_key: The caller's Albert key
+
+    Returns:
+        The stripped answer text
+
+    Raises:
+        AlbertAuthError: Account error, including a missing key
+        AlbertModelBusy: Every model of the chain stayed busy
+        AlbertTruncatedError: Empty answer
+        AlbertError: Other classified errors, after the retries
+    """
+    resolution = resolve_llm_route(model)
+    request = AlbertChatRequest(
+        messages=[{"role": "user", "content": prompt}],
+        model=albert_wire_id(resolution.wire_model),
+        role=ALBERT_CITATION_ROLE,
+        max_tokens=ALBERT_CITATION_MAX_TOKENS,
+        temperature=temperature,
+    )
+    client = _get_albert_client(albert_api_key, use_limiter=False)
+    try:
+        result = await _albert_slot_chat(
+            client,
+            request,
+            get_llm_semaphore(),
+            max_tokens=ALBERT_CITATION_MAX_TOKENS,
+            reasoning_effort=ALBERT_CITATION_REASONING_EFFORT,
+        )
+    finally:
+        client.close()
+    return _albert_citation_text(result)
+
+
+def _prefilter_token(response_text: Optional[str]) -> Optional[str]:
+    """
+    Read the Albert pre-filter answer as an exact token.
+
+    The first word is normalized (accents removed, upper case, non-letters
+    dropped: ``"**NA**"``, ``"N/A"`` and ``"relevant."`` are recognized).
+
+    Args:
+        response_text: Raw LLM answer
+
+    Returns:
+        ``"RELEVANT"``, ``"NA"``, or ``None`` when the first word is neither
+    """
+    words = str(response_text or "").strip().split()
+    if not words:
+        return None
+    first = unicodedata.normalize("NFKD", words[0]).upper()
+    token = re.sub(r"[^A-Z]", "", first)
+    return token if token in PREFILTER_TOKENS else None
+
+
 async def pre_filter_citation(
     citation: Dict,
     project_name: str,
@@ -522,7 +721,8 @@ async def pre_filter_citation(
     collection_description: str,
     model: str = DEFAULT_LLM_MODEL,
     openai_api_key: Optional[str] = None,
-    openrouter_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None,
+    albert_api_key: Optional[str] = None
 ) -> bool:
     """
     Pré-filtrage rapide basé uniquement sur titre/abstract/source.
@@ -536,12 +736,17 @@ async def pre_filter_citation(
         project_description: Description du projet
         collection_name: Nom de la collection cible
         collection_description: Description de la collection
-        model: Modèle LLM à utiliser
+        model: Modèle LLM à utiliser (``albert/<id>`` : Albert)
         openai_api_key: Clé API OpenAI
         openrouter_api_key: Clé API OpenRouter
+        albert_api_key: Clé API Albert (utilisée seulement pour un modèle Albert)
 
     Returns:
         True si la citation semble pertinente, False sinon
+
+    Raises:
+        AlbertDisabledError: modèle ``albert/…`` alors qu'Albert est désactivé
+        AlbertAuthError: erreur de compte Albert (jamais convertie en « pertinent »)
 
     Example:
         >>> is_relevant = await pre_filter_citation(
@@ -582,6 +787,17 @@ INSTRUCTIONS:
 
 RÉPONSE:"""
 
+    # Résolveur unique : un modèle albert/ passe par run_llm_slot (branche dédiée)
+    if resolve_llm_route(model).provider == PROVIDER_ALBERT:
+        return await _pre_filter_citation_albert(
+            prompt,
+            title,
+            model=model,
+            openai_api_key=openai_api_key,
+            openrouter_api_key=openrouter_api_key,
+            albert_api_key=albert_api_key
+        )
+
     # Acquérir le semaphore global
     semaphore = get_llm_semaphore()
 
@@ -616,6 +832,63 @@ RÉPONSE:"""
             return True
 
 
+async def _pre_filter_citation_albert(
+    prompt: str,
+    title: str,
+    *,
+    model: str,
+    openai_api_key: Optional[str],
+    openrouter_api_key: Optional[str],
+    albert_api_key: Optional[str]
+) -> bool:
+    """
+    Branche Albert du pré-filtre : ``run_llm_slot`` et lecture par jeton exact.
+
+    Un seul envoi par essai sous les sémaphores (global puis Albert), limiteur
+    acquis et attente de réessai hors sémaphores ; aucune boucle de réessai
+    supplémentaire. Après des 503 répétés, repli sur le modèle suivant de la
+    chaîne du rôle ``citation`` (``_albert_citation_call``). Réponse : premier
+    mot normalisé ``NA`` → non pertinent, ``RELEVANT`` → pertinent, autre →
+    citation gardée. Fail-open conservé pour les autres erreurs (y compris une
+    chaîne entièrement surchargée), sauf les erreurs de compte, qui remontent.
+
+    Args:
+        prompt: Prompt de pré-filtrage
+        title: Titre de la citation (journaux)
+        model: Modèle ``albert/<id>``
+        openai_api_key: Clé API OpenAI (jamais utilisée sur cette branche)
+        openrouter_api_key: Clé API OpenRouter (jamais utilisée sur cette branche)
+        albert_api_key: Clé API Albert
+
+    Returns:
+        True si la citation est gardée, False si la réponse est exactement NA
+
+    Raises:
+        AlbertAuthError: erreur de compte (clé, compte expiré, budget, quota)
+    """
+    try:
+        response_text = await _albert_citation_call(
+            prompt,
+            model,
+            temperature=0.1,  # Très déterministe
+            albert_api_key=albert_api_key
+        )
+    except ALBERT_ACCOUNT_ERRORS:
+        raise
+    except Exception as e:
+        logger.warning(f"Pre-filter failed for '{title[:30]}': {e}")
+        # En cas d'erreur, considérer comme potentiellement pertinent
+        return True
+
+    token = _prefilter_token(response_text)
+    is_relevant = token != "NA"
+    logger.debug(
+        f"Pre-filter result for '{title[:40]}...': "
+        f"{'RELEVANT' if is_relevant else 'NA'} (Albert, token={token})"
+    )
+    return is_relevant
+
+
 async def filter_citation_with_llm(
     citation: Dict,
     web_content: str,
@@ -627,7 +900,8 @@ async def filter_citation_with_llm(
     model: str = DEFAULT_LLM_MODEL,
     max_retries: int = 1,
     openai_api_key: Optional[str] = None,
-    openrouter_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None,
+    albert_api_key: Optional[str] = None
 ) -> Union[Dict, str]:
     """
     Filter citation using LLM with global concurrency control.
@@ -639,6 +913,10 @@ async def filter_citation_with_llm(
     4. Parses and validates response
     5. Returns structured result or "NA"
 
+    With an ``albert/<id>`` model, steps 2-3 go through ``run_llm_slot`` (single
+    retry layer, semaphores held during each send only); ``max_retries`` and
+    the 2-second sleep of the historical loop do not apply.
+
     Args:
         citation: Citation dictionary (from PopCitation.dict())
         web_content: Extracted web content text
@@ -648,9 +926,10 @@ async def filter_citation_with_llm(
         collection_name: Target Zotero collection
         collection_description: Collection description
         model: LLM model identifier
-        max_retries: Number of retries on failure
+        max_retries: Number of retries on failure (OpenAI/OpenRouter only)
         openai_api_key: Optional OpenAI API key (for non-admin users)
         openrouter_api_key: Optional OpenRouter API key (for non-admin users)
+        albert_api_key: Optional Albert key, used only for an Albert model
 
     Returns:
         If relevant: Dictionary with keys:
@@ -661,6 +940,8 @@ async def filter_citation_with_llm(
 
     Raises:
         ValueError: If LLM call fails after retries or response invalid
+        AlbertDisabledError: ``albert/…`` model while Albert is disabled
+        AlbertAuthError: Albert account error (never converted to ValueError)
 
     Examples:
         >>> result = await filter_citation_with_llm(
@@ -687,6 +968,18 @@ async def filter_citation_with_llm(
         collection_name=collection_name,
         collection_description=collection_description
     )
+
+    # Single resolver: an albert/ model goes through run_llm_slot, outside the
+    # retry loop below
+    if resolve_llm_route(model).provider == PROVIDER_ALBERT:
+        return await _filter_citation_with_albert(
+            citation,
+            prompt,
+            model=model,
+            openai_api_key=openai_api_key,
+            openrouter_api_key=openrouter_api_key,
+            albert_api_key=albert_api_key
+        )
 
     # Get global semaphore
     semaphore = get_llm_semaphore()
@@ -719,58 +1012,8 @@ async def filter_citation_with_llm(
                 if parsed == "NA":
                     return "NA"
 
-                # Validate and return structured result
-                validated = _validate_filter_result(parsed)
-                result = validated.dict()
-
-                # Post-process: Override LLM-generated fields with original citation data
-                # This prevents hallucinated URLs/DOIs from being used
-                zotero_item = result.get("zotero_item", {})
-
-                # Use original URL (article_url or fulltext_url from citation)
-                original_url = citation.get("article_url") or citation.get("fulltext_url")
-                if original_url:
-                    zotero_item["url"] = str(original_url)
-                elif not zotero_item.get("url"):
-                    # No original URL, remove any hallucinated one
-                    zotero_item["url"] = ""
-
-                # Use original DOI if available
-                original_doi = citation.get("doi")
-                if original_doi:
-                    zotero_item["DOI"] = original_doi
-
-                # Use original title if LLM truncated it
-                original_title = citation.get("title")
-                if original_title and len(original_title) > len(zotero_item.get("title", "")):
-                    zotero_item["title"] = original_title
-
-                # Inject citation count into extra field (citation:n format)
-                cites = citation.get("cites")
-                if cites is not None and isinstance(cites, int) and cites >= 0:
-                    existing_extra = zotero_item.get("extra", "") or ""
-                    citation_entry = f"citation:{cites}"
-                    if existing_extra:
-                        zotero_item["extra"] = f"{existing_extra}\n{citation_entry}"
-                    else:
-                        zotero_item["extra"] = citation_entry
-                    logger.debug(f"Added citation count to extra field: {citation_entry}")
-
-                # Clean up "N/A" values that LLM may generate
-                # Zotero API rejects these as invalid values
-                na_patterns = {"N/A", "n/a", "N.A.", "n.a.", "NA", "na", "None", "null", "undefined", "-"}
-                fields_to_clean = ["DOI", "ISSN", "ISBN", "pages", "volume", "issue", "callNumber"]
-                for field in fields_to_clean:
-                    if field in zotero_item and zotero_item[field] in na_patterns:
-                        logger.debug(f"Cleaning N/A value from field {field}")
-                        zotero_item[field] = ""
-
-                # Sanitize item: remove invalid fields for this itemType
-                # This prevents errors like "'DOI' is not a valid field for type 'bookSection'"
-                zotero_item = sanitize_zotero_item(zotero_item)
-
-                result["zotero_item"] = zotero_item
-                return result
+                # Validate, post-process and return structured result
+                return _finalize_filter_result(parsed, citation)
 
             except Exception as e:
                 last_error = e
@@ -781,6 +1024,131 @@ async def filter_citation_with_llm(
         # All retries failed
         logger.error(f"Citation filtering failed after {max_retries + 1} attempts: {str(last_error)}")
         raise ValueError(f"Citation filtering failed: {str(last_error)}")
+
+
+def _finalize_filter_result(parsed: Dict, citation: Dict) -> Dict:
+    """
+    Validate a parsed filter answer and override its fields with the citation data.
+
+    Shared by every provider: hallucinated URL/DOI/title are replaced by the
+    original citation values, the citation count is added to ``extra``,
+    "N/A"-like values are cleaned and the item is sanitized for its itemType.
+
+    Args:
+        parsed: JSON dictionary parsed from the LLM answer
+        citation: Original citation dictionary
+
+    Returns:
+        The structured result (relevance_score, relevance_reason, zotero_item)
+
+    Raises:
+        ValueError: If validation fails
+    """
+    # Validate and return structured result
+    validated = _validate_filter_result(parsed)
+    result = validated.dict()
+
+    # Post-process: Override LLM-generated fields with original citation data
+    # This prevents hallucinated URLs/DOIs from being used
+    zotero_item = result.get("zotero_item", {})
+
+    # Use original URL (article_url or fulltext_url from citation)
+    original_url = citation.get("article_url") or citation.get("fulltext_url")
+    if original_url:
+        zotero_item["url"] = str(original_url)
+    elif not zotero_item.get("url"):
+        # No original URL, remove any hallucinated one
+        zotero_item["url"] = ""
+
+    # Use original DOI if available
+    original_doi = citation.get("doi")
+    if original_doi:
+        zotero_item["DOI"] = original_doi
+
+    # Use original title if LLM truncated it
+    original_title = citation.get("title")
+    if original_title and len(original_title) > len(zotero_item.get("title", "")):
+        zotero_item["title"] = original_title
+
+    # Inject citation count into extra field (citation:n format)
+    cites = citation.get("cites")
+    if cites is not None and isinstance(cites, int) and cites >= 0:
+        existing_extra = zotero_item.get("extra", "") or ""
+        citation_entry = f"citation:{cites}"
+        if existing_extra:
+            zotero_item["extra"] = f"{existing_extra}\n{citation_entry}"
+        else:
+            zotero_item["extra"] = citation_entry
+        logger.debug(f"Added citation count to extra field: {citation_entry}")
+
+    # Clean up "N/A" values that LLM may generate
+    # Zotero API rejects these as invalid values
+    na_patterns = {"N/A", "n/a", "N.A.", "n.a.", "NA", "na", "None", "null", "undefined", "-"}
+    fields_to_clean = ["DOI", "ISSN", "ISBN", "pages", "volume", "issue", "callNumber"]
+    for field in fields_to_clean:
+        if field in zotero_item and zotero_item[field] in na_patterns:
+            logger.debug(f"Cleaning N/A value from field {field}")
+            zotero_item[field] = ""
+
+    # Sanitize item: remove invalid fields for this itemType
+    # This prevents errors like "'DOI' is not a valid field for type 'bookSection'"
+    zotero_item = sanitize_zotero_item(zotero_item)
+
+    result["zotero_item"] = zotero_item
+    return result
+
+
+async def _filter_citation_with_albert(
+    citation: Dict,
+    prompt: str,
+    *,
+    model: str,
+    openai_api_key: Optional[str],
+    openrouter_api_key: Optional[str],
+    albert_api_key: Optional[str]
+) -> Union[Dict, str]:
+    """
+    Albert branch of ``filter_citation_with_llm`` (``run_llm_slot``, no outer loop).
+
+    One send per attempt under the global then the Albert semaphore; the
+    limiter is acquired and the backoff slept outside them; the historical
+    ``max_retries`` loop and its 2-second sleep are bypassed (single retry
+    layer). After repeated 503 answers, the next model of the ``citation``
+    role chain is used (``_albert_citation_call``). The global semaphore is
+    never held by this function around the slot, so there is no nested
+    acquisition.
+
+    Args:
+        citation: Citation dictionary
+        prompt: Formatted filter prompt
+        model: ``albert/<id>`` model
+        openai_api_key: OpenAI key (never used on this branch)
+        openrouter_api_key: OpenRouter key (never used on this branch)
+        albert_api_key: The caller's Albert key
+
+    Returns:
+        Structured result, or "NA"
+
+    Raises:
+        AlbertAuthError: Account error (aborts the citation job)
+        ValueError: Any other failure ("Citation filtering failed: …")
+    """
+    try:
+        response_text = await _albert_citation_call(
+            prompt,
+            model,
+            temperature=0.2,
+            albert_api_key=albert_api_key
+        )
+        parsed = _parse_llm_response(response_text)
+        if parsed == "NA":
+            return "NA"
+        return _finalize_filter_result(parsed, citation)
+    except ALBERT_ACCOUNT_ERRORS:
+        raise
+    except Exception as e:
+        logger.error(f"Citation filtering failed (Albert): {str(e)}")
+        raise ValueError(f"Citation filtering failed: {str(e)}") from e
 
 
 def infer_item_type_from_source(source: Optional[str]) -> str:
