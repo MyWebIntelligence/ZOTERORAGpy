@@ -2,46 +2,51 @@
 Celery Tasks: Embedding Generation
 ==================================
 
-This module contains Celery tasks for generating dense and sparse embeddings.
-It wraps the rad_chunk.py script functionality for asynchronous execution
-via Celery workers.
+This module contains the Celery tasks that generate dense and sparse
+embeddings. Like the HTTP routes ``POST /dense_embedding_generation`` and
+``POST /sparse_embedding_generation``, they run ``scripts/rad_chunk.py
+--phase dense|sparse`` in a subprocess (same argv, same timeout) through
+``app.tasks.runner``, with the environment of the submitting user
+(``build_subprocess_env``, user loaded from ``user_id``).
 
 Tasks:
     dense_embedding_task: Generate dense embeddings using OpenAI
     sparse_embedding_task: Generate sparse embeddings using spaCy
 
 Features:
-    - Automatic retry on API rate limits
-    - Progress reporting via task state updates
+    - Retry limited to infrastructure errors (``runner.INFRASTRUCTURE_ERRORS``);
+      a non-zero exit (rate limits included: the script has its own retries),
+      a timeout or a missing credential is never retried
+    - Progress reporting from the script's ``PROGRESS|...`` lines
     - Session status tracking in database
     - Prometheus metrics integration
 """
 import os
-import sys
 import json
 import logging
 from datetime import datetime
 from celery import Task
+from celery.exceptions import Ignore
 
 from app.celery_app import celery_app
-
-# Add scripts directory to path for imports
-SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), '../../scripts')
-sys.path.insert(0, os.path.abspath(SCRIPTS_DIR))
+from app.tasks import runner
 
 logger = logging.getLogger(__name__)
 
 
 class EmbeddingTask(Task):
     """
-    Base task class with automatic retry for embedding tasks.
+    Base task class for embedding tasks.
 
-    Includes special handling for API rate limits with longer backoff.
+    Attributes:
+        autoretry_for: Infrastructure errors only (database, process spawn)
+        retry_kwargs: Retry configuration
+        retry_backoff: Enable exponential backoff
     """
-    autoretry_for = (Exception,)
+    autoretry_for = runner.INFRASTRUCTURE_ERRORS
     retry_kwargs = {'max_retries': 5, 'countdown': 60}
     retry_backoff = True
-    retry_backoff_max = 600  # Max 10 minutes for rate limit recovery
+    retry_backoff_max = 600  # Max 10 minutes between retries
     retry_jitter = True
 
 
@@ -55,19 +60,21 @@ def dense_embedding_task(
     self,
     input_file: str,
     output_dir: str,
-    session_id: int
+    session_id: int,
+    user_id: int = None
 ) -> dict:
     """
     Generate dense embeddings using OpenAI text-embedding-3-large.
 
-    This task processes the output_chunks.json file and generates
-    dense vector embeddings for each chunk.
+    Runs ``rad_chunk.py --phase dense`` on output_chunks.json with the
+    OpenAI key of ``user_id`` (required, as the HTTP route).
 
     Args:
         self: Celery task instance (bound)
         input_file: Path to input JSON file (output_chunks.json)
         output_dir: Directory for output JSON file
         session_id: Database session ID for status tracking
+        user_id: ID of the user who submitted the task (required)
 
     Returns:
         dict: {
@@ -78,7 +85,8 @@ def dense_embedding_task(
         }
 
     Raises:
-        Exception: Re-raised after max retries exhausted
+        Exception: Re-raised after max retries exhausted (infrastructure
+            errors) or immediately (script failure, missing credential)
     """
     start_time = datetime.utcnow()
     output_file = os.path.join(output_dir, 'output_chunks_with_embeddings.json')
@@ -88,55 +96,32 @@ def dense_embedding_task(
         _update_session_status(session_id, 'EMBEDDING')
 
         # Report initial progress
-        self.update_state(
-            state='PROGRESS',
-            meta={
-                'current': 0,
-                'total': 100,
-                'percent': 0,
-                'item': 'Initializing embedding generation...',
-                'status': 'Starting dense embedding generation'
-            }
-        )
+        runner.report_state(self, {
+            'current': 0,
+            'total': 100,
+            'percent': 0,
+            'item': 'Initializing embedding generation...',
+            'status': 'Starting dense embedding generation'
+        })
 
         logger.info(f"Starting dense embedding task: {input_file}")
 
-        # Import and execute
-        try:
-            from scripts.rad_chunk import run_dense_phase
-        except ImportError as e:
-            logger.error(f"Failed to import rad_chunk: {e}")
-            raise
+        user = runner.load_user(user_id)
+        env = runner.build_task_env(user, runner.STAGE_DENSE)
+        cmd = runner.dense_argv(input_file, output_dir)
 
-        # Progress callback
-        def progress_callback(current: int, total: int, chunk_id: str):
-            """Update Celery task state with progress."""
-            percent = int((current / total) * 100) if total > 0 else 0
-            self.update_state(
-                state='PROGRESS',
-                meta={
-                    'current': current,
-                    'total': total,
-                    'percent': percent,
-                    'item': f'Chunk {chunk_id}' if chunk_id else '',
-                    'status': f'Generating embeddings {current}/{total}'
-                }
-            )
-
-        # Execute dense embedding generation
-        run_dense_phase(
-            input_file=input_file,
-            output_dir=output_dir,
-            progress_callback=progress_callback
+        result = runner.run_script(
+            cmd,
+            env,
+            on_progress=runner.make_progress_reporter(self, 'Generating embeddings'),
+            timeout=runner.DENSE_TIMEOUT
         )
+        runner.check_script_result(result, cmd, env)
 
-        # Count chunks
-        chunk_count = 0
-        if os.path.exists(output_file):
-            with open(output_file, 'r', encoding='utf-8') as f:
-                chunks = json.load(f)
-                chunk_count = len(chunks) if isinstance(chunks, list) else 0
+        if not os.path.exists(output_file):
+            raise runner.ScriptFailedError("Output file not created")
 
+        chunk_count = _count_json_items(output_file)
         duration = (datetime.utcnow() - start_time).total_seconds()
 
         # Update metrics
@@ -150,6 +135,11 @@ def dense_embedding_task(
             "output": output_file,
             "duration_seconds": duration
         }
+
+    except runner.ScriptRevokedError as e:
+        # Revoked while the script ran: keep the REVOKED state set by the worker.
+        _update_session_status(session_id, 'ERROR', error_message=str(e))
+        raise Ignore()
 
     except Exception as e:
         logger.error(f"Dense embedding task failed: {e}", exc_info=True)
@@ -167,19 +157,22 @@ def sparse_embedding_task(
     self,
     input_file: str,
     output_dir: str,
-    session_id: int
+    session_id: int,
+    user_id: int = None
 ) -> dict:
     """
     Generate sparse embeddings using spaCy NLP features.
 
-    This task processes the output_chunks_with_embeddings.json file and
-    generates sparse vector embeddings based on TF and linguistic features.
+    Runs ``rad_chunk.py --phase sparse`` on
+    output_chunks_with_embeddings.json. No external credential is required,
+    but the environment is still isolated for ``user_id``.
 
     Args:
         self: Celery task instance (bound)
         input_file: Path to input JSON (output_chunks_with_embeddings.json)
         output_dir: Directory for output JSON file
         session_id: Database session ID for status tracking
+        user_id: ID of the user who submitted the task (required)
 
     Returns:
         dict: {
@@ -190,7 +183,8 @@ def sparse_embedding_task(
         }
 
     Raises:
-        Exception: Re-raised after max retries exhausted
+        Exception: Re-raised after max retries exhausted (infrastructure
+            errors) or immediately (script failure)
     """
     start_time = datetime.utcnow()
     output_file = os.path.join(
@@ -203,55 +197,32 @@ def sparse_embedding_task(
         _update_session_status(session_id, 'EMBEDDING')
 
         # Report initial progress
-        self.update_state(
-            state='PROGRESS',
-            meta={
-                'current': 0,
-                'total': 100,
-                'percent': 0,
-                'item': 'Initializing sparse embedding...',
-                'status': 'Starting sparse embedding generation'
-            }
-        )
+        runner.report_state(self, {
+            'current': 0,
+            'total': 100,
+            'percent': 0,
+            'item': 'Initializing sparse embedding...',
+            'status': 'Starting sparse embedding generation'
+        })
 
         logger.info(f"Starting sparse embedding task: {input_file}")
 
-        # Import and execute
-        try:
-            from scripts.rad_chunk import run_sparse_phase
-        except ImportError as e:
-            logger.error(f"Failed to import rad_chunk: {e}")
-            raise
+        user = runner.load_user(user_id)
+        env = runner.build_task_env(user, runner.STAGE_SPARSE)
+        cmd = runner.sparse_argv(input_file, output_dir)
 
-        # Progress callback
-        def progress_callback(current: int, total: int, chunk_id: str):
-            """Update Celery task state with progress."""
-            percent = int((current / total) * 100) if total > 0 else 0
-            self.update_state(
-                state='PROGRESS',
-                meta={
-                    'current': current,
-                    'total': total,
-                    'percent': percent,
-                    'item': f'Chunk {chunk_id}' if chunk_id else '',
-                    'status': f'Generating sparse embeddings {current}/{total}'
-                }
-            )
-
-        # Execute sparse embedding generation
-        run_sparse_phase(
-            input_file=input_file,
-            output_dir=output_dir,
-            progress_callback=progress_callback
+        result = runner.run_script(
+            cmd,
+            env,
+            on_progress=runner.make_progress_reporter(self, 'Generating sparse embeddings'),
+            timeout=runner.SPARSE_TIMEOUT
         )
+        runner.check_script_result(result, cmd, env)
 
-        # Count chunks
-        chunk_count = 0
-        if os.path.exists(output_file):
-            with open(output_file, 'r', encoding='utf-8') as f:
-                chunks = json.load(f)
-                chunk_count = len(chunks) if isinstance(chunks, list) else 0
+        if not os.path.exists(output_file):
+            raise runner.ScriptFailedError("Output file not created")
 
+        chunk_count = _count_json_items(output_file)
         duration = (datetime.utcnow() - start_time).total_seconds()
 
         # Update session to EMBEDDED
@@ -269,10 +240,34 @@ def sparse_embedding_task(
             "duration_seconds": duration
         }
 
+    except runner.ScriptRevokedError as e:
+        # Revoked while the script ran: keep the REVOKED state set by the worker.
+        _update_session_status(session_id, 'ERROR', error_message=str(e))
+        raise Ignore()
+
     except Exception as e:
         logger.error(f"Sparse embedding task failed: {e}", exc_info=True)
         _update_session_status(session_id, 'ERROR', error_message=str(e))
         raise
+
+
+def _count_json_items(json_path: str) -> int:
+    """
+    Count the chunks of a pipeline JSON file.
+
+    Args:
+        json_path: Path to a JSON list of chunks
+
+    Returns:
+        Number of items (0 if the file is not a readable JSON list)
+    """
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return len(data) if isinstance(data, list) else 0
+    except Exception as e:
+        logger.warning(f"Could not count chunks of {json_path}: {e}")
+        return 0
 
 
 def _update_session_status(
@@ -289,7 +284,6 @@ def _update_session_status(
         error_message: Error message if status is ERROR
     """
     try:
-        from app.database.session import SessionLocal
         from app.models.pipeline_session import PipelineSession, SessionStatus
 
         status_map = {
@@ -298,7 +292,7 @@ def _update_session_status(
             'ERROR': SessionStatus.ERROR,
         }
 
-        db = SessionLocal()
+        db = runner.SessionLocal()
         try:
             session = db.query(PipelineSession).filter(
                 PipelineSession.id == session_id

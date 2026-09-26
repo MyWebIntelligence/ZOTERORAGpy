@@ -74,6 +74,7 @@ async def run_tracked_subprocess(
     # Utiliser asyncio.create_subprocess_exec pour ne pas bloquer
     process = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.DEVNULL,  # never inherit the server's stdin
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env  # Pass custom environment if provided

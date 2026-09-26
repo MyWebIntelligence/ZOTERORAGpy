@@ -5,17 +5,19 @@ Ce module teste les 4 endpoints API du workflow citation import :
 1. POST /api/projects/{project_id}/upload_pop_json - Upload JSON PoP
 2. POST /api/projects/{project_id}/filter_citations_sse - Filtrage LLM (SSE)
 3. POST /api/projects/{project_id}/import_citations_sse - Import Zotero (SSE)
-4. GET /api/projects/sessions/{session_id}/preview - Charger preview
+4. GET /api/sessions/{session_id}/preview - Charger preview
 
-Author: Claude Code
+L'utilisateur de test est non-admin : ses identifiants (factices) sont stockés
+chiffrés en base comme en production, et aucune valeur du ``.env`` ne peut les
+remplacer. Le répertoire d'uploads est un répertoire temporaire.
+
 Date: 2025-12-05
 """
 
 import json
 import os
-import tempfile
 from io import BytesIO
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,8 +30,32 @@ from app.database.base import Base
 from app.models.user import User
 from app.models.project import Project
 from app.models.pipeline_session import PipelineSession, SessionStatus
-from app.models.audit import AuditLog  # Import all models for metadata registration
+from app.models.audit import AuditLog  # noqa: F401  (registers all models for metadata)
+from app.core.credentials import encrypt_credentials, get_credential_error_message
 from app.core.security import create_access_token
+from app.routes import citations as citation_routes
+
+
+# Fake personal credentials (never real values).
+FAKE_OPENAI_KEY = "fake-openai-key"
+FAKE_ZOTERO_KEY = "fake-zotero-key"
+FAKE_ZOTERO_USER_ID = "12345"
+
+
+def _set_credentials(db_session, user, credentials):
+    """Store ``credentials`` encrypted on ``user`` (as the settings page does)."""
+    user.api_credentials = encrypt_credentials(credentials) if credentials else None
+    db_session.commit()
+    db_session.refresh(user)
+
+
+def _read_sse_events(response):
+    """Decode the ``data:`` lines of an SSE response into a list of dicts."""
+    events = []
+    for line in response.iter_lines():
+        if line.startswith("data:"):
+            events.append(json.loads(line[5:].strip()))
+    return events
 
 
 # ============================================================================
@@ -40,7 +66,6 @@ from app.core.security import create_access_token
 def test_db():
     """Create temporary file-based SQLite database for testing."""
     import tempfile
-    import os
 
     # Create temporary database file
     db_fd, db_path = tempfile.mkstemp(suffix=".db")
@@ -70,6 +95,13 @@ def test_db():
         os.unlink(db_path)
 
 
+@pytest.fixture(autouse=True)
+def uploads_dir(tmp_path, monkeypatch):
+    """Point the citation routes at a temporary uploads directory."""
+    monkeypatch.setattr(citation_routes, "UPLOAD_DIR", str(tmp_path))
+    return tmp_path
+
+
 @pytest.fixture(scope="function")
 def test_client(test_db):
     """Create FastAPI test client with overridden DB dependency and engine."""
@@ -82,6 +114,7 @@ def test_client(test_db):
 
     # Override the database dependency to return scoped sessions
     def override_get_db():
+        """Yield a session bound to the test engine."""
         session = TestSession()
         try:
             yield session
@@ -102,17 +135,19 @@ def test_client(test_db):
 
 @pytest.fixture(scope="function")
 def test_user(test_db):
-    """Create test user."""
+    """Create test user (non-admin, fake OpenAI key stored encrypted)."""
     db_session, _ = test_db  # Unpack tuple
     user = User(
         email="test@example.com",
         hashed_password="fakehash",
         is_active=True,
-        is_verified=True
+        is_verified=True,
+        api_credentials=encrypt_credentials({"openai_api_key": FAKE_OPENAI_KEY})
     )
     db_session.add(user)
     db_session.commit()
     db_session.refresh(user)
+    assert not user.is_admin
     return user
 
 
@@ -178,7 +213,7 @@ def sample_pop_json():
 class TestUploadPopJson:
     """Test POST /api/projects/{project_id}/upload_pop_json endpoint."""
 
-    def test_upload_valid_json(self, test_client, test_project, auth_headers, sample_pop_json):
+    def test_upload_valid_json(self, test_client, test_project, auth_headers, sample_pop_json, uploads_dir):
         """Test uploading valid Publish or Perish JSON."""
         # Create JSON file
         json_data = json.dumps(sample_pop_json).encode("utf-8")
@@ -204,6 +239,14 @@ class TestUploadPopJson:
         assert "session_folder" in data
         assert data["total_citations"] == 2
         assert data["requires_confirmation"] is False  # < 100
+
+        # The upload and its configuration are saved in the session folder
+        session_folder = uploads_dir / data["session_folder"]
+        assert (session_folder / "publishorperish.json").is_file()
+        config = json.loads((session_folder / "config.json").read_text(encoding="utf-8"))
+        assert config["collection_name"] == "ML Papers"
+        assert config["model"] == "gpt-4o-mini"
+        assert config["project_name"] == test_project.name
 
     def test_upload_large_batch_requires_confirmation(
         self, test_client, test_project, auth_headers
@@ -326,7 +369,13 @@ class TestUploadPopJson:
 # ============================================================================
 
 class TestFilterCitationsSSE:
-    """Test POST /api/projects/{project_id}/filter_citations_sse endpoint."""
+    """Test POST /api/projects/{project_id}/filter_citations_sse endpoint.
+
+    The route streams the events of ``process_citations_parallel``, which calls
+    ``pre_filter_citation``/``filter_citation_with_llm`` (``app.utils.citation_filter``)
+    and ``fetch_citation_content`` (``app.utils.citation_fetcher``): those are the
+    patched points.
+    """
 
     @pytest.fixture
     def mock_session_with_files(self, test_db, test_project, sample_pop_json, tmp_path):
@@ -366,27 +415,24 @@ class TestFilterCitationsSSE:
 
         return session
 
-    @patch("app.routes.citations.filter_citation_with_llm")
-    @patch("app.routes.citations.fetch_citation_content")
-    @patch("app.routes.citations.get_llm_semaphore")
+    @patch("app.utils.citation_filter.filter_citation_with_llm", new_callable=AsyncMock)
+    @patch("app.utils.citation_filter.pre_filter_citation", new_callable=AsyncMock)
+    @patch("app.utils.citation_fetcher.fetch_citation_content", new_callable=AsyncMock)
     def test_filter_citations_success(
         self,
-        mock_semaphore,
         mock_fetch,
+        mock_pre_filter,
         mock_filter,
         test_client,
+        test_db,
         test_project,
         auth_headers,
         mock_session_with_files,
         tmp_path
     ):
         """Test successful citation filtering with SSE."""
-        # Mock semaphore
-        mock_sem = AsyncMock()
-        mock_sem._value = 5
-        mock_sem.__aenter__ = AsyncMock(return_value=None)
-        mock_sem.__aexit__ = AsyncMock(return_value=None)
-        mock_semaphore.return_value = mock_sem
+        # Both citations pass the quick pre-filter
+        mock_pre_filter.return_value = True
 
         # Mock fetch (returns empty content)
         mock_fetch.return_value = ("", "none")
@@ -402,25 +448,15 @@ class TestFilterCitationsSSE:
             "NA"  # Skipped
         ]
 
-        # Patch UPLOAD_DIR to use tmp_path
-        with patch("app.routes.citations.UPLOAD_DIR", str(tmp_path)):
-            response = test_client.post(
-                f"/api/projects/{test_project.id}/filter_citations_sse",
-                data={"session_id": mock_session_with_files.id},
-                headers=auth_headers,
-                stream=True
-            )
-
-        assert response.status_code == 200
-        assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
-
-        # Parse SSE events
-        events = []
-        for line in response.iter_lines():
-            line = line.decode("utf-8")
-            if line.startswith("data:"):
-                event_data = json.loads(line[5:].strip())
-                events.append(event_data)
+        with test_client.stream(
+            "POST",
+            f"/api/projects/{test_project.id}/filter_citations_sse",
+            data={"session_id": mock_session_with_files.id},
+            headers=auth_headers
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+            events = _read_sse_events(response)
 
         # Check events sequence
         assert events[0]["type"] == "init"
@@ -436,6 +472,14 @@ class TestFilterCitationsSSE:
         assert events[3]["relevant"] == 1
         assert events[3]["skipped"] == 1
 
+        # The user's own (decrypted) key and the configured model reach the filter
+        assert mock_pre_filter.await_count == 2
+        assert mock_filter.await_count == 2
+        filter_kwargs = mock_filter.await_args.kwargs
+        assert filter_kwargs["model"] == "gpt-4o-mini"
+        assert (filter_kwargs["openai_api_key"] == FAKE_OPENAI_KEY) is True
+        assert filter_kwargs["openrouter_api_key"] is None
+
         # Verify preview.json was created
         preview_path = tmp_path / mock_session_with_files.session_folder / "preview.json"
         assert preview_path.exists()
@@ -445,6 +489,38 @@ class TestFilterCitationsSSE:
 
         assert len(preview["relevant"]) == 1
         assert len(preview["skipped"]) == 1
+        assert preview["relevant"][0]["zotero_data"]["DOI"] == "10.1234/ml-nlp-2024"
+
+        # Session is ready for import
+        db_session, _ = test_db
+        db_session.expire_all()
+        session = db_session.get(PipelineSession, mock_session_with_files.id)
+        assert session.status == SessionStatus.FILTERED
+
+    @patch("app.utils.citation_filter.pre_filter_citation", new_callable=AsyncMock)
+    def test_filter_without_openai_key(
+        self, mock_pre_filter, test_client, test_db, test_user, test_project, auth_headers,
+        mock_session_with_files
+    ):
+        """A non-admin without a personal OpenAI key gets a credential error, even with a server key."""
+        db_session, _ = test_db
+        _set_credentials(db_session, test_user, {})
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "fake-server-openai-key"}):
+            with test_client.stream(
+                "POST",
+                f"/api/projects/{test_project.id}/filter_citations_sse",
+                data={"session_id": mock_session_with_files.id},
+                headers=auth_headers
+            ) as response:
+                events = _read_sse_events(response)
+
+        assert events == [{
+            "type": "error",
+            "message": get_credential_error_message("openai_api_key"),
+            "credential_required": "openai_api_key"
+        }]
+        mock_pre_filter.assert_not_called()
 
     def test_filter_without_upload(
         self, test_client, test_db, test_project, auth_headers
@@ -462,22 +538,17 @@ class TestFilterCitationsSSE:
         db_session.commit()
         db_session.refresh(session)
 
-        response = test_client.post(
+        with test_client.stream(
+            "POST",
             f"/api/projects/{test_project.id}/filter_citations_sse",
             data={"session_id": session.id},
-            headers=auth_headers,
-            stream=True
-        )
-
-        # Should return error event
-        events = []
-        for line in response.iter_lines():
-            line = line.decode("utf-8")
-            if line.startswith("data:"):
-                event_data = json.loads(line[5:].strip())
-                events.append(event_data)
+            headers=auth_headers
+        ) as response:
+            # Should return error event
+            events = _read_sse_events(response)
 
         assert any(e.get("type") == "error" for e in events)
+        assert events[-1] == {"type": "error", "message": "Citations JSON not found"}
 
 
 # ============================================================================
@@ -555,22 +626,26 @@ class TestImportCitationsSSE:
 
     @patch("app.routes.citations.create_or_update_item")
     @patch("app.routes.citations.get_or_create_collection")
-    @patch.dict(os.environ, {
-        "ZOTERO_API_KEY": "test_key",
-        "ZOTERO_LIBRARY_TYPE": "user",
-        "ZOTERO_USER_ID": "12345"
-    })
     def test_import_citations_success(
         self,
         mock_get_collection,
         mock_create_item,
         test_client,
+        test_db,
+        test_user,
         test_project,
         auth_headers,
         mock_session_with_preview,
         tmp_path
     ):
         """Test successful citation import to Zotero."""
+        db_session, _ = test_db
+        _set_credentials(db_session, test_user, {
+            "openai_api_key": FAKE_OPENAI_KEY,
+            "zotero_api_key": FAKE_ZOTERO_KEY,
+            "zotero_user_id": FAKE_ZOTERO_USER_ID,
+        })
+
         # Mock collection creation
         mock_get_collection.return_value = {
             "key": "COLL123",
@@ -597,26 +672,17 @@ class TestImportCitationsSSE:
         # Import all citations (indices [0, 1])
         selected_indices = json.dumps([0, 1])
 
-        with patch("app.routes.citations.UPLOAD_DIR", str(tmp_path)):
-            response = test_client.post(
-                f"/api/projects/{test_project.id}/import_citations_sse",
-                data={
-                    "session_id": mock_session_with_preview.id,
-                    "selected_indices": selected_indices
-                },
-                headers=auth_headers,
-                stream=True
-            )
-
-        assert response.status_code == 200
-
-        # Parse SSE events
-        events = []
-        for line in response.iter_lines():
-            line = line.decode("utf-8")
-            if line.startswith("data:"):
-                event_data = json.loads(line[5:].strip())
-                events.append(event_data)
+        with test_client.stream(
+            "POST",
+            f"/api/projects/{test_project.id}/import_citations_sse",
+            data={
+                "session_id": mock_session_with_preview.id,
+                "selected_indices": selected_indices
+            },
+            headers=auth_headers
+        ) as response:
+            assert response.status_code == 200
+            events = _read_sse_events(response)
 
         # Check events
         assert events[0]["type"] == "init"
@@ -633,39 +699,55 @@ class TestImportCitationsSSE:
         assert events[3]["updated"] == 1
         assert events[3]["errors"] == 0
 
-        # Verify session updated
-        test_db = next(get_db())
-        session = test_db.query(PipelineSession).get(mock_session_with_preview.id)
+        # The user's own Zotero library is used
+        coll_kwargs = mock_get_collection.call_args.kwargs
+        assert coll_kwargs["library_type"] == "users"
+        assert coll_kwargs["library_id"] == FAKE_ZOTERO_USER_ID
+        assert (coll_kwargs["api_key"] == FAKE_ZOTERO_KEY) is True
+        assert coll_kwargs["collection_name"] == "Test Collection"
+        # Every imported item is filed in the collection
+        for call in mock_create_item.call_args_list:
+            assert call.kwargs["item_data"]["collections"] == ["COLL123"]
+
+        # Verify session updated (in the test database)
+        db_session.expire_all()
+        session = db_session.get(PipelineSession, mock_session_with_preview.id)
         assert session.status == SessionStatus.COMPLETED
         assert session.chunk_count == 2  # Created + Updated
 
-    @patch.dict(os.environ, {}, clear=True)  # Clear env vars
+    @patch("app.routes.citations.get_or_create_collection")
     def test_import_without_zotero_credentials(
-        self, test_client, test_project, auth_headers, mock_session_with_preview, tmp_path
+        self, mock_get_collection, test_client, test_project, auth_headers, mock_session_with_preview, tmp_path
     ):
-        """Test import without Zotero credentials fails."""
+        """Test import without Zotero credentials fails.
+
+        The user has no personal Zotero key; a server-side key must not be
+        used for a non-admin user.
+        """
         selected_indices = json.dumps([0])
 
-        with patch("app.routes.citations.UPLOAD_DIR", str(tmp_path)):
-            response = test_client.post(
+        with patch.dict(os.environ, {
+            "ZOTERO_API_KEY": "fake-server-zotero-key",
+            "ZOTERO_USER_ID": "99999"
+        }):
+            with test_client.stream(
+                "POST",
                 f"/api/projects/{test_project.id}/import_citations_sse",
                 data={
                     "session_id": mock_session_with_preview.id,
                     "selected_indices": selected_indices
                 },
-                headers=auth_headers,
-                stream=True
-            )
+                headers=auth_headers
+            ) as response:
+                # Should return error event
+                events = _read_sse_events(response)
 
-        # Should return error event
-        events = []
-        for line in response.iter_lines():
-            line = line.decode("utf-8")
-            if line.startswith("data:"):
-                event_data = json.loads(line[5:].strip())
-                events.append(event_data)
-
-        assert any("credentials not configured" in e.get("message", "").lower() for e in events)
+        assert events == [{
+            "type": "error",
+            "message": get_credential_error_message("zotero_api_key"),
+            "credential_required": "zotero_api_key"
+        }]
+        mock_get_collection.assert_not_called()
 
 
 # ============================================================================
@@ -673,7 +755,7 @@ class TestImportCitationsSSE:
 # ============================================================================
 
 class TestGetPreview:
-    """Test GET /api/projects/sessions/{session_id}/preview endpoint."""
+    """Test GET /api/sessions/{session_id}/preview endpoint."""
 
     @pytest.fixture
     def session_with_preview(self, test_db, test_project, tmp_path):
@@ -720,11 +802,10 @@ class TestGetPreview:
         self, test_client, auth_headers, session_with_preview, tmp_path
     ):
         """Test retrieving preview results."""
-        with patch("app.routes.citations.UPLOAD_DIR", str(tmp_path)):
-            response = test_client.get(
-                f"/api/projects/sessions/{session_with_preview.id}/preview",
-                headers=auth_headers
-            )
+        response = test_client.get(
+            f"/api/sessions/{session_with_preview.id}/preview",
+            headers=auth_headers
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -733,6 +814,7 @@ class TestGetPreview:
         assert "skipped" in data
         assert len(data["relevant"]) == 1
         assert len(data["skipped"]) == 1
+        assert data["skipped"][0]["citation"]["title"] == "Skipped Paper"
 
     def test_get_preview_not_found(self, test_client, test_db, test_project, auth_headers):
         """Test getting preview when file doesn't exist."""
@@ -747,23 +829,31 @@ class TestGetPreview:
         db_session.commit()
 
         response = test_client.get(
-            f"/api/projects/sessions/{session.id}/preview",
+            f"/api/sessions/{session.id}/preview",
             headers=auth_headers
         )
 
         assert response.status_code == 404
         assert "Preview not available" in response.json()["detail"]
 
+    def test_get_preview_unknown_session(self, test_client, auth_headers):
+        """Test getting preview of a session that does not exist."""
+        response = test_client.get("/api/sessions/999999/preview", headers=auth_headers)
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Session not found"
+
     def test_get_preview_wrong_user(
         self, test_client, test_db, session_with_preview
     ):
         """Test accessing preview from different user fails."""
         db_session, _ = test_db  # Unpack tuple
-        # Create another user
+        # Create another (active, verified) user: only the project check can refuse
         other_user = User(
             email="other@example.com",
             hashed_password="fakehash",
-            is_active=True
+            is_active=True,
+            is_verified=True
         )
         db_session.add(other_user)
         db_session.commit()
@@ -772,11 +862,12 @@ class TestGetPreview:
         other_headers = {"Authorization": f"Bearer {other_token}"}
 
         response = test_client.get(
-            f"/api/projects/sessions/{session_with_preview.id}/preview",
+            f"/api/sessions/{session_with_preview.id}/preview",
             headers=other_headers
         )
 
         assert response.status_code == 403  # Forbidden
+        assert response.json()["detail"] == "Access denied"
 
 
 if __name__ == "__main__":

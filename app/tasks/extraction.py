@@ -2,44 +2,46 @@
 Celery Task: PDF Extraction
 ===========================
 
-This module contains Celery tasks for extracting text from PDF documents
-using OCR. It wraps the rad_dataframe.py script functionality for
-asynchronous execution via Celery workers.
+This module contains the Celery task that extracts text from the documents of
+a Zotero export (OCR). Like the HTTP route ``POST /process_dataframe``, it
+runs ``scripts/rad_dataframe.py`` in a subprocess (same argv, same timeout)
+through ``app.tasks.runner``, with the environment of the submitting user
+(``build_subprocess_env``, user loaded from ``user_id``). No credential is
+read from the worker environment for a non-admin user, and none travels
+through the broker.
 
 Task:
     process_dataframe_task: Process Zotero JSON + PDFs to generate CSV
 
 Features:
-    - Automatic retry on transient failures
-    - Progress reporting via task state updates
+    - Retry limited to infrastructure errors (``runner.INFRASTRUCTURE_ERRORS``);
+      a non-zero exit, a timeout or a missing credential is never retried
+    - Progress reporting from the script's ``PROGRESS|...`` lines
     - Session status tracking in database
     - Prometheus metrics integration
 """
 import os
-import sys
 import logging
 from datetime import datetime
 from celery import Task
+from celery.exceptions import Ignore
 
 from app.celery_app import celery_app
-
-# Add scripts directory to path for imports
-SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), '../../scripts')
-sys.path.insert(0, os.path.abspath(SCRIPTS_DIR))
+from app.tasks import runner
 
 logger = logging.getLogger(__name__)
 
 
 class ExtractionTask(Task):
     """
-    Base task class with automatic retry for extraction tasks.
+    Base task class for extraction tasks.
 
     Attributes:
-        autoretry_for: Tuple of exception types to retry on
+        autoretry_for: Infrastructure errors only (database, process spawn)
         retry_kwargs: Retry configuration (max_retries, countdown)
         retry_backoff: Enable exponential backoff
     """
-    autoretry_for = (Exception,)
+    autoretry_for = runner.INFRASTRUCTURE_ERRORS
     retry_kwargs = {'max_retries': 3, 'countdown': 30}
     retry_backoff = True
     retry_backoff_max = 300  # Max 5 minutes between retries
@@ -57,13 +59,15 @@ def process_dataframe_task(
     json_path: str,
     base_dir: str,
     output_path: str,
-    session_id: int
+    session_id: int,
+    user_id: int = None
 ) -> dict:
     """
     Process Zotero JSON export and PDFs to generate CSV with extracted text.
 
-    This task wraps the rad_dataframe.py functionality for async execution.
-    It updates task state with progress information for real-time monitoring.
+    Runs ``rad_dataframe.py --json --dir --output`` with the credentials of
+    ``user_id`` (Mistral, else OpenAI, as the HTTP route). It updates task
+    state with progress information for real-time monitoring.
 
     Args:
         self: Celery task instance (bound)
@@ -71,6 +75,7 @@ def process_dataframe_task(
         base_dir: Base directory for resolving PDF paths
         output_path: Output CSV file path
         session_id: Database session ID for status tracking
+        user_id: ID of the user who submitted the task (required)
 
     Returns:
         dict: {
@@ -81,7 +86,8 @@ def process_dataframe_task(
         }
 
     Raises:
-        Exception: Re-raised after max retries exhausted
+        Exception: Re-raised after max retries exhausted (infrastructure
+            errors) or immediately (script failure, missing credential)
     """
     start_time = datetime.utcnow()
 
@@ -90,50 +96,32 @@ def process_dataframe_task(
         _update_session_status(session_id, 'EXTRACTING')
 
         # Report initial progress
-        self.update_state(
-            state='PROGRESS',
-            meta={
-                'current': 0,
-                'total': 100,
-                'percent': 0,
-                'item': 'Initializing extraction...',
-                'status': 'Starting PDF extraction'
-            }
-        )
+        runner.report_state(self, {
+            'current': 0,
+            'total': 100,
+            'percent': 0,
+            'item': 'Initializing extraction...',
+            'status': 'Starting PDF extraction'
+        })
 
         logger.info(f"Starting extraction task: {json_path} -> {output_path}")
 
-        # Import rad_dataframe module
-        try:
-            from scripts.rad_dataframe import load_zotero_to_dataframe_incremental
-        except ImportError as e:
-            logger.error(f"Failed to import rad_dataframe: {e}")
-            raise
+        user = runner.load_user(user_id)
+        env = runner.build_task_env(user, runner.STAGE_EXTRACTION)
+        cmd = runner.extraction_argv(json_path, base_dir, output_path)
 
-        # Progress callback for real-time updates
-        def progress_callback(current: int, total: int, item_title: str):
-            """Update Celery task state with progress."""
-            percent = int((current / total) * 100) if total > 0 else 0
-            self.update_state(
-                state='PROGRESS',
-                meta={
-                    'current': current,
-                    'total': total,
-                    'percent': percent,
-                    'item': item_title[:100] if item_title else '',
-                    'status': f'Processing document {current}/{total}'
-                }
-            )
-
-        # Execute extraction
-        df = load_zotero_to_dataframe_incremental(
-            json_path=json_path,
-            base_dir=base_dir,
-            output_csv=output_path,
-            progress_callback=progress_callback
+        result = runner.run_script(
+            cmd,
+            env,
+            on_progress=runner.make_progress_reporter(self, 'Processing document'),
+            timeout=runner.EXTRACTION_TIMEOUT
         )
+        runner.check_script_result(result, cmd, env)
 
-        row_count = len(df) if df is not None else 0
+        if not os.path.exists(output_path):
+            raise runner.ScriptFailedError("Output CSV not found after script execution.")
+
+        row_count = _count_csv_rows(output_path)
         duration = (datetime.utcnow() - start_time).total_seconds()
 
         # Update session status to EXTRACTED
@@ -151,14 +139,45 @@ def process_dataframe_task(
             "duration_seconds": duration
         }
 
+    except runner.ScriptRevokedError as e:
+        # Revoked while the script ran: the process group is already killed;
+        # keep the REVOKED state set by the worker.
+        _update_session_status(session_id, 'ERROR', error_message=str(e))
+        raise Ignore()
+
     except Exception as e:
         logger.error(f"Extraction task failed: {e}", exc_info=True)
 
         # Update session status to ERROR
         _update_session_status(session_id, 'ERROR', error_message=str(e))
 
-        # Re-raise for Celery retry mechanism
+        # Re-raise (retried only for infrastructure errors)
         raise
+
+
+def _count_csv_rows(csv_path: str) -> int:
+    """
+    Count the data rows of the CSV written by rad_dataframe.py.
+
+    Reads the file like the HTTP route (escapechar first, then plain).
+
+    Args:
+        csv_path: Path to the output CSV
+
+    Returns:
+        Number of rows (0 if the file cannot be parsed)
+    """
+    try:
+        import pandas as pd
+
+        try:
+            df = pd.read_csv(csv_path, escapechar='\\', dtype=str, keep_default_na=False)
+        except pd.errors.ParserError:
+            df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+        return len(df)
+    except Exception as e:
+        logger.warning(f"Could not count rows of {csv_path}: {e}")
+        return 0
 
 
 def _update_session_status(
@@ -177,7 +196,6 @@ def _update_session_status(
         error_message: Error message if status is ERROR (optional)
     """
     try:
-        from app.database.session import SessionLocal
         from app.models.pipeline_session import PipelineSession, SessionStatus
 
         # Map string status to enum
@@ -187,7 +205,7 @@ def _update_session_status(
             'ERROR': SessionStatus.ERROR,
         }
 
-        db = SessionLocal()
+        db = runner.SessionLocal()
         try:
             session = db.query(PipelineSession).filter(
                 PipelineSession.id == session_id

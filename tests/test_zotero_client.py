@@ -257,19 +257,33 @@ class TestCreateChildNote:
 class TestGetOrCreateCollection:
     """Test collection management (get or create)."""
 
+    @patch('app.utils.zotero_client.requests.post')
     @patch('app.utils.zotero_client.requests.get')
-    def test_existing_collection_found(self, mock_get):
-        """Test finding existing collection (case-insensitive)."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.headers = {"Last-Modified-Version": "100"}
-        mock_response.json.return_value = [
+    def test_existing_collection_found(self, mock_get, mock_post):
+        """Test finding existing collection (case-insensitive).
+
+        A name match is verified before reuse: GET of the collection itself
+        (not in the trash) then GET of one of its items (usable).
+        """
+        list_response = Mock()
+        list_response.status_code = 200
+        list_response.headers = {"Last-Modified-Version": "100"}
+        list_response.json.return_value = [
             {
                 "key": "COLL123",
                 "data": {"name": "My Collection"}
             }
         ]
-        mock_get.return_value = mock_response
+        verify_response = Mock()
+        verify_response.status_code = 200
+        verify_response.json.return_value = {
+            "key": "COLL123",
+            "data": {"name": "My Collection"}
+        }
+        items_response = Mock()
+        items_response.status_code = 200
+        items_response.json.return_value = []
+        mock_get.side_effect = [list_response, verify_response, items_response]
 
         result = zotero_client.get_or_create_collection(
             "users", "123", "my collection", api_key="test_key"
@@ -278,6 +292,46 @@ class TestGetOrCreateCollection:
         assert result["key"] == "COLL123"
         assert result["created"] is False
         assert result["name"] == "My Collection"
+        assert result["version"] == "100"
+        urls = [c.args[0] for c in mock_get.call_args_list]
+        assert urls[1].endswith("/users/123/collections/COLL123")
+        assert urls[2].endswith("/users/123/collections/COLL123/items?limit=1")
+        mock_post.assert_not_called()
+
+    @patch('app.utils.zotero_client.get_library_version')
+    @patch('app.utils.zotero_client.requests.post')
+    @patch('app.utils.zotero_client.requests.get')
+    def test_trashed_collection_not_reused(self, mock_get, mock_post, mock_get_version):
+        """A name match whose collection is in the trash is not reused: a new one is created."""
+        list_response = Mock()
+        list_response.status_code = 200
+        list_response.json.return_value = [
+            {"key": "COLLOLD", "data": {"name": "My Collection"}}
+        ]
+        verify_response = Mock()
+        verify_response.status_code = 200
+        verify_response.json.return_value = {
+            "key": "COLLOLD",
+            "data": {"name": "My Collection", "deleted": True}
+        }
+        mock_get.side_effect = [list_response, verify_response]
+
+        mock_get_version.return_value = "100"
+        mock_post_response = Mock()
+        mock_post_response.status_code = 200
+        mock_post_response.headers = {"Last-Modified-Version": "101"}
+        mock_post_response.json.return_value = {
+            "successful": {"0": {"key": "COLLNEW", "data": {"name": "My Collection"}}}
+        }
+        mock_post.return_value = mock_post_response
+
+        result = zotero_client.get_or_create_collection(
+            "users", "123", "My Collection", api_key="test_key"
+        )
+
+        assert result["created"] is True
+        assert result["key"] == "COLLNEW"
+        mock_post.assert_called_once()
 
     @patch('app.utils.zotero_client.get_library_version')
     @patch('app.utils.zotero_client.requests.post')
@@ -436,11 +490,12 @@ class TestSearchItemByTitle:
         ]
         mock_get.return_value = mock_response
 
-        item_key = zotero_client.search_item_by_title(
+        item_keys = zotero_client.search_item_by_title(
             "users", "123", "Machine Learning  A Survey 2024", "test_key"
         )
 
-        assert item_key == "ITEM789"
+        # Every matching item is returned (the caller updates all of them).
+        assert item_keys == ["ITEM789"]
 
     @patch('app.utils.zotero_client.requests.get')
     def test_item_not_found_by_title(self, mock_get):
@@ -450,17 +505,39 @@ class TestSearchItemByTitle:
         mock_response.json.return_value = []
         mock_get.return_value = mock_response
 
-        item_key = zotero_client.search_item_by_title(
+        item_keys = zotero_client.search_item_by_title(
             "users", "123", "Completely Different Title", "test_key"
         )
 
-        assert item_key is None
+        assert item_keys == []
 
-    def test_short_title_returns_none(self):
-        """Test that very short titles are skipped."""
+    @patch('app.utils.zotero_client.requests.get')
+    def test_short_title_returns_none(self, mock_get):
+        """Test that very short titles are skipped (no match, no request)."""
         # Less than 5 chars
-        assert zotero_client.search_item_by_title("users", "123", "AI", "key") is None
-        assert zotero_client.search_item_by_title("users", "123", "Test", "key") is None
+        assert zotero_client.search_item_by_title("users", "123", "AI", "key") == []
+        assert zotero_client.search_item_by_title("users", "123", "Test", "key") == []
+        mock_get.assert_not_called()
+
+    @patch('app.utils.zotero_client.requests.get')
+    def test_title_duplicates_resolved_by_first_author(self, mock_get):
+        """Several title matches: only those sharing the first author are kept."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {"key": "SMITH1", "data": {"title": "Deep Learning Survey",
+                                        "creators": [{"lastName": "Smith"}]}},
+            {"key": "DOE1", "data": {"title": "Deep Learning Survey",
+                                      "creators": [{"lastName": "Doe"}]}},
+        ]
+        mock_get.return_value = mock_response
+
+        item_keys = zotero_client.search_item_by_title(
+            "users", "123", "Deep Learning Survey", "test_key",
+            target_creators=[{"firstName": "J", "lastName": "Smith"}]
+        )
+
+        assert item_keys == ["SMITH1"]
 
 
 class TestNormalizeTitleForSearch:
@@ -668,8 +745,8 @@ class TestCreateOrUpdateItem:
         # DOI and URL fail
         mock_search_doi.return_value = None
         mock_search_url.return_value = None
-        # Title search finds item
-        mock_search_title.return_value = "FOUNDBYTITLE"
+        # Title search finds item (it returns every matching key)
+        mock_search_title.return_value = ["FOUNDBYTITLE"]
 
         # GET existing
         mock_get_response = Mock()

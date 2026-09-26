@@ -4,6 +4,10 @@ End-to-End Tests for Citation Import Feature
 Tests the complete workflow from uploading a Publish or Perish JSON file
 to importing citations into Zotero, using realistic test data and mocked
 external services (LLM, Zotero API, web fetching).
+
+Session folders are created in a temporary uploads directory (the routes'
+``UPLOAD_DIR`` is patched); preview results are read back through
+``GET /api/sessions/{session_id}/preview``.
 """
 
 import pytest
@@ -23,6 +27,21 @@ from app.models.user import User
 from app.models.project import Project
 from app.models.pipeline_session import PipelineSession, SessionStatus
 from app.core.security import create_access_token, get_password_hash
+from app.routes import citations as citation_routes
+
+
+def _preview_url(session_id):
+    """URL of the preview endpoint (session router, mounted under ``/api``)."""
+    return f"/api/sessions/{session_id}/preview"
+
+
+@pytest.fixture(autouse=True)
+def uploads_dir(tmp_path, monkeypatch):
+    """Temporary uploads directory used by the citation routes."""
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    monkeypatch.setattr(citation_routes, "UPLOAD_DIR", str(uploads))
+    return uploads
 
 
 # Test Database Setup
@@ -62,6 +81,7 @@ def test_client(test_db):
     TestSession = scoped_session(session_factory)
 
     def override_get_db():
+        """Yield a session bound to the test engine."""
         session = TestSession()
         try:
             yield session
@@ -259,7 +279,8 @@ class TestCitationImportE2E:
         mock_llm_responses,
         mock_web_content,
         mock_zotero_responses,
-        test_db
+        test_db,
+        uploads_dir
     ):
         """
         Test the complete citation import workflow from upload to Zotero import.
@@ -308,8 +329,7 @@ class TestCitationImportE2E:
         # (since SSE testing with complex async mocks is covered in optional Phase 2.8)
 
         # Construct absolute path to session folder
-        from app.config import UPLOADS_DIR
-        session_folder = UPLOADS_DIR / upload_result["session_folder"]
+        session_folder = uploads_dir / upload_result["session_folder"]
         preview_data = {
             "relevant": [
                 {
@@ -345,7 +365,7 @@ class TestCitationImportE2E:
 
         # Step 3: Retrieve preview results
         response = test_client.get(
-            f"/api/projects/sessions/{session_id}/preview",
+            _preview_url(session_id),
             headers=auth_headers
         )
 
@@ -385,7 +405,8 @@ class TestCitationImportE2E:
         auth_headers,
         sample_pop_file,
         mock_llm_responses,
-        test_db
+        test_db,
+        uploads_dir
     ):
         """
         Test that LLM output format is correctly validated and processed.
@@ -414,12 +435,12 @@ class TestCitationImportE2E:
                 headers=auth_headers
             )
 
+        assert response.status_code == 200
         upload_result = response.json()
         session_id = upload_result["session_id"]
 
         # Construct absolute path to session folder
-        from app.config import UPLOADS_DIR
-        session_folder = UPLOADS_DIR / upload_result["session_folder"]
+        session_folder = uploads_dir / upload_result["session_folder"]
 
         # Create preview with various LLM output formats
         preview_data = {
@@ -439,7 +460,7 @@ class TestCitationImportE2E:
 
         # Retrieve and validate
         response = test_client.get(
-            f"/api/projects/sessions/{session_id}/preview",
+            _preview_url(session_id),
             headers=auth_headers
         )
 
@@ -493,7 +514,8 @@ class TestCitationImportE2E:
         auth_headers,
         sample_pop_file,
         mock_llm_responses,
-        test_db
+        test_db,
+        uploads_dir
     ):
         """
         Test handling of malformed author names (e.g., "Smith et al.").
@@ -519,12 +541,12 @@ class TestCitationImportE2E:
                 headers=auth_headers
             )
 
+        assert response.status_code == 200
         upload_result = response.json()
         session_id = upload_result["session_id"]
 
         # Construct absolute path to session folder
-        from app.config import UPLOADS_DIR
-        session_folder = UPLOADS_DIR / upload_result["session_folder"]
+        session_folder = uploads_dir / upload_result["session_folder"]
 
         # Create preview with malformed author citation
         preview_data = {
@@ -544,7 +566,7 @@ class TestCitationImportE2E:
 
         # Retrieve and validate
         response = test_client.get(
-            f"/api/projects/sessions/{session_id}/preview",
+            _preview_url(session_id),
             headers=auth_headers
         )
 
@@ -569,7 +591,8 @@ class TestCitationImportE2E:
         auth_headers,
         sample_pop_file,
         mock_llm_responses,
-        test_db
+        test_db,
+        uploads_dir
     ):
         """
         Test that important metadata from PoP JSON is preserved through the workflow.
@@ -598,12 +621,12 @@ class TestCitationImportE2E:
                 headers=auth_headers
             )
 
+        assert response.status_code == 200
         upload_result = response.json()
         session_id = upload_result["session_id"]
 
         # Construct absolute path to session folder
-        from app.config import UPLOADS_DIR
-        session_folder = UPLOADS_DIR / upload_result["session_folder"]
+        session_folder = uploads_dir / upload_result["session_folder"]
 
         # Create preview
         citations = json.loads(sample_pop_file.read_text())
@@ -624,10 +647,11 @@ class TestCitationImportE2E:
 
         # Retrieve and validate metadata preservation
         response = test_client.get(
-            f"/api/projects/sessions/{session_id}/preview",
+            _preview_url(session_id),
             headers=auth_headers
         )
 
+        assert response.status_code == 200
         preview_result = response.json()
         original_citation = preview_result["relevant"][0]["citation"]
         zotero_item = preview_result["relevant"][0]["zotero_data"]

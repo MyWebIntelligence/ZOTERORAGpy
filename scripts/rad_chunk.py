@@ -10,7 +10,6 @@ from tqdm import tqdm
 from openai import OpenAI, RateLimitError
 import spacy
 from collections import Counter
-from dotenv import load_dotenv, find_dotenv, set_key
 import subprocess # Added for spacy download subprocess
 import logging
 
@@ -43,6 +42,18 @@ try:
 except ImportError:
     import rad_recode_cache
 
+# Chargement du .env gardé (RAGPY_DOTENV_DENY : secrets non rechargés pour un
+# sous-processus non-admin) et fournisseur historique d'un nom de modèle.
+# Modules stdlib, même import double que ci-dessus.
+try:
+    from scripts.rad_env import load_dotenv_guarded
+except ImportError:
+    from rad_env import load_dotenv_guarded
+try:
+    from scripts.rad_providers import legacy_provider
+except ImportError:
+    from rad_providers import legacy_provider
+
 # Attempt to import RecursiveCharacterTextSplitter from langchain_text_splitters
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -52,51 +63,20 @@ except ImportError:
     RecursiveCharacterTextSplitter = None
 
 # ----------------------------------------------------------------------
-# Helper function to manage .env file
-# ----------------------------------------------------------------------
-def update_env_file(key, value):
-    """Updates or adds a key-value pair to the .env file."""
-    dotenv_path = find_dotenv()  # Try to find existing .env
-    if not dotenv_path:
-        # If .env is not found by find_dotenv (e.g. in parent dirs),
-        # default to creating/using .env in the current working directory.
-        dotenv_path = os.path.join(os.getcwd(), ".env")
-        print(f".env file not found by find_dotenv(), will create/use: {dotenv_path}")
-
-    # set_key will create the file if it doesn't exist.
-    success = set_key(dotenv_path, key, value, quote_mode="always")
-    
-    if success:
-        print(f"Successfully saved/updated {key} in {dotenv_path}.")
-        # Reload dotenv so subsequent os.getenv calls in the same script run pick up the new/changed value
-        load_dotenv(dotenv_path=dotenv_path, override=True)
-    else:
-        # This case should ideally not happen if file permissions are okay.
-        print(f"Warning: python-dotenv's set_key function indicated an issue saving/updating {key} in {dotenv_path}.")
-        print("Please check file permissions and ensure the path is correct.")
-
-# ----------------------------------------------------------------------
 # Global Configuration and Initializations
 # ----------------------------------------------------------------------
 SAVE_LOCK = threading.Lock()
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file (secrets refusés non rechargés)
+load_dotenv_guarded()
 
-# OpenAI API Client Initialization
+# OpenAI API Client Initialization — jamais de saisie interactive : sans clé,
+# le client vaut None et la CLI s'arrête (exit 1) si la phase demandée l'exige.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     print("OPENAI_API_KEY not found in environment variables or .env file.")
-    user_api_key = input("Please enter your OpenAI API Key: ").strip()
-    if user_api_key:
-        OPENAI_API_KEY = user_api_key
-        save_env = input("Do you want to save this API key to a .env file for future use? (yes/no): ").strip().lower()
-        if save_env == 'yes':
-            update_env_file("OPENAI_API_KEY", user_api_key)
-    else:
-        raise ValueError("OPENAI_API_KEY is required to proceed.")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # OpenRouter Client Initialization (optional, for cost-effective alternatives)
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -936,6 +916,36 @@ def generate_sparse_embeddings(input_json_file=DEFAULT_INPUT_JSON_WITH_EMBEDDING
     print(f"Traitement des embeddings sparses terminé. Fichier sauvegardé: {output_json_file}")
     return output_json_file
 
+
+def missing_llm_client_for_phase(phase, model):
+    """Indique si un client requis par la phase CLI demandée est absent.
+
+    Garde de la CLI (plus de saisie interactive de clé) :
+
+    * ``sparse`` : n'exige aucun client (spaCy seulement) ;
+    * ``dense`` : exige le client OpenAI (embeddings ``text-embedding-3-large``) ;
+    * ``initial`` : exige un client pour le fournisseur du modèle de recodage
+      (``legacy_provider``). Pour un modèle OpenRouter, le client OpenAI suffit
+      aussi : ``gpt_recode_batch`` y replie déjà sur ``gpt-4o-mini`` quand le
+      client OpenRouter manque ;
+    * ``all`` : cumule ``initial`` et ``dense``.
+
+    Args:
+        phase: ``'initial'``, ``'dense'``, ``'sparse'`` ou ``'all'``.
+        model: modèle de recodage passé par ``--model``.
+
+    Returns:
+        ``True`` si la phase ne peut pas s'exécuter faute de client.
+    """
+    if phase in ("dense", "all") and client is None:
+        return True
+    if phase in ("initial", "all"):
+        if legacy_provider(model) == "openrouter":
+            return openrouter_client is None and client is None
+        return client is None
+    return False
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Process text data through chunking and embedding phases.")
     parser.add_argument("--input", required=True, help="Path to the input file (CSV for 'initial' phase, JSON for 'dense' and 'sparse' phases).")
@@ -1004,7 +1014,7 @@ if __name__ == '__main__':
         print("Erreur critique: Modèle spaCy (nlp) n'est pas initialisé. Arrêt.")
         logger.error("Erreur critique: Modèle spaCy (nlp) n'est pas initialisé. Arrêt.")
         exit(1)
-    if client is None:
+    if missing_llm_client_for_phase(args.phase, args.model):
         print("Erreur critique: Client OpenAI non initialisé (OPENAI_API_KEY manquante?). Arrêt.")
         logger.error("Erreur critique: Client OpenAI non initialisé (OPENAI_API_KEY manquante?). Arrêt.")
         exit(1)

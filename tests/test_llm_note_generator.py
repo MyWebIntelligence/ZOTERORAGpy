@@ -9,6 +9,50 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 from app.utils import llm_note_generator
 
+# Fake keys passed explicitly: the generator never falls back to .env here.
+FAKE_OPENAI_KEY = "fake-openai-key"
+FAKE_OPENROUTER_KEY = "fake-openrouter-key"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _chat_response(content):
+    """Build a chat.completions response object whose first choice carries ``content``."""
+    message = Mock()
+    message.content = content
+    choice = Mock()
+    choice.message = message
+    response = Mock()
+    response.choices = [choice]
+    return response
+
+
+@pytest.fixture
+def llm_clients(tmp_path):
+    """Patch the ``OpenAI`` class used by the generator with two fake clients.
+
+    The client built with the OpenRouter ``base_url`` is ``clients["openrouter"]``,
+    any other is ``clients["openai"]``. ``clients["built_with"]`` records, per
+    client, whether it was built with the expected fake key (a boolean, never
+    the key itself). ``.env`` discovery points at an absent file, so the host
+    ``.env`` is never read.
+    """
+    clients = {"openai": MagicMock(name="openai_client"),
+               "openrouter": MagicMock(name="openrouter_client"),
+               "built_with": {}}
+
+    def _factory(*args, **kwargs):
+        """Return the fake client matching the requested endpoint."""
+        if kwargs.get("base_url") == OPENROUTER_BASE_URL:
+            clients["built_with"]["openrouter"] = kwargs.get("api_key") == FAKE_OPENROUTER_KEY
+            return clients["openrouter"]
+        clients["built_with"]["openai"] = kwargs.get("api_key") == FAKE_OPENAI_KEY
+        return clients["openai"]
+
+    absent_dotenv = str(tmp_path / "absent.env")
+    with patch("app.utils.llm_note_generator.OpenAI", side_effect=_factory), \
+            patch.object(llm_note_generator, "find_dotenv", lambda *a, **k: absent_dotenv, create=True):
+        yield clients
+
 
 class TestDetectLanguage:
     """Test language detection."""
@@ -144,7 +188,7 @@ class TestFallbackTemplate:
 class TestBuildNoteHtml:
     """Test main note building function."""
 
-    def test_template_mode(self):
+    def test_template_mode(self, llm_clients):
         """Test building note with template (no LLM)."""
         metadata = {
             "title": "Test",
@@ -156,8 +200,14 @@ class TestBuildNoteHtml:
         sentinel, html = llm_note_generator.build_note_html(
             metadata,
             text_content="Test content",
-            use_llm=False
+            use_llm=False,
+            openai_api_key=FAKE_OPENAI_KEY,
+            openrouter_api_key=FAKE_OPENROUTER_KEY
         )
+
+        # use_llm=False: no LLM call at all
+        llm_clients["openai"].chat.completions.create.assert_not_called()
+        llm_clients["openrouter"].chat.completions.create.assert_not_called()
 
         # Check sentinel format
         assert sentinel.startswith("ragpy-note-id:")
@@ -167,18 +217,12 @@ class TestBuildNoteHtml:
         assert "Test" in html
         assert "<!-- ragpy-note-id:" in html
 
-    @patch('app.utils.llm_note_generator.openai_client')
-    def test_llm_mode_openai(self, mock_client):
-        """Test building note with OpenAI LLM."""
-        # Mock OpenAI response
-        mock_response = Mock()
-        mock_choice = Mock()
-        mock_message = Mock()
-        mock_message.content = "<p><strong>Ref:</strong> Test Article</p><p>Content</p>"
-        mock_choice.message = mock_message
-        mock_response.choices = [mock_choice]
-
-        mock_client.chat.completions.create.return_value = mock_response
+    def test_llm_mode_openai(self, llm_clients):
+        """Test building note with OpenAI LLM (explicit keys, plain model name)."""
+        openai_client = llm_clients["openai"]
+        openai_client.chat.completions.create.return_value = _chat_response(
+            "<p><strong>Ref:</strong> Test Article</p><p>Content</p>"
+        )
 
         metadata = {
             "title": "Test Article",
@@ -191,29 +235,26 @@ class TestBuildNoteHtml:
             metadata,
             text_content="Full text",
             model="gpt-4o-mini",
-            use_llm=True
+            use_llm=True,
+            openai_api_key=FAKE_OPENAI_KEY,
+            openrouter_api_key=FAKE_OPENROUTER_KEY
         )
 
-        # Check LLM was called
-        mock_client.chat.completions.create.assert_called_once()
+        # Check LLM was called, on the OpenAI client only, with the requested model
+        openai_client.chat.completions.create.assert_called_once()
+        assert openai_client.chat.completions.create.call_args.kwargs["model"] == "gpt-4o-mini"
+        llm_clients["openrouter"].chat.completions.create.assert_not_called()
+        assert llm_clients["built_with"]["openai"] is True
 
         # Check output
         assert sentinel.startswith("ragpy-note-id:")
         assert "Test Article" in html
         assert sentinel in html
 
-    @patch('app.utils.llm_note_generator.openrouter_client')
-    def test_llm_mode_openrouter(self, mock_client):
-        """Test building note with OpenRouter LLM."""
-        # Mock OpenRouter response
-        mock_response = Mock()
-        mock_choice = Mock()
-        mock_message = Mock()
-        mock_message.content = "<p>Generated content</p>"
-        mock_choice.message = mock_message
-        mock_response.choices = [mock_choice]
-
-        mock_client.chat.completions.create.return_value = mock_response
+    def test_llm_mode_openrouter(self, llm_clients):
+        """Test building note with OpenRouter LLM (``provider/model`` name)."""
+        openrouter_client = llm_clients["openrouter"]
+        openrouter_client.chat.completions.create.return_value = _chat_response("<p>Generated content</p>")
 
         metadata = {
             "title": "Test",
@@ -224,17 +265,42 @@ class TestBuildNoteHtml:
             metadata,
             text_content="Text",
             model="google/gemini-2.5-flash",  # OpenRouter format
-            use_llm=True
+            use_llm=True,
+            openai_api_key=FAKE_OPENAI_KEY,
+            openrouter_api_key=FAKE_OPENROUTER_KEY
         )
 
-        # Check LLM was called
-        mock_client.chat.completions.create.assert_called_once()
+        # Check LLM was called, on the OpenRouter client only
+        openrouter_client.chat.completions.create.assert_called_once()
+        assert openrouter_client.chat.completions.create.call_args.kwargs["model"] == "google/gemini-2.5-flash"
+        llm_clients["openai"].chat.completions.create.assert_not_called()
+        assert llm_clients["built_with"]["openrouter"] is True
 
         # Check output
         assert sentinel.startswith("ragpy-note-id:")
         assert "Generated content" in html
 
-    def test_no_content_fallback(self):
+    def test_llm_failure_falls_back_to_template(self, llm_clients):
+        """An LLM error never breaks note building: the template is used instead."""
+        llm_clients["openai"].chat.completions.create.side_effect = RuntimeError("boom")
+        metadata = {"title": "Test", "language": "fr"}
+
+        with patch("time.sleep"):
+            sentinel, html = llm_note_generator.build_note_html(
+                metadata,
+                text_content="Text",
+                model="gpt-4o-mini",
+                use_llm=True,
+                openai_api_key=FAKE_OPENAI_KEY,
+                openrouter_api_key=FAKE_OPENROUTER_KEY
+            )
+
+        # One call plus one retry, then the template
+        assert llm_clients["openai"].chat.completions.create.call_count == 2
+        assert sentinel in html
+        assert "Fiche de lecture" in html
+
+    def test_no_content_fallback(self, llm_clients):
         """Test fallback when no content available."""
         metadata = {
             "title": "Test",
@@ -244,8 +310,13 @@ class TestBuildNoteHtml:
         sentinel, html = llm_note_generator.build_note_html(
             metadata,
             text_content=None,  # No text
-            use_llm=True
+            use_llm=True,
+            openai_api_key=FAKE_OPENAI_KEY,
+            openrouter_api_key=FAKE_OPENROUTER_KEY
         )
+
+        # Nothing to summarise: the LLM is not called
+        llm_clients["openai"].chat.completions.create.assert_not_called()
 
         # Should use template fallback
         assert sentinel.startswith("ragpy-note-id:")
@@ -256,45 +327,59 @@ class TestBuildNoteHtml:
 class TestGenerateWithLlm:
     """Test LLM generation function."""
 
-    @patch('app.utils.llm_note_generator.openai_client')
-    def test_openai_generation(self, mock_client):
+    def test_openai_generation(self, llm_clients):
         """Test generation with OpenAI."""
-        mock_response = Mock()
-        mock_choice = Mock()
-        mock_message = Mock()
-        mock_message.content = "Generated text"
-        mock_choice.message = mock_message
-        mock_response.choices = [mock_choice]
-
-        mock_client.chat.completions.create.return_value = mock_response
+        openai_client = llm_clients["openai"]
+        openai_client.chat.completions.create.return_value = _chat_response("Generated text")
 
         result = llm_note_generator._generate_with_llm(
             prompt="Test prompt",
-            model="gpt-4o-mini"
+            model="gpt-4o-mini",
+            openai_api_key=FAKE_OPENAI_KEY,
+            openrouter_api_key=FAKE_OPENROUTER_KEY
         )
 
         assert result == "Generated text"
-        mock_client.chat.completions.create.assert_called_once()
+        openai_client.chat.completions.create.assert_called_once()
+        kwargs = openai_client.chat.completions.create.call_args.kwargs
+        assert kwargs["model"] == "gpt-4o-mini"
+        assert kwargs["messages"][-1] == {"role": "user", "content": "Test prompt"}
+        llm_clients["openrouter"].chat.completions.create.assert_not_called()
 
-    @patch('app.utils.llm_note_generator.openrouter_client')
-    def test_openrouter_generation(self, mock_client):
+    def test_openrouter_generation(self, llm_clients):
         """Test generation with OpenRouter."""
-        mock_response = Mock()
-        mock_choice = Mock()
-        mock_message = Mock()
-        mock_message.content = "OpenRouter generated"
-        mock_choice.message = mock_message
-        mock_response.choices = [mock_choice]
-
-        mock_client.chat.completions.create.return_value = mock_response
+        openrouter_client = llm_clients["openrouter"]
+        openrouter_client.chat.completions.create.return_value = _chat_response("OpenRouter generated")
 
         result = llm_note_generator._generate_with_llm(
             prompt="Test prompt",
-            model="anthropic/claude-3-5-haiku"  # OpenRouter format
+            model="mistralai/mistral-small-3.1-24b-instruct",  # OpenRouter format
+            openai_api_key=FAKE_OPENAI_KEY,
+            openrouter_api_key=FAKE_OPENROUTER_KEY
         )
 
         assert result == "OpenRouter generated"
-        mock_client.chat.completions.create.assert_called_once()
+        openrouter_client.chat.completions.create.assert_called_once()
+        kwargs = openrouter_client.chat.completions.create.call_args.kwargs
+        assert kwargs["model"] == "mistralai/mistral-small-3.1-24b-instruct"
+        llm_clients["openai"].chat.completions.create.assert_not_called()
+
+    def test_openrouter_model_without_openrouter_key_uses_openai(self, llm_clients, monkeypatch):
+        """A ``provider/model`` name without an OpenRouter key falls back to OpenAI gpt-4o-mini."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        openai_client = llm_clients["openai"]
+        openai_client.chat.completions.create.return_value = _chat_response("Fallback text")
+
+        result = llm_note_generator._generate_with_llm(
+            prompt="Test prompt",
+            model="google/gemini-2.5-flash",
+            openai_api_key=FAKE_OPENAI_KEY,
+            openrouter_api_key=""
+        )
+
+        assert result == "Fallback text"
+        assert openai_client.chat.completions.create.call_args.kwargs["model"] == "gpt-4o-mini"
+        llm_clients["openrouter"].chat.completions.create.assert_not_called()
 
 
 if __name__ == "__main__":

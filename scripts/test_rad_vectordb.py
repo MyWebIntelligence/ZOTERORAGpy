@@ -218,7 +218,38 @@ class TestRadVectorDB(unittest.TestCase):
         # In this setup, we have one "document" (implicit from sample_data) with 2 chunks.
         # If PINECONE_BATCH_SIZE >= 2, it's called once.
         self.assertEqual(mock_prepare_vectors.call_count, 1) 
-        mock_upsert.assert_called_once_with(mock_index_instance, prepared_vectors_batch1 + prepared_vectors_batch2)
+        # Le namespace est toujours transmis (None = namespace par défaut de l'index).
+        mock_upsert.assert_called_once_with(
+            mock_index_instance, prepared_vectors_batch1 + prepared_vectors_batch2, namespace=None
+        )
+
+    @patch('rad_vectordb.Pinecone')
+    @patch('rad_vectordb.upsert_batch_to_pinecone')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_insert_to_pinecone_forwards_namespace(self, mock_file_open, mock_upsert, MockPineconeClass):
+        """Un namespace explicite est transmis tel quel à chaque upsert."""
+        mock_pc_instance = MockPineconeClass.return_value
+        mock_index_instance = MagicMock()
+        mock_pc_instance.Index.return_value = mock_index_instance
+        index_description = MagicMock()
+        index_description.name = "articles"
+        mock_pc_instance.list_indexes.return_value = MagicMock(indexes=[index_description])
+        mock_file_open.return_value.read.return_value = json.dumps([self.sample_chunk_dense_only])
+        mock_upsert.return_value = True
+
+        with patch('os.path.exists', return_value=True):
+            result = rad_vectordb.insert_to_pinecone(
+                embeddings_json_file="dummy_path.json",
+                index_name="articles",
+                pinecone_api_key="fake-pinecone-key",
+                namespace="corpus-a"
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["inserted_count"], 1)
+        mock_upsert.assert_called_once()
+        self.assertEqual(mock_upsert.call_args.kwargs, {"namespace": "corpus-a"})
+        self.assertIs(mock_upsert.call_args.args[0], mock_index_instance)
 
 
     @patch('rad_vectordb.Pinecone')
@@ -447,12 +478,16 @@ class TestRadVectorDB(unittest.TestCase):
 
         with patch('os.path.exists') as mock_exists:
             mock_exists.return_value = True
-            inserted_count = rad_vectordb.insert_to_qdrant(
+            result = rad_vectordb.insert_to_qdrant(
                 "dummy.json", "test_collection", qdrant_url="http://fakeurl", qdrant_api_key="fakekey"
             )
-        
-        self.assertEqual(inserted_count, 1)
-        MockQdrantClientClass.assert_called_once_with(url="http://fakeurl", api_key="fakekey", timeout=900)
+
+        # Lot 0.a : retour unifié en dict {status, message, inserted_count}.
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["inserted_count"], 1)
+        # Client construit avec l'URL et la clé fournies (délai par défaut du client).
+        MockQdrantClientClass.assert_called_once_with(url="http://fakeurl", api_key="fakekey")
         mock_qdrant_client_instance.get_collection.assert_called_once_with(collection_name="test_collection")
         mock_qdrant_client_instance.create_collection.assert_not_called() # Should not be called if exists
         mock_upsert.assert_called_once_with(mock_qdrant_client_instance, "test_collection", prepared_points)

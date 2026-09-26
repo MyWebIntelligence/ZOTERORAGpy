@@ -21,7 +21,7 @@ import asyncio
 import html as html_module
 from typing import Dict, Tuple, Optional
 from openai import OpenAI
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values, find_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
@@ -98,55 +98,107 @@ def get_llm_semaphore() -> asyncio.Semaphore:
     return _llm_semaphore
 
 
+# Default web LLM model: environment variable name and last-resort value.
+DEFAULT_LLM_MODEL_ENV = "OPENROUTER_DEFAULT_MODEL"
+FALLBACK_LLM_MODEL = "gpt-4o-mini"
+
+
+def resolve_default_llm_model(openrouter_model: Optional[str] = None) -> str:
+    """
+    Resolve the default web LLM model (single source for the web side).
+
+    Resolution order, first non-empty value wins:
+
+    1. ``openrouter_model`` (explicit argument);
+    2. ``OPENROUTER_DEFAULT_MODEL`` read fresh, at each call, from the ``.env``
+       file found by ``find_dotenv()``, with ``dotenv_values`` (``os.environ``
+       is never modified, so no secret of the file is loaded into the process);
+    3. ``OPENROUTER_DEFAULT_MODEL`` from the process environment;
+    4. ``"gpt-4o-mini"``.
+
+    The ``.env`` file therefore wins over the process environment whenever it
+    holds a non-empty value, whatever keys the caller has. Compared with the
+    former ``_get_llm_clients`` logic:
+
+    * when a key was missing (``None``), the former overriding ``.env`` reload
+      already made the ``.env`` value win: same model, but ``os.environ`` is no
+      longer mutated;
+    * when both keys were passed, the former code read the process environment
+      only. The model now differs when the ``.env`` file and the process
+      environment disagree (a shell export, or an admin edit through
+      ``/save_credentials``, which writes ``.env`` but not ``os.environ``): the
+      ``.env`` value wins, so such an edit applies without a restart;
+    * an empty value is skipped (the former code could return ``""``).
+
+    Without a ``.env`` file (Docker image: ``.env`` is excluded by
+    ``.dockerignore`` and passed as ``env_file``), the process environment is
+    used, as before.
+
+    Args:
+        openrouter_model: Explicit default model, if the caller has one.
+
+    Returns:
+        The default model identifier (never empty).
+    """
+    if openrouter_model:
+        return openrouter_model
+    try:
+        file_value = dotenv_values(find_dotenv()).get(DEFAULT_LLM_MODEL_ENV)
+    except Exception as exc:  # unreadable file: fall back to the process environment
+        logger.debug(f"Could not read {DEFAULT_LLM_MODEL_ENV} from .env: {exc}")
+        file_value = None
+    if file_value:
+        return file_value
+    env_value = os.getenv(DEFAULT_LLM_MODEL_ENV)
+    if env_value:
+        return env_value
+    return FALLBACK_LLM_MODEL
+
+
 def _get_llm_clients(
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
     openrouter_model: Optional[str] = None
 ) -> Tuple[Optional[OpenAI], Optional[OpenAI], str]:
     """
-    Initializes and returns LLM clients.
+    Initializes and returns LLM clients from explicit credentials only.
 
-    This function accepts API keys as parameters for secure credential handling.
-    If no credentials are passed, falls back to environment variables for
-    backward compatibility.
+    API keys are never read from the environment or from ``.env`` here: callers
+    pass the keys resolved for the current user (``get_credential_or_env``,
+    which applies the role-based ``.env`` fallback for admins only). A missing
+    key simply means that the matching client is not built.
 
     Args:
-        openai_api_key: OpenAI API key. If None, uses OPENAI_API_KEY from env.
-        openrouter_api_key: OpenRouter API key. If None, uses OPENROUTER_API_KEY from env.
-        openrouter_model: Default OpenRouter model. If None, uses OPENROUTER_DEFAULT_MODEL from env.
+        openai_api_key: OpenAI API key. If None or empty, no OpenAI client.
+        openrouter_api_key: OpenRouter API key. If None or empty, no OpenRouter client.
+        openrouter_model: Default model. If None, resolved by
+            ``resolve_default_llm_model`` (``.env`` value, then environment,
+            then ``gpt-4o-mini``).
 
     Returns:
         A tuple containing:
-        - openai_client (Optional[OpenAI]): An initialized OpenAI client if the
-          API key is available, otherwise None.
+        - openai_client (Optional[OpenAI]): An initialized OpenAI client if an
+          OpenAI key was passed, otherwise None.
         - openrouter_client (Optional[OpenAI]): An initialized client for OpenRouter
-          if the API key is available, otherwise None.
+          if an OpenRouter key was passed, otherwise None.
         - default_model (str): The default model identifier.
 
     Security Note:
-        When using this module from authenticated endpoints, always pass
-        credentials explicitly from the user's credential store to prevent
-        non-admin users from accessing .env credentials.
+        There is no environment fallback for the keys: a non-admin user without
+        personal keys never gets the server keys through this function.
     """
-    # Use provided credentials or fall back to environment
-    if openai_api_key is None or openrouter_api_key is None:
-        # Reload .env only if falling back to environment
-        load_dotenv(override=True)
-
-    _openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-    _openrouter_api_key = openrouter_api_key or os.getenv("OPENROUTER_API_KEY")
-    default_model = openrouter_model or os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
+    default_model = resolve_default_llm_model(openrouter_model)
 
     openai_client = None
     openrouter_client = None
 
-    if _openai_api_key:
-        openai_client = OpenAI(api_key=_openai_api_key)
+    if openai_api_key:
+        openai_client = OpenAI(api_key=openai_api_key)
         logger.debug("OpenAI client initialized for note generation")
 
-    if _openrouter_api_key:
+    if openrouter_api_key:
         openrouter_client = OpenAI(
-            api_key=_openrouter_api_key,
+            api_key=openrouter_api_key,
             base_url="https://openrouter.ai/api/v1"
         )
         logger.debug("OpenRouter client initialized for note generation")
@@ -380,15 +432,17 @@ def _generate_with_llm(
     Args:
         prompt: The prompt to send to the LLM
         model: Model name (e.g., "gpt-4o-mini" or "google/gemini-2.5-flash").
-               If None, uses OPENROUTER_DEFAULT_MODEL from .env
+               If None, uses the default model (resolve_default_llm_model).
         temperature: Sampling temperature (0.0 to 1.0)
         mode: Note generation mode. Determines max_tokens:
               - "extended": 16000 tokens
               - "short": 2000 tokens
               - "pedagogique": 10000 tokens
               - "evaluation": 10000 tokens
-        openai_api_key: Optional OpenAI API key. If None, uses environment.
-        openrouter_api_key: Optional OpenRouter API key. If None, uses environment.
+        openai_api_key: Optional OpenAI API key. If None, no OpenAI client
+                        (no environment fallback).
+        openrouter_api_key: Optional OpenRouter API key. If None, no OpenRouter
+                            client (no environment fallback).
 
     Returns:
         Generated HTML content
@@ -397,7 +451,7 @@ def _generate_with_llm(
         ValueError: If no LLM client is available
         Exception: If the API call fails
     """
-    # Get clients with provided credentials or from environment
+    # Get clients from the credentials passed by the caller (no env fallback)
     openai_client, openrouter_client, default_model = _get_llm_clients(
         openai_api_key=openai_api_key,
         openrouter_api_key=openrouter_api_key
@@ -575,7 +629,7 @@ def build_note_html(
     Args:
         metadata: Dictionary with item metadata (title, authors, abstract, etc.)
         text_content: Full text content (texteocr). If None, will use abstract only.
-        model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
+        model: LLM model to use. If None, uses the default model (resolve_default_llm_model).
                Examples: "gpt-4o-mini", "google/gemini-2.5-flash"
         use_llm: Whether to use LLM or fallback to template (default: True)
         mode: Note generation mode. One of:
@@ -584,9 +638,9 @@ def build_note_html(
               - "pedagogique": Pedagogical note [CLAIR] for L3 students (2400-2800 words)
               - "evaluation": Peer review evaluation grid [EVAL] (2200-2750 words)
         openai_api_key: Optional OpenAI API key for secure credential passing.
-                        If None, falls back to environment variable.
+                        If None, no OpenAI client (no environment fallback).
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
-                           If None, falls back to environment variable.
+                           If None, no OpenRouter client (no environment fallback).
 
     Returns:
         Tuple of (sentinel, note_html):
@@ -612,7 +666,7 @@ def build_note_html(
         logger.warning(f"Unknown mode '{mode}', falling back to 'extended'")
         mode = "extended"
 
-    # Get clients with provided credentials or from environment
+    # Get clients from the credentials passed by the caller (no env fallback)
     openai_client, openrouter_client, default_model = _get_llm_clients(
         openai_api_key=openai_api_key,
         openrouter_api_key=openrouter_api_key
@@ -681,11 +735,11 @@ def build_abstract_text(
     Args:
         metadata: Dictionary with item metadata (title, authors, abstract, etc.)
         text_content: Full text content (texteocr). If None, will use abstract only.
-        model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
+        model: LLM model to use. If None, uses the default model (resolve_default_llm_model).
         openai_api_key: Optional OpenAI API key for secure credential passing.
-                        If None, falls back to environment variable.
+                        If None, no OpenAI client (no environment fallback).
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
-                           If None, falls back to environment variable.
+                           If None, no OpenRouter client (no environment fallback).
 
     Returns:
         Plain text summary string (200-350 words)
@@ -702,7 +756,7 @@ def build_abstract_text(
         >>> print(summary)
         This study investigates...
     """
-    # Get clients with provided credentials or from environment
+    # Get clients from the credentials passed by the caller (no env fallback)
     openai_client, openrouter_client, default_model = _get_llm_clients(
         openai_api_key=openai_api_key,
         openrouter_api_key=openrouter_api_key
@@ -814,7 +868,7 @@ async def build_note_html_async(
     Args:
         metadata: Dictionary with item metadata (title, authors, abstract, etc.)
         text_content: Full text content (texteocr). If None, will use abstract only.
-        model: LLM model to use. If None, uses OPENROUTER_DEFAULT_MODEL from .env.
+        model: LLM model to use. If None, uses the default model (resolve_default_llm_model).
         use_llm: Whether to use LLM or fallback to template (default: True)
         mode: Note generation mode. One of:
               - "extended": Full analysis [FICHE]

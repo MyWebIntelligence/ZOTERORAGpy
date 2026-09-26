@@ -1,144 +1,146 @@
-import unittest
-import os
-import pandas as pd
-import json
-from unittest.mock import patch, MagicMock, ANY
+"""Phase ``initial`` de ``rad_chunk.py`` (découpage + recodage) sur un CSV de référence.
 
-# Assurez-vous que rad_chunk est importable.
-# Si ce script est dans le même dossier que rad_chunk.py et exécuté depuis ce dossier :
+Le CSV est ``tests/fixtures/test_documents.csv``, converti au format du pipeline
+par le module d'ingestion CSV (mêmes colonnes que la sortie de ``rad_dataframe.py``).
+Le client OpenAI du module est remplacé par un faux client (aucun appel réseau)
+et la sortie JSON est écrite dans un répertoire temporaire.
+"""
+import json
+import os
+import sys
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+RAGPY_DIR = os.path.dirname(SCRIPT_DIR)
+FIXTURE_CSV = os.path.join(RAGPY_DIR, "tests", "fixtures", "test_documents.csv")
+
+# rad_chunk est importé comme module de premier niveau (scripts/ sur sys.path),
+# sinon via le paquet scripts ; les patchs visent l'objet module importé.
 try:
-    from rad_chunk import process_all_documents, TEXT_SPLITTER, DEFAULT_MAX_WORKERS, DEFAULT_BATCH_SIZE_GPT
+    import rad_chunk
 except ImportError:
-    print("Erreur d'importation de rad_chunk. Assurez-vous que le PYTHONPATH est correct ou exécutez depuis le dossier 'scripts'.")
-    # Tentative d'ajustement du sys.path pour exécution depuis la racine du projet
-    import sys
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    PARENT_DIR = os.path.dirname(SCRIPT_DIR) # Devrait être ragpy/
-    if PARENT_DIR not in sys.path:
-         sys.path.insert(0, PARENT_DIR) # Ajoute ragpy/ au path pour permettre from scripts.rad_chunk
-    
-    # Réessayer l'importation
-    from scripts.rad_chunk import process_all_documents, TEXT_SPLITTER, DEFAULT_MAX_WORKERS, DEFAULT_BATCH_SIZE_GPT
+    if RAGPY_DIR not in sys.path:
+        sys.path.insert(0, RAGPY_DIR)
+    from scripts import rad_chunk
+
+if RAGPY_DIR not in sys.path:
+    sys.path.insert(0, RAGPY_DIR)
+from ingestion import ingest_csv_to_dataframe
+
+# Configuration hermétique : cache de recodage, durcissement et dédup coupés,
+# quelle que soit la configuration de l'hôte.
+HERMETIC_ENV = {
+    "RECODE_CACHE_ENABLED": "0",
+    "RECODE_HARDEN_ENABLED": "0",
+    "RECODE_EMBED_CACHE_ENABLED": "0",
+    "DEDUP_ENABLED": "0",
+}
+
+RECODE_MARKER = "Texte à recoder :\n"
+RECODE_END = "\n\nTexte recodé :"
+
+
+def _load_documents():
+    """DataFrame du pipeline construit depuis le CSV de référence (10 documents)."""
+    return ingest_csv_to_dataframe(FIXTURE_CSV)
+
+
+def _fake_completion(*args, **kwargs):
+    """Réponse chat simulée : « Recodage simulé de: » + début du chunk reçu."""
+    content = "Texte recodé simulé."
+    messages = kwargs.get("messages") or []
+    if messages:
+        user_content = messages[-1]["content"]
+        if RECODE_MARKER in user_content:
+            start = user_content.find(RECODE_MARKER) + len(RECODE_MARKER)
+            end = user_content.find(RECODE_END, start)
+            content = f"Recodage simulé de: {user_content[start:end][:50]}..."
+    choice = MagicMock()
+    choice.message.content = content
+    choice.finish_reason = "stop"
+    completion = MagicMock()
+    completion.choices = [choice]
+    return completion
 
 
 class TestRadChunkInitialPhase(unittest.TestCase):
+    """``process_all_documents`` : découpage, recodage et métadonnées des chunks."""
 
     def setUp(self):
-        # Chemin vers le fichier CSV de test fourni par l'utilisateur
-        self.test_csv_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), # ragpy/scripts/
-            "..", # ragpy/
-            "uploads", "d91919cf_Saussure_Art", "Saussure_Art", "output.csv"
-        ))
-        
-        # Fichier JSON de sortie temporaire pour le test
-        self.output_json_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "test_output_chunks.json"
-        ))
+        """Répertoire de sortie temporaire, environnement hermétique, faux client OpenAI."""
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.output_json_path = os.path.join(self._tmp.name, "output_chunks.json")
 
-        # Vérifier si le CSV de test existe
-        if not os.path.exists(self.test_csv_path):
-            self.fail(f"Le fichier CSV de test n'a pas été trouvé : {self.test_csv_path}")
-            
-        # Nettoyer le fichier de sortie potentiel d'un test précédent
-        if os.path.exists(self.output_json_path):
-            os.remove(self.output_json_path)
+        env_patcher = patch.dict(os.environ, HERMETIC_ENV)
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
 
-    def tearDown(self):
-        # Nettoyer le fichier JSON de sortie après le test
-        if os.path.exists(self.output_json_path):
-            try:
-                os.remove(self.output_json_path)
-                print(f"\nFichier de sortie de test nettoyé : {self.output_json_path}")
-            except OSError as e:
-                print(f"\nErreur lors du nettoyage du fichier de sortie de test {self.output_json_path}: {e}")
+        self.mock_client = MagicMock(name="openai_client")
+        self.mock_client.chat.completions.create.side_effect = _fake_completion
+        client_patcher = patch.object(rad_chunk, "client", self.mock_client)
+        client_patcher.start()
+        self.addCleanup(client_patcher.stop)
 
-
-    @patch('rad_chunk.client') # Mocker le client OpenAI dans le module rad_chunk
-    def test_process_all_documents_with_real_csv(self, mock_openai_client):
-        print(f"\nLancement de test_process_all_documents_with_real_csv...")
-        print(f"  Utilisation du CSV : {self.test_csv_path}")
-        print(f"  Fichier JSON de sortie attendu : {self.output_json_path}")
-
-        # Configurer le mock pour simuler les réponses de l'API OpenAI gpt_recode_batch
-        # Chaque appel à create doit retourner un objet avec une structure spécifique.
-        def mock_create_completion(*args, **kwargs):
-            mock_completion = MagicMock()
-            # Le contenu recodé sera basé sur le message d'entrée pour le rendre un peu dynamique
-            # ou simplement un texte fixe.
-            input_text_prompt = "Texte recodé simulé."
-            if 'messages' in kwargs and kwargs['messages']:
-                user_content = kwargs['messages'][-1]['content'] # Dernier message est celui de l'utilisateur
-                # Extrait une partie du texte original pour le "recode"
-                original_text_marker = "Texte à recoder :\n"
-                if original_text_marker in user_content:
-                    start_idx = user_content.find(original_text_marker) + len(original_text_marker)
-                    end_idx = user_content.find("\n\nTexte recodé :", start_idx)
-                    original_sample = user_content[start_idx:end_idx][:50] # Prend les 50 premiers caractères
-                    input_text_prompt = f"Recodage simulé de: {original_sample}..."
-            
-            mock_completion.choices = [MagicMock()]
-            mock_completion.choices[0].message = MagicMock()
-            mock_completion.choices[0].message.content = input_text_prompt
-            return mock_completion
-
-        mock_openai_client.chat.completions.create.side_effect = mock_create_completion
-        
-        # Charger le DataFrame depuis le CSV de test
-        try:
-            df = pd.read_csv(self.test_csv_path)
-            print(f"  Nombre de documents (lignes) dans le CSV : {len(df)}")
-            if df.empty:
-                 self.fail(f"Le fichier CSV de test {self.test_csv_path} est vide.")
-        except Exception as e:
-            self.fail(f"Erreur lors de la lecture du CSV de test {self.test_csv_path}: {e}")
-
-        # S'assurer que TEXT_SPLITTER est initialisé (il devrait l'être au chargement du module rad_chunk)
-        self.assertIsNotNone(TEXT_SPLITTER, "TEXT_SPLITTER n'a pas été initialisé dans rad_chunk.")
-
-        # Exécuter la fonction à tester
-        print(f"  Appel de process_all_documents...")
-        process_all_documents(df, json_file=self.output_json_path)
-
-        # Vérifications
-        print(f"  Vérification de l'existence du fichier de sortie : {self.output_json_path}")
+    def _run(self, df):
+        """Lance la phase initiale sur ``df`` et relit le JSON produit."""
+        self.assertIsNotNone(rad_chunk.TEXT_SPLITTER, "TEXT_SPLITTER n'a pas été initialisé dans rad_chunk.")
+        rad_chunk.process_all_documents(df, json_file=self.output_json_path)
         self.assertTrue(os.path.exists(self.output_json_path), "Le fichier JSON de sortie n'a pas été créé.")
-        
-        print(f"  Lecture et validation du contenu du fichier JSON de sortie...")
-        with open(self.output_json_path, 'r', encoding='utf-8') as f:
+        with open(self.output_json_path, "r", encoding="utf-8") as f:
             output_data = json.load(f)
-        
         self.assertIsInstance(output_data, list, "La sortie JSON n'est pas une liste.")
+        return output_data
+
+    def test_process_all_documents_with_real_csv(self):
+        df = _load_documents()
+        self.assertEqual(len(df), 10)
+        # Texte d'OCR brut (fournisseur hors RECODE_SKIP_PROVIDERS) : recodage attendu
+        df["texteocr_provider"] = "legacy"
+
+        output_data = self._run(df)
+
         self.assertTrue(len(output_data) > 0, "La liste des chunks en sortie est vide.")
-        
-        print(f"  Nombre total de chunks générés : {len(output_data)}")
+        # Textes courts : un chunk par document
+        self.assertEqual(len(output_data), len(df))
+        self.assertEqual({c["title"] for c in output_data}, set(df["title"]))
+        self.assertEqual(len({c["doc_id"] for c in output_data}), len(df))
 
-        # Vérifier la structure du premier chunk (exemple)
-        first_chunk = output_data[0]
-        self.assertIn("id", first_chunk)
-        self.assertIn("type", first_chunk)
-        self.assertIn("title", first_chunk)
-        self.assertIn("authors", first_chunk)
-        self.assertIn("date", first_chunk)
-        self.assertIn("filename", first_chunk)
-        self.assertIn("doc_id", first_chunk)
-        self.assertIn("chunk_index", first_chunk)
-        self.assertIn("total_chunks", first_chunk)
-        self.assertIn("text", first_chunk)
-        self.assertTrue(first_chunk["text"].startswith("Recodage simulé de:"), 
-                        f"Le texte du chunk ne correspond pas au mock: {first_chunk['text'][:100]}...")
+        for chunk in output_data:
+            for key in ("id", "type", "title", "authors", "date", "filename",
+                        "doc_id", "chunk_index", "total_chunks", "text", "texteocr_provider"):
+                self.assertIn(key, chunk)
+            self.assertNotIn("texteocr", chunk)
+            self.assertEqual(chunk["id"], f"{chunk['doc_id']}_{chunk['chunk_index']}")
+            self.assertEqual((chunk["chunk_index"], chunk["total_chunks"]), (1, 1))
+            self.assertEqual(chunk["texteocr_provider"], "legacy")
+            self.assertTrue(chunk["text"].startswith("Recodage simulé de:"),
+                            f"Le texte du chunk ne correspond pas au mock: {chunk['text'][:100]}...")
+            # Dédup OFF : aucun champ de dédup ni de statut de recodage
+            self.assertNotIn("content_hash", chunk)
+            self.assertNotIn("recode_status", chunk)
 
-        # Vérifier que l'API OpenAI a été appelée
-        # Le nombre d'appels dépendra du nombre de chunks et de DEFAULT_BATCH_SIZE_GPT
-        # Pour chaque document, il y a des lots de chunks.
-        # Chaque lot appelle gpt_recode_batch, qui fait des appels API.
-        self.assertTrue(mock_openai_client.chat.completions.create.called, "L'API OpenAI (create) n'a pas été appelée.")
-        print(f"  Nombre total d'appels simulés à OpenAI API: {mock_openai_client.chat.completions.create.call_count}")
-        
-        print("  Test test_process_all_documents_with_real_csv terminé avec succès.")
+        # Un appel de recodage par chunk, avec le modèle par défaut
+        create = self.mock_client.chat.completions.create
+        self.assertEqual(create.call_count, len(output_data))
+        self.assertEqual({c.kwargs["model"] for c in create.call_args_list}, {"gpt-4o-mini"})
+
+    def test_csv_provider_skips_recoding(self):
+        df = _load_documents()
+        self.assertEqual(set(df["texteocr_provider"]), {"csv"})
+
+        output_data = self._run(df)
+
+        # Texte déjà propre (CSV) : chunks utilisés tels quels, aucun appel LLM
+        self.mock_client.chat.completions.create.assert_not_called()
+        self.assertEqual(len(output_data), len(df))
+        texts_by_title = dict(zip(df["title"], df["texteocr"]))
+        for chunk in output_data:
+            self.assertEqual(chunk["text"], texts_by_title[chunk["title"]].strip())
+            self.assertEqual(chunk["texteocr_provider"], "csv")
+
 
 if __name__ == '__main__':
-    print("Démarrage des tests unitaires pour la phase initiale de rad_chunk.py...")
-    # Nécessite que rad_chunk.py soit dans le même dossier ou que PYTHONPATH soit configuré.
-    # Exécuter avec `python test_rad_chunk_initial_phase.py` depuis le dossier `scripts`.
     unittest.main(verbosity=2)

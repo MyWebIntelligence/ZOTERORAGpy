@@ -149,7 +149,13 @@ from tqdm import tqdm
 import logging
 import argparse
 import requests
-from dotenv import load_dotenv
+
+# Chargement du .env gardé (RAGPY_DOTENV_DENY : secrets non rechargés pour un
+# sous-processus non-admin). Import double : paquet (app, Celery, tests) ou CLI.
+try:
+    from scripts.rad_env import load_dotenv_guarded
+except ImportError:
+    from rad_env import load_dotenv_guarded
 
 # Metrics tracking (optional - works with or without prometheus)
 try:
@@ -162,7 +168,7 @@ except ImportError:
     log_metrics_summary = None
 
 # Load environment variables early
-load_dotenv()
+load_dotenv_guarded()
 
 # ----------------------------------------------------------------------
 # Environment variable helper with validation
@@ -202,7 +208,7 @@ logger.info(f"Script LOG_DIR_SCRIPT: {LOG_DIR_SCRIPT}")
 logger.info(f"Script log file: {pdf_processing_log_file}")
 # --- End Path and Logging Setup ---
 
-load_dotenv()
+load_dotenv_guarded()
 
 def _truthy_env(value: Optional[str], default: bool) -> bool:
     """

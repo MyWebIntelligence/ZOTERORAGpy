@@ -407,16 +407,6 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
     #    json.dump(dummy_data, f, indent=2)
     # print(f"Fichier de test '{embeddings_json_file_with_sparse}' créé. Veuillez le vérifier/modifier si nécessaire.")
 
-# Commented out the execution part as it requires a live Pinecone instance and API key
-# api_key_to_use = "pcsk_2r6Wb3_H1BjFjiKG6qQH4ro1BmzrAd8Gnz4a9wzo6J6SPzZyzcVkPdfYjUvZ91tLo2pfaA"
-# embeddings_json_file_with_sparse = "path_to_your_embeddings_file.json" # Placeholder
-
-# insert_to_pinecone(
-#   embeddings_json_file=embeddings_json_file_with_sparse,
-#   index_name="articles", # REMPLACEZ par le nom de votre index Pinecone
-#   pinecone_api_key=api_key_to_use
-# )
-
 
 ## BASE VECTORIELLE Weaviate
 
@@ -1258,7 +1248,6 @@ if __name__ == "__main__":
 
         print(f"Index: {args.index}")
         print(f"Namespace: {args.namespace or '(default)'}")
-        print(f"API Key: {pinecone_api_key[:10]}...")
 
         result = insert_to_pinecone(
             embeddings_json_file=args.input,
