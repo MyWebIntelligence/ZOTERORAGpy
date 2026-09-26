@@ -41,9 +41,65 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from pinecone import Pinecone, ServerlessSpec  # noqa: E402
 from rad_vectordb import insert_to_pinecone  # noqa: E402
+from rad_vectordb import _missing_vectors_error  # noqa: E402  (même garde que l'envoi)
 import rad_dedup  # noqa: E402  (Lot 5 back-fill)
+from rad_providers import check_uniform_space, target_mismatch_message  # noqa: E402  (espaces vectoriels)
 
 DEFAULT_FILENAME = "output_chunks_with_embeddings_sparse.json"
+
+
+def check_input_dimensions(paths: list[str], target_dimension) -> str | None:
+    """Pre-flight: every embeddings file must hold one vector space matching the index.
+
+    Checked locally, before any destructive step (``recreate_index``) or upload:
+    a file mixing spaces (``check_uniform_space``), a file of a non-default
+    space (e.g. Albert) left incomplete by its dense phase (share of missing
+    vectors above ``ALBERT_EMBED_MAX_MISSING_RATIO``, the refusal
+    ``insert_to_pinecone`` would otherwise raise only after the index was
+    recreated), files of different spaces (e.g. OpenAI 3072-d and Albert bge-m3
+    1024-d) or a space whose dimension differs from ``target_dimension`` (when
+    it is an int) are refused. Files without usable vectors are otherwise
+    ignored; an unreadable file is reported and left to the upload step (as
+    before).
+
+    Args:
+        paths: embeddings files to upload.
+        target_dimension: dimension of the (re)created or existing index.
+
+    Returns:
+        A French error message, or ``None`` when every file is compatible.
+    """
+    import json
+
+    spaces = {}
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+        except Exception as exc:
+            print(f"Avertissement: contrôle de dimension impossible pour {path} ({exc}).")
+            continue
+        try:
+            space = check_uniform_space(chunks)
+        except ValueError as exc:
+            return f"{path} : {exc}"
+        missing = _missing_vectors_error(chunks, space)
+        if missing:
+            return f"{path} : {missing}"
+        if space is None:
+            continue
+        mismatch = target_mismatch_message(target_dimension, space)
+        if mismatch:
+            return f"{path} : {mismatch}"
+        spaces.setdefault((space.provider, space.model, space.dim), []).append(path)
+    if len(spaces) > 1:
+        detail = " ; ".join(
+            f"{provider}/{model} ({dim} dimensions) : {len(files)} fichier(s)"
+            for (provider, model, dim), files in spaces.items()
+        )
+        return (f"espaces d'embeddings différents entre les corpus ({detail}) : "
+                "un index ne contient qu'un seul espace vectoriel.")
+    return None
 
 
 def backfill_inputs(paths: list[str]) -> list[str]:
@@ -153,13 +209,16 @@ def resolve_sessions(sessions: list[str], uploads_dir: str, filename: str) -> li
 
 
 def main() -> int:
-    """CLI entry point: optionally recreate the index, resolve the embeddings
-    files (--all or --sessions), optionally back-fill content hashes, upload each
-    corpus with insert_to_pinecone and print a summary.
+    """CLI entry point: resolve the embeddings files (--all or --sessions), check
+    their vector space against the index dimension (pre-flight, before any
+    deletion), optionally recreate the index, optionally back-fill content
+    hashes, upload each corpus with insert_to_pinecone and print a summary.
 
     Returns:
         int: 0 if every corpus was uploaded, 1 if any upload failed, 2 on a
-        configuration error (missing key, index, arguments or input files).
+        configuration error (missing key, index, arguments or input files) or a
+        vector-space mismatch (mixed spaces, wrong dimension) — in that case the
+        index is never recreated.
     """
     parser = argparse.ArgumentParser(
         description="Recreate a Pinecone index and bulk re-upload session corpora."
@@ -202,18 +261,20 @@ def main() -> int:
     pc = Pinecone(api_key=api_key)
 
     if args.recreate:
-        recreate_index(pc, args.index, args.dimension, args.metric, args.cloud, args.region)
+        target_dimension = args.dimension
     else:
         if not _index_exists(pc, args.index):
             print(f"ERREUR: l'index '{args.index}' n'existe pas et --recreate n'est pas fourni.")
             return 2
-        metric = pc.describe_index(args.index).metric
+        description = pc.describe_index(args.index)
+        metric = description.metric
+        target_dimension = getattr(description, "dimension", None)
         print(f"Index '{args.index}' existant (metric={metric}). Upload sans recréation.")
         if metric != "dotproduct":
             print(f"  Attention: metric={metric} (non-dotproduct) → les vecteurs sparse "
                   f"seront omis par insert_to_pinecone (upsert dense uniquement).")
 
-    # Resolve the list of embeddings files to upload.
+    # Resolve the list of embeddings files to upload (before any deletion).
     if args.all:
         inputs = discover_inputs(args.uploads_dir, args.filename)
     else:
@@ -223,6 +284,18 @@ def main() -> int:
         print(f"ERREUR: aucun fichier d'embeddings trouvé (uploads-dir={args.uploads_dir}, "
               f"filename={args.filename}).")
         return 2
+
+    # Pre-flight des espaces vectoriels : un seul espace, de la dimension de
+    # l'index, sinon exit 2 AVANT recreate_index (aucun vecteur supprimé).
+    space_error = check_input_dimensions(inputs, target_dimension)
+    if space_error:
+        print(f"ERREUR: espace vectoriel incompatible avec l'index '{args.index}' — {space_error}")
+        if args.recreate:
+            print("  Aucun index supprimé ni recréé.")
+        return 2
+
+    if args.recreate:
+        recreate_index(pc, args.index, args.dimension, args.metric, args.cloud, args.region)
 
     backfill_temps = []
     if args.backfill_hash:

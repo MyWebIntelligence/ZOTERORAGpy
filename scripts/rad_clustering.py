@@ -32,6 +32,13 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+# Gardes d'espace vectoriel (stdlib) : même import double que les autres scripts
+# (paquet ``scripts.`` pour l'application et les tests, module plat en CLI).
+try:
+    from scripts.rad_providers import check_uniform_space
+except ImportError:
+    from rad_providers import check_uniform_space
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +57,74 @@ DEFAULT_UMAP_MIN_DIST = 0.05        # UMAP minimum distance (smaller = tighter c
 DEFAULT_MIN_CLUSTER_SIZE = 3        # Minimum documents per cluster (user constraint)
 DEFAULT_MIN_SAMPLES = 2             # HDBSCAN minimum samples
 RANDOM_SEED = 42                    # For reproducibility
+
+
+# =============================================================================
+# VECTOR SPACE GUARDS
+# =============================================================================
+
+_DEFAULT_EMBEDDING_PROVIDER = "openai"
+_DEFAULT_EMBEDDING_MODEL = "text-embedding-3-large"
+
+
+def _is_non_default_space(chunk: Dict) -> bool:
+    """Return True if the chunk declares a non-default embedding space.
+
+    Only non-default spaces (e.g. Albert ``bge-m3``) write the
+    ``embedding_provider`` / ``embedding_model`` fields; a chunk without them
+    belongs to the historical OpenAI space.
+    """
+    provider = str(chunk.get("embedding_provider") or _DEFAULT_EMBEDDING_PROVIDER).strip().lower()
+    model = str(chunk.get("embedding_model") or "").strip()
+    if provider != _DEFAULT_EMBEDDING_PROVIDER:
+        return True
+    return bool(model) and model != _DEFAULT_EMBEDDING_MODEL
+
+
+def _is_real_vector(embedding) -> bool:
+    """Return True for a non-empty vector with at least one non-zero value."""
+    try:
+        values = np.asarray(embedding, dtype=np.float64).ravel()
+    except (TypeError, ValueError):
+        return False
+    return values.size > 0 and bool(np.any(values != 0))
+
+
+def _check_clusterable_space(chunks: List[Dict]) -> None:
+    """Refuse, with a clear message, chunks mixing embedding spaces or dimensions.
+
+    Only chunks that would be aggregated are considered (``doc_id`` and a
+    non-``None`` embedding; zero or empty vectors of a non-default space are
+    skipped as in ``aggregate_chunk_embeddings``).
+
+    Raises:
+        ValueError: mixed spaces (``rad_providers.check_uniform_space``) or
+            vectors of different dimensions.
+    """
+    kept = []
+    for chunk in chunks:
+        if not isinstance(chunk, dict) or not chunk.get("doc_id") or chunk.get("embedding") is None:
+            continue
+        if _is_non_default_space(chunk) and not _is_real_vector(chunk["embedding"]):
+            continue
+        kept.append(chunk)
+    try:
+        check_uniform_space(kept)
+    except ValueError as exc:
+        raise ValueError(f"Clustering impossible : {exc}") from None
+    dims: Dict[int, int] = defaultdict(int)
+    for chunk in kept:
+        embedding = chunk["embedding"]
+        try:
+            dims[int(np.asarray(embedding).size)] += 1
+        except (TypeError, ValueError):
+            continue
+    if len(dims) > 1:
+        detail = ", ".join(f"{dim} dimensions : {count} chunk(s)" for dim, count in sorted(dims.items()))
+        raise ValueError(
+            f"Clustering impossible : embeddings de dimensions différentes dans le fichier ({detail}). "
+            "Régénérer les embeddings avec un seul fournisseur (espace vectoriel unique)."
+        )
 
 
 # =============================================================================
@@ -90,7 +165,19 @@ def aggregate_chunk_embeddings(
     Note:
         Mean pooling is recommended as it preserves information from all chunks
         and produces more stable representations than max or first-chunk methods.
+
+        Vector spaces: a file mixing embedding spaces (e.g. OpenAI 3072-d and
+        Albert bge-m3 1024-d) or dimensions raises a clear ``ValueError``. Zero or
+        empty vectors are ignored only for chunks of a non-default space (those
+        carrying ``embedding_provider`` / ``embedding_model``); the default
+        (OpenAI) path is unchanged, zero fallback vectors included.
+
+    Raises:
+        ValueError: unknown aggregation method, or mixed embedding spaces or
+            dimensions.
     """
+    _check_clusterable_space(chunks)
+
     # Group chunks by document ID
     doc_chunks: Dict[str, List[np.ndarray]] = defaultdict(list)
 
@@ -100,6 +187,10 @@ def aggregate_chunk_embeddings(
 
         # Skip chunks with missing doc_id or embedding
         if not doc_id or embedding is None:
+            continue
+
+        # Non-default space (Albert): zero or empty vectors are never clustered
+        if _is_non_default_space(chunk) and not _is_real_vector(embedding):
             continue
 
         # Convert to numpy array if needed

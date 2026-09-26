@@ -12,8 +12,12 @@ import warnings
 warnings.simplefilter("ignore", ResourceWarning)
 import json
 import time
+import dataclasses
+import logging
 from tqdm import tqdm
 import traceback # Ajout pour traceback.print_exc()
+
+logger = logging.getLogger(__name__)
 
 try:
     from pinecone import Pinecone  # Reverted import
@@ -298,9 +302,14 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
     # Sur un index cosine/euclidean, un upsert portant des sparse_values est rejeté
     # (HTTP 400) → tous les lots échouent silencieusement. On détecte le metric une
     # fois et on bascule en upsert dense uniquement si l'index n'est pas dotproduct.
+    # Même appel describe_index : la dimension de l'index (si c'est un entier)
+    # sert à la garde d'espace vectoriel, sans aucun appel supplémentaire.
     index_metric = None
+    index_dimension = None
     try:
-        index_metric = pc.describe_index(index_name).metric
+        index_description = pc.describe_index(index_name)
+        index_metric = index_description.metric
+        index_dimension = getattr(index_description, "dimension", None)
     except Exception as e:
         print(f"Avertissement: describe_index('{index_name}') a échoué ({e}); "
               f"vecteurs sparse désactivés par sécurité.")
@@ -325,6 +334,16 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
         traceback.print_exc()
         return {"status": "error", "message": msg, "inserted_count": 0}
         
+    # Garde d'espace vectoriel AVANT dédup et upsert : fichier mélangé ou phase
+    # dense incomplète refusés localement, dimension de l'index (describe_index
+    # ci-dessus) comparée, vecteurs étrangers à l'espace retirés.
+    file_space, space_error = _check_vector_space(
+        all_chunks, index_dimension, target_desc=f"l'index Pinecone '{index_name}'"
+    )
+    if space_error:
+        print(space_error)
+        return _vectordb_result("error", space_error)
+
     # Déduplication (Lot 2/3) sur la liste PLATE, AVANT le regroupement par doc :
     # batche l'existence À TRAVERS les documents (chunks_by_doc n'existe que pour
     # l'ordre d'upsert). Réutilise index_metric déjà calculé. No-op si DEDUP_ENABLED=0.
@@ -332,6 +351,7 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
     all_chunks, dedup_skipped, dedup_journal = _run_dedup(
         all_chunks, _dedup_adapter, embeddings_json_file,
         target_desc=f"{index_name}/{namespace or 'default'}",
+        space=file_space,
     )
 
     chunks_by_doc = {}
@@ -860,9 +880,333 @@ class _AlbertDedupAdapter:
         return out
 
 
-def _run_dedup(all_chunks, adapter, embeddings_json_file, target_desc):
+# ======================================================================
+# Espaces vectoriels — gardes avant dédup et upsert (Lot 6 Albert)
+# ======================================================================
+#
+# Un fichier d'embeddings ne mélange jamais deux espaces (OpenAI 3072 d, Albert
+# bge-m3 1024 d) et n'est jamais envoyé vers une cible d'une autre dimension. Les
+# contrôles sont locaux (``rad_providers.check_uniform_space``) ; la dimension de
+# la cible est lue sur un appel déjà existant (Pinecone ``describe_index``, Qdrant
+# ``get_collection``), sauf Weaviate où un objet est lu, seulement hors espace par
+# défaut. Espace par défaut conforme : aucun appel, aucune sortie en plus.
+
+# Seuil Tier 3 explicite pour bge-m3 (vide : Tier 3 sauté pour les fichiers Albert).
+DEDUP_SIM_THRESHOLD_BGE_M3_ENV = "DEDUP_SIM_THRESHOLD_BGE_M3"
+
+
+def _providers_module():
+    """Module ``rad_providers`` (stdlib), importé depuis la même racine que ``rad_dedup``."""
+    import importlib
+
+    root = "scripts." if rad_dedup.__name__.startswith("scripts.") else ""
+    return importlib.import_module(root + "rad_providers")
+
+
+def _check_vector_space(chunks, target_dim=None, target_desc=None, *, drop_foreign=True):
+    """Garde d'espace vectoriel d'un fichier, à appeler avant dédup et upsert.
+
+    Contrôles locaux (sans appel réseau), dans cet ordre :
+
+    1. fichier qui mélange des espaces (dimensions ou modèles différents,
+       ``embedding_dim`` incohérent) : refus ;
+    2. fichier d'un espace déclaré hors défaut (champs ``embedding_provider`` /
+       ``embedding_model``, ex. Albert) dont la part de chunks sans vecteur
+       exploitable dépasse ``ALBERT_EMBED_MAX_MISSING_RATIO`` (phase dense
+       incomplète) : refus (voir ``_missing_vectors_error``) ;
+    3. cible dont la dimension entière ne correspond pas à l'espace du fichier :
+       refus. Une dimension qui n'est pas un entier (inconnue, objet factice)
+       est ignorée ;
+    4. vecteurs étrangers à l'espace (nuls, vides ou d'une autre longueur, que
+       ``check_uniform_space`` ignore) : retirés des chunks (``embedding=None``,
+       chunk non envoyé) avec un avertissement, si ``drop_foreign`` est vrai.
+
+    Fichier de l'espace par défaut sans vecteur étranger : aucune sortie en plus.
+
+    Args:
+        chunks: chunks du fichier d'embeddings (modifiés en place à l'étape 4).
+        target_dim: dimension de la cible (index, collection) ou ``None``.
+        target_desc: description de la cible pour le message.
+        drop_foreign: faux pour un contrôle préalable sur une copie jetable
+            (aucune modification, aucun avertissement).
+
+    Returns:
+        tuple: ``(espace | None, message d'erreur | None)``.
+    """
+    try:
+        space = _providers_module().check_uniform_space(chunks)
+    except ValueError as exc:
+        return None, _space_refusal(exc, target_desc)
+    error = _missing_vectors_error(chunks, space, target_desc)
+    if error is None:
+        error = _target_space_error(space, target_dim, target_desc)
+    if error is None and drop_foreign:
+        _drop_foreign_vectors(chunks, space)
+    return space, error
+
+
+def _usable_space_vector(vec, space):
+    """Vrai si ``vec`` est un vecteur exploitable de ``space`` (bonne dimension, non entièrement nul)."""
+    if space is None or not isinstance(vec, (list, tuple)) or len(vec) != space.dim:
+        return False
+    try:
+        return any(float(x) != 0.0 for x in vec)
+    except (TypeError, ValueError):
+        return False
+
+
+def _chunk_declares_non_default_space(chunk):
+    """Vrai si le chunk déclare un espace hors défaut (``embedding_provider`` / ``embedding_model``).
+
+    Un chunk sans champ d'espace (fichier historique) ou déclarant l'espace
+    OpenAI par défaut renvoie faux.
+    """
+    if not isinstance(chunk, dict):
+        return False
+    default = _providers_module().OPENAI_DEFAULT
+    provider = str(chunk.get("embedding_provider") or "").strip().lower()
+    model = str(chunk.get("embedding_model") or "").strip()
+    if provider and provider != default.provider:
+        return True
+    return bool(model) and model != default.model
+
+
+def _albert_missing_ratio_threshold():
+    """Part maximale d'embeddings manquants tolérée (``ALBERT_EMBED_MAX_MISSING_RATIO``).
+
+    Lue par ``AlbertConfig.from_env()`` (valeur invalide ou hors bornes → défaut) ;
+    configuration Albert illisible → défaut du champ (le plus strict, 0.0).
+    """
+    import importlib
+
+    config_module = importlib.import_module(_albert_root() + ".config")
+    try:
+        cfg = config_module.AlbertConfig.from_env()
+    except Exception:
+        cfg = config_module.AlbertConfig()
+    return float(cfg.embed_max_missing_ratio)
+
+
+def _missing_vectors_error(chunks, space, target_desc=None):
+    """Refus d'un fichier d'espace hors défaut issu d'une phase dense incomplète.
+
+    Seuls les chunks qui déclarent un espace hors défaut (ex. Albert bge-m3)
+    sont comptés : un chunk sans vecteur exploitable de l'espace du fichier
+    (``None``, vide, nul ou d'une autre longueur) est manquant. Au-delà de
+    ``ALBERT_EMBED_MAX_MISSING_RATIO``, l'envoi est refusé : les connecteurs
+    ignoreraient ces chunks et l'index serait silencieusement incomplet. Un
+    fichier de l'espace par défaut n'est jamais concerné.
+
+    Args:
+        chunks: chunks du fichier d'embeddings.
+        space: espace du fichier (``check_uniform_space``), ``None`` si aucun vecteur.
+        target_desc: description de la cible pour le message.
+
+    Returns:
+        Le message de refus, ou ``None``.
+    """
+    declared = [c for c in chunks or () if _chunk_declares_non_default_space(c)]
+    if not declared:
+        return None
+    missing = sum(1 for c in declared if not _usable_space_vector(c.get("embedding"), space))
+    if not missing:
+        return None
+    total = len(declared)
+    ratio = missing / total
+    threshold = _albert_missing_ratio_threshold()
+    if ratio <= threshold:
+        return None
+    if space is not None:
+        label = f"{space.provider}/{space.model}"
+    else:
+        first = declared[0]
+        label = f"{first.get('embedding_provider') or '?'}/{first.get('embedding_model') or '?'}"
+    return _space_refusal(
+        f"{missing}/{total} chunk(s) de l'espace {label} sans embedding exploitable "
+        f"(part {ratio:.4f}, au-delà du seuil ALBERT_EMBED_MAX_MISSING_RATIO={threshold:g}). "
+        "Le fichier provient d'une phase dense incomplète ou interrompue : relancer la phase "
+        "dense (embeddings) avant l'envoi.",
+        target_desc,
+    )
+
+
+def _drop_foreign_vectors(chunks, space):
+    """Retire les vecteurs étrangers à l'espace du fichier ; renvoie leur nombre.
+
+    ``check_uniform_space`` ignore les vecteurs nuls ou vides : un vecteur nul
+    d'un autre espace (repli OpenAI à 3072 dimensions dans un fichier bge-m3)
+    ou tout vecteur d'une autre longueur serait sinon envoyé, et la cible
+    refuserait le lot entier. Un tel vecteur est remplacé par ``None`` (chunk
+    non envoyé, comme un embedding manquant) et un avertissement donne leur
+    nombre. Les vecteurs nuls de la bonne dimension (repli OpenAI historique)
+    sont conservés tels quels. Sans espace connu, rien n'est modifié.
+    """
+    if space is None:
+        return 0
+    dropped = 0
+    for chunk in chunks or ():
+        if not isinstance(chunk, dict):
+            continue
+        vec = chunk.get("embedding")
+        if vec is None or (isinstance(vec, (list, tuple)) and len(vec) == space.dim):
+            continue
+        chunk["embedding"] = None
+        dropped += 1
+    if dropped:
+        print(f"Avertissement: {dropped} chunk(s) portent un vecteur étranger à l'espace "
+              f"{space.provider}/{space.model} ({space.dim} dimensions : vecteur vide, illisible ou "
+              f"d'une autre longueur) ; vecteur retiré, chunk(s) non envoyé(s).")
+    return dropped
+
+
+def _space_refusal(reason, target_desc=None):
+    """Message français de refus d'envoi pour une garde d'espace vectoriel."""
+    where = f" vers {target_desc}" if target_desc else ""
+    return f"Envoi refusé{where} : {reason}"
+
+
+def _target_space_error(space, target_dim, target_desc=None):
+    """Refus si la dimension entière de la cible diffère de l'espace, sinon ``None``."""
+    mismatch = _providers_module().target_mismatch_message(target_dim, space)
+    return _space_refusal(mismatch, target_desc) if mismatch else None
+
+
+def _declared_non_default_space(space):
+    """Vrai si le fichier déclare un espace hors défaut (champs ``embedding_provider``/``embedding_model``).
+
+    Un fichier sans champs d'espace appartient à l'espace OpenAI historique,
+    quelle que soit la longueur de ses vecteurs : il n'entraîne aucun appel
+    supplémentaire vers la cible.
+    """
+    if space is None:
+        return False
+    providers = _providers_module()
+    default = providers.OPENAI_DEFAULT
+    return (space.provider, space.model) != (default.provider, default.model)
+
+
+def _qdrant_vector_size(collection_info):
+    """Dimension des vecteurs d'une collection Qdrant existante (``config.params.vectors.size``).
+
+    ``None`` si la forme de la réponse diffère (vecteurs nommés, objet factice).
+    """
+    config = getattr(collection_info, "config", None)
+    params = getattr(config, "params", None)
+    vectors = getattr(params, "vectors", None)
+    return getattr(vectors, "size", None)
+
+
+def _weaviate_vector_dim(collection_with_tenant):
+    """Dimension du vecteur d'un objet de la collection Weaviate (tenant résolu).
+
+    Un seul objet est lu (``fetch_objects(limit=1, include_vector=True)``) ;
+    ``None`` si la collection est vide ou si le vecteur est illisible.
+    """
+    resp = collection_with_tenant.query.fetch_objects(limit=1, include_vector=True)
+    objects = list(getattr(resp, "objects", None) or [])
+    if not objects:
+        return None
+    vector = getattr(objects[0], "vector", None)
+    if isinstance(vector, dict):
+        vector = vector.get("default") if vector.get("default") is not None else next(iter(vector.values()), None)
+    if isinstance(vector, (list, tuple)) and vector:
+        return len(vector)
+    return None
+
+
+def _file_space(chunks):
+    """Espace des vecteurs d'un fichier (``None`` si aucun vecteur exploitable).
+
+    Raises:
+        ValueError: fichier mélangé.
+    """
+    return _providers_module().check_uniform_space(chunks)
+
+
+def _parse_threshold(raw):
+    """Seuil de similarité lu dans une variable d'environnement.
+
+    Distingue l'absence d'une valeur rejetée : une valeur valide est un nombre
+    décimal (point décimal) dans l'intervalle ``]0, 1]``.
+
+    Args:
+        raw: valeur brute (``None`` si la variable est absente).
+
+    Returns:
+        tuple: ``(seuil | None, rejetée)``. ``(None, False)`` si absente ou
+        vide ; ``(None, True)`` si invalide (ex. ``'abc'``, ``'0,95'``), non
+        finie ou hors de ``]0, 1]`` ; ``(valeur, False)`` sinon.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None, False
+    try:
+        value = float(text)
+    except ValueError:
+        return None, True
+    if value != value or not 0.0 < value <= 1.0:
+        return None, True
+    return value, False
+
+
+def _dedup_config_for_space(cfg, chunks, space=None):
+    """Adapte le Tier 3 de la dédup à l'espace du fichier.
+
+    Espace Albert (bge-m3) : le seuil de ``DEDUP_SIM_THRESHOLD`` n'est pas
+    calibré pour ce modèle ; le Tier 3 est désactivé pour ce run (un WARNING
+    unique) sauf si ``DEDUP_SIM_THRESHOLD_BGE_M3`` fixe un seuil explicite dans
+    ``]0, 1]``, alors appliqué. Une valeur définie mais rejetée (non numérique,
+    virgule décimale, hors bornes) laisse le Tier 3 désactivé, avec un WARNING
+    unique qui la cite. Fichier sans champs d'espace (défaut) : configuration
+    inchangée. Sans Tier 3 demandé (``DEDUP_SEMANTIC`` faux) : rien ne change.
+
+    Args:
+        cfg: ``DedupConfig`` du run.
+        chunks: chunks soumis à la dédup (espace déduit si ``space`` manque).
+        space: espace du fichier déjà contrôlé par le connecteur.
+
+    Returns:
+        ``DedupConfig`` à appliquer.
+    """
+    if not cfg.semantic:
+        return cfg
+    if space is None:
+        try:
+            space = _file_space(chunks)
+        except ValueError as exc:
+            logger.warning("Déduplication : Tier 3 désactivé pour ce run (%s).", exc)
+            return dataclasses.replace(cfg, semantic=False)
+    if space is None or space.provider != "albert":
+        return cfg
+    raw_threshold = os.environ.get(DEDUP_SIM_THRESHOLD_BGE_M3_ENV)
+    threshold, rejected = _parse_threshold(raw_threshold)
+    if rejected:
+        logger.warning(
+            "Déduplication : Tier 3 désactivé pour ce run (espace %s/%s, %d dimensions) : "
+            "%s=%r rejeté ; attendu un nombre décimal dans ]0, 1] écrit avec un point (ex. 0.95).",
+            space.provider, space.model, space.dim, DEDUP_SIM_THRESHOLD_BGE_M3_ENV, raw_threshold,
+        )
+        return dataclasses.replace(cfg, semantic=False)
+    if threshold is None:
+        logger.warning(
+            "Déduplication : Tier 3 désactivé pour ce run (espace %s/%s, %d dimensions) : "
+            "le seuil DEDUP_SIM_THRESHOLD n'est pas calibré pour ce modèle. "
+            "Définir %s pour l'appliquer.",
+            space.provider, space.model, space.dim, DEDUP_SIM_THRESHOLD_BGE_M3_ENV,
+        )
+        return dataclasses.replace(cfg, semantic=False)
+    return dataclasses.replace(cfg, sim_threshold=threshold)
+
+
+def _run_dedup(all_chunks, adapter, embeddings_json_file, target_desc, space=None):
     """Wrapper commun aux 3 connecteurs : lit ``DedupConfig.from_env()``, place le
     journal à côté du JSON d'embeddings, lance ``rad_dedup.dedup_filter``.
+
+    ``space`` (espace du fichier, contrôlé par ``_check_vector_space``) règle le
+    Tier 3 : sauté pour bge-m3 sans ``DEDUP_SIM_THRESHOLD_BGE_M3`` (voir
+    ``_dedup_config_for_space``) ; inchangé pour l'espace par défaut. Un
+    adaptateur sans ``nearest()`` (collections Albert) n'a pas de Tier 3 :
+    l'espace n'est alors ni calculé ni annoncé.
 
     Returns:
         tuple: ``(kept_chunks, skipped_count, journal_path|None)``. No-op vrai
@@ -872,6 +1216,8 @@ def _run_dedup(all_chunks, adapter, embeddings_json_file, target_desc):
     cfg = rad_dedup.DedupConfig.from_env()
     if not cfg.enabled:
         return all_chunks, 0, None
+    if callable(getattr(adapter, "nearest", None)):
+        cfg = _dedup_config_for_space(cfg, all_chunks, space)
     journal_dir = cfg.journal_dir or os.path.dirname(os.path.abspath(embeddings_json_file))
 
     # Lot 7.d : ne PAS upserter les chunks au recodage échoué (RAW stocké) — sinon la
@@ -1000,6 +1346,28 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
     if not api_key:
         raise ValueError("Weaviate API Key (api_key) is required.")
 
+    # Garde d'espace vectoriel locale AVANT toute connexion (donc avant toute
+    # création de tenant) : fichier mélangé ou phase dense incomplète refusés
+    # sans aucune écriture. Le fichier lu ici est réutilisé plus bas ; s'il est
+    # illisible, le chargement habituel reproduit et signale l'erreur.
+    target_desc_space = f"la collection Weaviate '{class_name}' (tenant {tenant_name})"
+    preloaded_chunks = None
+    file_space = None
+    space_checked = False
+    try:
+        with open(embeddings_json_file, 'r', encoding='utf-8') as f_pre:
+            preloaded_chunks = json.load(f_pre)
+    except Exception:
+        preloaded_chunks = None
+    if preloaded_chunks is not None:
+        file_space, space_error = _check_vector_space(
+            preloaded_chunks, target_desc=target_desc_space, drop_foreign=False
+        )
+        if space_error:
+            print(space_error)
+            return _vectordb_result("error", space_error)
+        space_checked = True
+
     try:
         # Connexion à Weaviate Cloud
         client = weaviate.connect_to_weaviate_cloud(
@@ -1018,46 +1386,77 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
         collection = client.collections.get(class_name)
         
         # Vérifier les tenants existants
+        tenant_created = False  # tenant absent de la liste puis créé : vide, aucune dimension à lire
         try:
             tenants_data = collection.tenants.get() # Returns a weaviate.collections.classes.tenants.Tenants object (Dict[str, Tenant])
             existing_tenant_names = []
             if tenants_data is not None:
                 # The keys of the Tenants object are the tenant names (strings)
                 existing_tenant_names = list(tenants_data.keys())
-            
+
             print(f"Tenants existants: {existing_tenant_names}")
-            
+
             if tenant_name not in existing_tenant_names:
                 print(f"Le tenant '{tenant_name}' n'existe pas. Création en cours...")
                 collection.tenants.create(tenant_name)
+                tenant_created = True
                 print(f"Tenant '{tenant_name}' créé avec succès.")
             else:
                 print(f"Le tenant '{tenant_name}' existe déjà.")
-                
+
         except Exception as e:
             print(f"Erreur lors de la vérification/création des tenants: {e}")
             # Tenter de créer le tenant directement comme fallback
             try:
                 print(f"Tentative de création directe du tenant '{tenant_name}'...")
+                # Pas de tenant_created ici : la liste des tenants est inconnue,
+                # le tenant existait peut-être (sa dimension reste donc lue).
                 collection.tenants.create(tenant_name)
                 print(f"Tenant '{tenant_name}' créé avec succès (après fallback).")
             except Exception as e_create:
                 print(f"Impossible de créer le tenant '{tenant_name}' même en fallback: {e_create}")
                 if client: client.close()
                 return _vectordb_result("error", f"Impossible de créer le tenant '{tenant_name}': {e_create}")
-        
-        # Charger les chunks avec embeddings
+
+        # Charger les chunks avec embeddings (déjà lus par la garde locale)
         print(f"Chargement des embeddings depuis {embeddings_json_file}")
-        with open(embeddings_json_file, 'r', encoding='utf-8') as f:
-            all_chunks = json.load(f)
-        
+        if preloaded_chunks is None:
+            with open(embeddings_json_file, 'r', encoding='utf-8') as f:
+                all_chunks = json.load(f)
+        else:
+            all_chunks = preloaded_chunks
+
         print(f"Chargement de {len(all_chunks)} chunks avec embeddings")
-        
+
         # Traiter les chunks par lots
         total_inserted = 0
-        
+
         # Utiliser la collection spécifique au tenant pour le batching
         collection_with_tenant = collection.with_tenant(tenant_name)
+
+        # Garde d'espace vectoriel AVANT dédup et upsert. Contrôles locaux faits
+        # avant la connexion (refaits ici seulement si la lecture préalable a
+        # échoué) ; un objet de la cible n'est lu (dimension de son vecteur) que
+        # pour un espace hors défaut (Albert) et un tenant préexistant, jamais
+        # pour l'espace par défaut. Vecteurs étrangers à l'espace retirés ensuite.
+        space_error = None
+        if not space_checked:
+            file_space, space_error = _check_vector_space(
+                all_chunks, target_desc=target_desc_space, drop_foreign=False
+            )
+        if space_error is None and not tenant_created and _declared_non_default_space(file_space):
+            try:
+                weaviate_dim = _weaviate_vector_dim(collection_with_tenant)
+            except Exception as e_dim:
+                weaviate_dim = None
+                print(f"Avertissement: dimension des vecteurs de '{class_name}' illisible ({e_dim}); "
+                      f"garde de dimension non appliquée.")
+            space_error = _target_space_error(file_space, weaviate_dim, target_desc_space)
+        if space_error:
+            print(space_error)
+            if client: client.close()
+            return _vectordb_result("error", space_error)
+        _drop_foreign_vectors(all_chunks, file_space)
 
         # Déduplication (Lot 2/3) — requête la cible EXACTE (tenant résolu), avant la
         # boucle d'insertion. No-op si DEDUP_ENABLED=0.
@@ -1065,6 +1464,7 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
         all_chunks, dedup_skipped, dedup_journal = _run_dedup(
             all_chunks, _dedup_adapter, embeddings_json_file,
             target_desc=f"{class_name}/{tenant_name}",
+            space=file_space,
         )
 
         for i in range(0, len(all_chunks), WEAVIATE_BATCH_SIZE):
@@ -1309,9 +1709,14 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
         if client: client.close()
         return _vectordb_result("error", f"Erreur lors de la connexion à Qdrant: {e}")
 
-    # Vérifier si la collection existe, la créer si nécessaire
+    # Vérifier si la collection existe, la créer si nécessaire. Dimension de la
+    # cible pour la garde d'espace : taille lue sur la collection existante
+    # (config.params.vectors.size), ou taille de création (espace uniforme).
+    qdrant_target_dim = None
+    target_desc_space = f"la collection Qdrant '{collection_name}'"
     try:
         collection_info = client.get_collection(collection_name=collection_name)
+        qdrant_target_dim = _qdrant_vector_size(collection_info)
         print(f"La collection '{collection_name}' existe déjà.")
         # Idéalement, vérifier si la dimension du vecteur correspond, mais nécessite de connaître la dimension attendue.
         # vector_size_expected = 1536 # Exemple: à adapter selon le modèle d'embedding utilisé
@@ -1324,16 +1729,28 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
         # Supposer que l'erreur signifie que la collection n'existe pas (à affiner si nécessaire)
         print(f"La collection '{collection_name}' n'existe pas ou erreur lors de la récupération: {e}. Tentative de création...")
         try:
-            # Déterminer la taille du vecteur à partir du premier chunk valide
+            # Déterminer la taille du vecteur : dimension uniforme des vecteurs
+            # exploitables (hors vecteurs nuls ; fichier mélangé ou phase dense
+            # incomplète refusés avant toute création), sinon premier chunk
+            # valide (historique).
             vector_size = None
             temp_chunks = []
             with open(embeddings_json_file, 'r', encoding='utf-8') as f_temp:
                  temp_chunks = json.load(f_temp)
-            for chunk in temp_chunks:
-                if chunk.get("embedding") is not None:
-                    vector_size = len(chunk["embedding"])
-                    break
-            
+            temp_space, temp_error = _check_vector_space(temp_chunks, target_desc=target_desc_space,
+                                                         drop_foreign=False)
+            if temp_error:
+                print(temp_error)
+                if client: client.close()
+                return _vectordb_result("error", temp_error)
+            if temp_space is not None:
+                vector_size = temp_space.dim
+            else:
+                for chunk in temp_chunks:
+                    if chunk.get("embedding") is not None:
+                        vector_size = len(chunk["embedding"])
+                        break
+
             if vector_size is None:
                  print("Erreur: Impossible de déterminer la taille du vecteur à partir du fichier JSON.")
                  if client: client.close()
@@ -1347,6 +1764,7 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
                 # sparse_vectors_config={...} 
             )
             print(f"Collection '{collection_name}' créée avec succès.")
+            qdrant_target_dim = vector_size
         except Exception as e_create:
             print(f"Erreur lors de la création de la collection '{collection_name}': {e_create}")
             traceback.print_exc()
@@ -1366,11 +1784,21 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
 
     print(f"Chargement de {len(all_chunks)} chunks avec embeddings")
 
+    # Garde d'espace vectoriel AVANT dédup et upsert : fichier mélangé ou phase
+    # dense incomplète refusés localement, dimension de la collection (existante
+    # ou créée) comparée, vecteurs étrangers à l'espace retirés.
+    file_space, space_error = _check_vector_space(all_chunks, qdrant_target_dim, target_desc=target_desc_space)
+    if space_error:
+        print(space_error)
+        if client: client.close()
+        return _vectordb_result("error", space_error)
+
     # Déduplication (Lot 2/3) avant la boucle d'insertion. No-op si DEDUP_ENABLED=0.
     _dedup_adapter = _QdrantDedupAdapter(client, collection_name)
     all_chunks, dedup_skipped, dedup_journal = _run_dedup(
         all_chunks, _dedup_adapter, embeddings_json_file,
         target_desc=collection_name,
+        space=file_space,
     )
 
     total_inserted_count = 0

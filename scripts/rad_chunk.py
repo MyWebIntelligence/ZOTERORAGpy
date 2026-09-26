@@ -55,12 +55,12 @@ except ImportError:
 try:
     from scripts.rad_providers import (
         ALBERT_PREFIX, PROVIDER_ALBERT, PROVIDER_OPENROUTER,
-        legacy_cache_provider_label, legacy_provider, resolve_llm_provider,
+        EmbeddingConfig, legacy_cache_provider_label, legacy_provider, resolve_llm_provider,
     )
 except ImportError:
     from rad_providers import (
         ALBERT_PREFIX, PROVIDER_ALBERT, PROVIDER_OPENROUTER,
-        legacy_cache_provider_label, legacy_provider, resolve_llm_provider,
+        EmbeddingConfig, legacy_cache_provider_label, legacy_provider, resolve_llm_provider,
     )
 
 # Socle Albert (DINUM) : à l'import, seul le paquet léger (``config`` et
@@ -208,6 +208,17 @@ _ALBERT_CLIENT_LOCK = threading.Lock()
 _ALBERT_RESOLVE_LOCK = threading.Lock()
 _ALBERT_ABORT = None
 _ALBERT_ABORT_LOCK = threading.Lock()
+# Première erreur de compte (clé, compte expiré, budget, quota) rencontrée par
+# les embeddings Albert : les lots suivants restent sans vecteur, sans appel, et
+# la phase dense sort en 2 (décision 22). Remise à zéro par ``reset_albert_state``.
+_ALBERT_EMBED_ABORT = None
+_ALBERT_EMBED_ABORT_LOCK = threading.Lock()
+
+# Embeddings denses : champs d'espace écrits sur chaque chunk seulement hors
+# espace par défaut (OpenAI text-embedding-3-large, fichier inchangé à l'octet),
+# et plafond d'un lot Albert (D12 : 65 textes donnent un 413).
+EMBEDDING_SPACE_FIELDS = ("embedding_provider", "embedding_model", "embedding_dim")
+ALBERT_EMBED_BATCH_MAX = 64
 
 
 def recode_skip_providers(skip_lightonocr):
@@ -335,12 +346,15 @@ def _get_albert_client():
 
 
 def reset_albert_state():
-    """Oublie le client Albert et l'arrêt mémorisé du processus (tests, nouveau job en processus)."""
-    global _ALBERT_CLIENT, _ALBERT_ABORT
+    """Oublie le client Albert et les arrêts mémorisés du processus (recodage et
+    embeddings ; tests, nouveau job en processus)."""
+    global _ALBERT_CLIENT, _ALBERT_ABORT, _ALBERT_EMBED_ABORT
     with _ALBERT_CLIENT_LOCK:
         _ALBERT_CLIENT = None
     with _ALBERT_ABORT_LOCK:
         _ALBERT_ABORT = None
+    with _ALBERT_EMBED_ABORT_LOCK:
+        _ALBERT_EMBED_ABORT = None
 
 
 def _albert_set_abort(exc):
@@ -1343,7 +1357,216 @@ def process_all_documents(df, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-
 # PART 2: Chunk Embedding (Dense)
 # ----------------------------------------------------------------------
 
-def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, max_retries=3):
+# Espace d'embeddings (EMBEDDING_PROVIDER) : OpenAI par défaut, chemin historique
+# inchangé à l'octet ; ``albert`` = bge-m3 (1024 dimensions) servi par Albert,
+# espace séparé, sans jamais de repli vers OpenAI ni de vecteur nul.
+def _embedding_provider_requested(env=None):
+    """Valeur normalisée de ``EMBEDDING_PROVIDER`` (``''`` si absente), sans validation."""
+    source = os.environ if env is None else env
+    return (source.get("EMBEDDING_PROVIDER") or "").strip().lower()
+
+
+def resolve_embedding_config(env=None):
+    """Configuration d'embeddings du run (``EmbeddingConfig.from_env``).
+
+    L'interrupteur Albert est celui du module (``ALBERT_ENABLED``, lu à l'import
+    et patchable, décision 11) : il remplace la valeur de ``ALBERT_ENABLED`` de
+    l'environnement lu, comme pour le recodage (``_albert_enabled``).
+
+    Args:
+        env: environnement lu (défaut : ``os.environ``), jamais modifié.
+
+    Returns:
+        ``EmbeddingConfig`` (espace OpenAI par défaut si ``EMBEDDING_PROVIDER``
+        est vide, absent ou ``openai``).
+
+    Raises:
+        AlbertDisabledError: ``albert`` demandé alors qu'Albert est désactivé.
+        ValueError: valeur inconnue, modèle Albert non pris en charge ou URL de
+            base Albert refusée.
+    """
+    source = os.environ if env is None else env
+    overlay = dict(source)
+    overlay["ALBERT_ENABLED"] = "1" if _albert_enabled() else "0"
+    return EmbeddingConfig.from_env(overlay)
+
+
+def albert_embed_startup_exception():
+    """Erreur qui empêche la phase dense de démarrer avec l'espace demandé, sinon ``None``.
+
+    Contrôles locaux, sans appel réseau : ``EMBEDDING_PROVIDER`` connu, Albert
+    activé pour ``albert``, URL de base admise et clé présente. ``None`` pour
+    l'espace OpenAI (le socle Albert n'est alors pas chargé).
+
+    Returns:
+        ``AlbertDisabledError`` ou ``ValueError`` (configuration refusée),
+        ``AlbertMissingKeyError`` (clé Albert absente, erreur de compte) ou ``None``.
+    """
+    try:
+        cfg = resolve_embedding_config()
+    except ValueError as exc:
+        return exc
+    if cfg.space.provider != PROVIDER_ALBERT:
+        return None
+    try:
+        _albert_config()
+    except ValueError as exc:
+        return exc
+    if not ALBERT_API_KEY:
+        client_mod = _albert_module("client")
+        return client_mod.AlbertMissingKeyError(client_mod.MISSING_KEY_MESSAGE)
+    return None
+
+
+def abort_embeddings(exc, code=2):
+    """Annonce l'arrêt de la phase dense puis lève ``SystemExit(code)``.
+
+    Affiche un message français et, si Albert est en cause
+    (``EMBEDDING_PROVIDER=albert`` ou erreur Albert), la ligne stable
+    ``albert_abort_marker`` lue par les routes et le runner Celery. Une valeur
+    inconnue de ``EMBEDDING_PROVIDER`` n'émet pas de ligne Albert.
+
+    Args:
+        exc: erreur de configuration, de compte ou de service.
+        code: code de sortie (2 par défaut).
+
+    Raises:
+        SystemExit: toujours.
+    """
+    message = f"Erreur critique (embeddings) : {exc} Arrêt."
+    print(message)
+    logging.error(message)
+    albert_related = (
+        _embedding_provider_requested() == PROVIDER_ALBERT
+        or isinstance(exc, (_rad_albert.AlbertError, _rad_albert.AlbertDisabledError))
+    )
+    if albert_related:
+        print(albert_abort_marker(exc))
+    raise SystemExit(code)
+
+
+def run_albert_embed_preflight(space, *, today=None):
+    """Preflight Albert du rôle ``embed`` avant la phase dense.
+
+    ``/v1/me`` (compte expiré → erreur) puis ``/v1/models`` : le modèle
+    d'embedding épinglé (``ALBERT_EMBED_MODEL``, ``bge-m3``) doit exister et être
+    de type embeddings ; les ids résolus sont mémorisés par le client, qui
+    envoie ensuite l'id épinglé (jamais un alias). Aucun repli de modèle.
+
+    Args:
+        space: espace Albert du run.
+        today: date de référence (défaut : aujourd'hui).
+
+    Returns:
+        ``PreflightResult`` (``skipped`` si ``ALBERT_PREFLIGHT=0``).
+
+    Raises:
+        AlbertAuthError: clé absente ou refusée, compte expiré, quota épuisé.
+        AlbertPermanentError: modèle absent de ``/v1/models`` ou de type incompatible.
+        AlbertTransientError: service injoignable après réessais.
+        ValueError: URL de base refusée.
+    """
+    client = _get_albert_client()
+    day = today or datetime.date.today()
+    result = _albert_module("preflight").run_preflight(client, roles=("embed",), today=day)
+    if not result.skipped:
+        catalog = _albert_module("catalog")
+        served = result.primary("embed")
+        dim = catalog.embedding_dim(served) if served else None
+        if dim is not None and int(dim) != int(space.dim):
+            raise _rad_albert.AlbertPermanentError(
+                reason="validation",
+                endpoint="/v1/models",
+                detail=f"modèle d'embedding {served} en {dim} dimensions, espace attendu {space.dim}",
+            )
+    return result
+
+
+def _start_albert_embeddings(space):
+    """Configuration, clé et preflight Albert de la phase dense ; ``exit 2`` sinon.
+
+    Returns:
+        ``AlbertConfig`` du run (ratio de manques toléré, concurrence).
+
+    Raises:
+        SystemExit: code 2 (configuration refusée, erreur de compte, modèle ou
+            service indisponible), après la ligne ``albert_abort_marker``.
+    """
+    try:
+        albert_cfg = _albert_config()
+        result = run_albert_embed_preflight(space)
+    except (_rad_albert.AlbertError, ValueError) as exc:
+        abort_embeddings(exc, code=2)
+    print(result.summary_line())
+    return albert_cfg
+
+
+def _albert_set_embed_abort(exc):
+    """Mémorise la première erreur de compte des embeddings Albert et l'annonce une fois.
+
+    Les lots suivants restent sans vecteur, sans appel ; la phase dense sort en 2
+    après l'écriture du fichier (``_finish_albert_embeddings``).
+    """
+    global _ALBERT_EMBED_ABORT
+    with _ALBERT_EMBED_ABORT_LOCK:
+        first = _ALBERT_EMBED_ABORT is None
+        if first:
+            _ALBERT_EMBED_ABORT = exc
+    if first:
+        print(f"Albert : embeddings arrêtés — {exc} Lots restants sans vecteur, sans appel.")
+
+
+def _valid_space_vector(vec, space):
+    """Vrai si ``vec`` est un vecteur exploitable de l'espace ``space``.
+
+    Liste de nombres de la dimension de l'espace, non entièrement nulle : un
+    vecteur nul ou de mauvaise dimension n'est jamais accepté hors espace par
+    défaut.
+    """
+    if not isinstance(vec, (list, tuple)) or len(vec) != space.dim:
+        return False
+    try:
+        return any(float(x) != 0.0 for x in vec)
+    except (TypeError, ValueError):
+        return False
+
+
+def _albert_embed_batch(texts, space):
+    """Embeddings Albert d'un lot de textes : un vecteur par texte, ``None`` sinon.
+
+    Les textes vides ne sont jamais envoyés (``None``). ``AlbertClient.embed``
+    découpe en tranches de 64 au plus, trie par index, contrôle la dimension et
+    normalise (D12) ; l'id épinglé ``bge-m3`` est envoyé. Un échec donne
+    ``None`` pour les textes du lot : jamais de vecteur nul, jamais d'appel
+    OpenAI. Une erreur de compte ou de quota arrête tous les lots suivants.
+
+    Args:
+        texts: textes du lot.
+        space: espace Albert (modèle et dimension attendus).
+
+    Returns:
+        Liste de même longueur que ``texts`` : vecteurs ou ``None``.
+    """
+    out = [None] * len(texts)
+    positions = [i for i, text in enumerate(texts) if isinstance(text, str) and text.strip()]
+    if not positions or _ALBERT_EMBED_ABORT is not None:
+        return out
+    try:
+        vectors = _get_albert_client().embed([texts[i] for i in positions], model=space.model)
+    except _rad_albert.AlbertAuthError as exc:
+        _albert_set_embed_abort(exc)
+        return out
+    except (_rad_albert.AlbertError, ValueError) as exc:
+        logging.error(f"Embeddings Albert en échec pour un lot de {len(positions)} texte(s) : {exc}")
+        return out
+    for j, i in enumerate(positions):
+        vec = vectors[j] if j < len(vectors) else None
+        if _valid_space_vector(vec, space):
+            out[i] = vec
+    return out
+
+
+def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, max_retries=3, space=None):
     """
     Generate embeddings avec retry exponentiel et adaptive batching.
 
@@ -1358,11 +1581,18 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
         model: Modèle d'embedding OpenAI à utiliser.
         retry_count: Compteur de tentatives (usage interne pour récursion).
         max_retries: Nombre maximum de tentatives avant échec.
+        space: espace d'embeddings. ``None`` ou espace par défaut : chemin OpenAI
+            historique, strictement inchangé. Espace Albert : ``AlbertClient.embed``
+            (``_albert_embed_batch``), ``None`` pour un texte vide ou en échec,
+            jamais de vecteur nul ni d'appel OpenAI.
 
     Returns:
         Liste d'embeddings (vecteurs) correspondant aux textes d'entrée.
-        En cas d'échec total, retourne des vecteurs nuls de dimension 3072.
+        En cas d'échec total, retourne des vecteurs nuls de dimension 3072
+        (chemin OpenAI seulement).
     """
+    if space is not None and space.provider == PROVIDER_ALBERT:
+        return _albert_embed_batch(texts, space)
     batch_size = len(texts)
 
     try:
@@ -1414,11 +1644,56 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
             logging.error(f"Single embedding failed, returning zero vector")
             return [[0.0] * 3072]
 
-def _embed_with_cache(texts, recode_cfg, model="text-embedding-3-large"):
+def _embed_with_cache_space(texts, recode_cfg, space):
+    """Cache de vecteurs denses d'un espace hors défaut (Albert bge-m3).
+
+    Clé cloisonnée : ``embed_key(texte, space.cache_model, space.params_json())``,
+    soit ``'albert:bge-m3'`` et ``{dim, model, norm, provider}``. Un HIT de
+    mauvaise dimension (ou nul) compte comme MISS ; ``None`` n'est jamais mis en
+    cache ; un MISS passe par ``get_embeddings_batch(..., space=space)`` (jamais
+    OpenAI).
+
+    Args:
+        texts: textes du lot.
+        recode_cfg: ``RecodeConfig`` (chemin du cache).
+        space: espace d'embeddings hors défaut.
+
+    Returns:
+        Liste de vecteurs (ou ``None``), dans l'ordre des textes.
+    """
+    cache_model = space.cache_model
+    params = space.params_json()
+    keys = [rad_recode_cache.embed_key(t, cache_model, params) if t else None for t in texts]
+    out = [None] * len(texts)
+    miss_idx = []
+    for i, key in enumerate(keys):
+        hit = rad_recode_cache.get_embed(recode_cfg, key) if key else None
+        if _valid_space_vector(hit, space):
+            out[i] = hit
+        else:
+            miss_idx.append(i)
+    if miss_idx:
+        sub = get_embeddings_batch([texts[i] for i in miss_idx], model=space.model, space=space)
+        for j, i in enumerate(miss_idx):
+            vec = sub[j] if j < len(sub) else None
+            if not _valid_space_vector(vec, space):
+                continue
+            out[i] = vec
+            if keys[i]:
+                rad_recode_cache.put_embed(recode_cfg, keys[i], vec)
+    return out
+
+
+def _embed_with_cache(texts, recode_cfg, model="text-embedding-3-large", space=None):
     """Lot 7.e — cache de vecteurs denses clé par sha256(texte recodé)·model·params.
     HIT → 0 appel embedding. Ferme l'axe vecteur (texte identique → vecteur
     byte-identique). MISS → appel groupé puis PUT. Advisory (erreur cache → recalcul).
+
+    ``space`` hors défaut (Albert) : clé cloisonnée par ``_embed_with_cache_space`` ;
+    ``None`` ou espace par défaut : clés et appels historiques inchangés.
     """
+    if space is not None and not space.is_default:
+        return _embed_with_cache_space(texts, recode_cfg, space)
     embed_params = json.dumps({"model": model}, sort_keys=True)
     keys = [rad_recode_cache.embed_key(t, model, embed_params) if t else None for t in texts]
     out = [None] * len(texts)
@@ -1439,14 +1714,47 @@ def _embed_with_cache(texts, recode_cfg, model="text-embedding-3-large"):
     return out
 
 
-def process_chunks_for_embedding(chunks_batch):
+def _apply_space_fields(chunk, space):
+    """Écrit (hors défaut) ou retire (défaut) les champs d'espace d'un chunk.
+
+    Espace hors défaut : ``embedding_provider``, ``embedding_model`` et
+    ``embedding_dim``. Espace par défaut (``None`` ou OpenAI) : ces champs sont
+    retirés s'ils existent (fichier ré-embeddé), sans rien changer sinon.
+    """
+    if space is None or space.is_default:
+        for key in EMBEDDING_SPACE_FIELDS:
+            if key in chunk:
+                del chunk[key]
+        return
+    chunk["embedding_provider"] = space.provider
+    chunk["embedding_model"] = space.model
+    chunk["embedding_dim"] = space.dim
+
+
+def _failed_batch_embedding(space):
+    """Vecteur d'un lot en échec : zéros à 3072 pour OpenAI (historique), ``None`` sinon."""
+    if space is None or space.is_default:
+        return [0.0] * 3072
+    return None
+
+
+def process_chunks_for_embedding(chunks_batch, space=None):
     """
     Traite un lot de chunks pour y ajouter les embeddings denses.
     Modifie les dictionnaires de chunks en place.
+
+    ``space`` ``None`` (ou espace par défaut) : chemin OpenAI historique inchangé.
+    Espace hors défaut (Albert) : vecteurs de cet espace (``None`` si absent) et
+    champs d'espace écrits sur chaque chunk du lot.
     """
     texts_to_embed = [chunk.get("text", "") for chunk in chunks_batch]
     recode_cfg = rad_recode_cache.RecodeConfig.from_env()
-    if recode_cfg.embed_cache_enabled:
+    if space is not None and not space.is_default:
+        if recode_cfg.embed_cache_enabled:
+            embeddings = _embed_with_cache(texts_to_embed, recode_cfg, model=space.model, space=space)
+        else:
+            embeddings = get_embeddings_batch(texts_to_embed, model=space.model, space=space)
+    elif recode_cfg.embed_cache_enabled:
         embeddings = _embed_with_cache(texts_to_embed, recode_cfg)
     else:
         embeddings = get_embeddings_batch(texts_to_embed)
@@ -1456,8 +1764,9 @@ def process_chunks_for_embedding(chunks_batch):
             chunks_batch[i]["embedding"] = embedding
         else:
             # Marquer l'échec ou laisser vide, selon la stratégie souhaitée
-            chunks_batch[i]["embedding"] = None 
+            chunks_batch[i]["embedding"] = None
             print(f"Avertissement: Embedding non généré pour le chunk ID {chunks_batch[i].get('id', 'Inconnu')}")
+        _apply_space_fields(chunks_batch[i], space)
     return chunks_batch # Retourne le lot modifié
 
 def save_processed_chunks_to_json_overwrite(all_chunks, json_file):
@@ -1478,20 +1787,46 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
     - Monitoring du throughput (embeddings/seconde)
     - Tracking des rate limit hits
 
+    Espace d'embeddings (``EMBEDDING_PROVIDER``, résolu une seule fois) :
+
+    - OpenAI (défaut) : requêtes, fichier et sorties strictement inchangés ;
+    - Albert (``albert``, bge-m3, 1024 dimensions) : preflight du rôle ``embed``,
+      lots de ``min(DEFAULT_EMBEDDING_BATCH_SIZE, 64)`` textes, jamais de vecteur
+      nul (``None`` si absent), champs d'espace sur chaque chunk, journal d'usage
+      si Albert a été appelé. Au-delà de ``ALBERT_EMBED_MAX_MISSING_RATIO``
+      embeddings manquants, le fichier est écrit puis la phase sort en 1 ; une
+      erreur de compte la fait sortir en 2.
+
+    ``albert`` avec Albert désactivé, ou une valeur inconnue : message français
+    et sortie en 2, avant toute lecture.
+
     Args:
         input_json_file: Chemin vers le fichier JSON contenant les chunks.
         output_json_file: Chemin de sortie (auto-généré si None).
 
     Returns:
         Chemin du fichier de sortie ou None en cas d'erreur.
+
+    Raises:
+        SystemExit: 2 (configuration refusée, erreur de compte ou preflight
+            Albert), 1 (embeddings Albert manquants au-delà du seuil, fichier écrit).
     """
     if output_json_file is None:
         base_name = os.path.splitext(input_json_file)[0]
         output_json_file = f"{base_name}_with_embeddings.json"
 
+    try:
+        embed_cfg = resolve_embedding_config()
+    except ValueError as exc:
+        abort_embeddings(exc, code=2)
+    space = embed_cfg.space
+    use_albert = space.provider == PROVIDER_ALBERT
+
     if not os.path.exists(input_json_file):
         print(f"Le fichier d'entrée '{input_json_file}' n'existe pas.")
         return None
+
+    albert_cfg = _start_albert_embeddings(space) if use_albert else None
 
     with open(input_json_file, 'r', encoding='utf-8') as f:
         all_chunks_from_file = json.load(f)
@@ -1502,18 +1837,24 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
     # Emit init event for SSE progress tracking (chunks only - documents were processed in step 3.1)
     print(f"PROGRESS|init|{total_chunks}|Generating embeddings for {total_chunks} chunks", flush=True)
 
+    # Taille de lot : inchangée pour OpenAI ; plafonnée à 64 textes pour Albert (D12).
+    batch_size = DEFAULT_EMBEDDING_BATCH_SIZE
+    if use_albert:
+        batch_size = min(DEFAULT_EMBEDDING_BATCH_SIZE, space.batch_max or ALBERT_EMBED_BATCH_MAX,
+                         ALBERT_EMBED_BATCH_MAX)
+
     # Créer tous les batches à traiter (flat list, pas groupés par doc)
     all_batches = []
     batch_to_indices = {}  # Map batch index to chunk indices in original list
 
-    for i in range(0, total_chunks, DEFAULT_EMBEDDING_BATCH_SIZE):
-        batch = all_chunks_from_file[i : i + DEFAULT_EMBEDDING_BATCH_SIZE]
+    for i in range(0, total_chunks, batch_size):
+        batch = all_chunks_from_file[i : i + batch_size]
         batch_idx = len(all_batches)
         all_batches.append(batch)
-        batch_to_indices[batch_idx] = list(range(i, min(i + DEFAULT_EMBEDDING_BATCH_SIZE, total_chunks)))
+        batch_to_indices[batch_idx] = list(range(i, min(i + batch_size, total_chunks)))
 
     total_batches = len(all_batches)
-    print(f"Préparation de {total_batches} batches (taille max: {DEFAULT_EMBEDDING_BATCH_SIZE})")
+    print(f"Préparation de {total_batches} batches (taille max: {batch_size})")
 
     # Monitoring variables
     batch_start = time.time()
@@ -1521,15 +1862,24 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
     rate_limit_hits = 0
     results = [None] * total_batches  # Pre-allocate results array
 
-    # Max 4 workers pour éviter rate limits OpenAI
-    max_embedding_workers = min(DEFAULT_MAX_WORKERS, 4)
+    # Max 4 workers pour éviter rate limits OpenAI (Albert : ALBERT_EMBED_CONCURRENCY)
+    if use_albert:
+        max_embedding_workers = max(1, min(DEFAULT_MAX_WORKERS, albert_cfg.embed_concurrency))
+    else:
+        max_embedding_workers = min(DEFAULT_MAX_WORKERS, 4)
     logging.info(f"Using {max_embedding_workers} workers for embedding generation")
 
     with ThreadPoolExecutor(max_workers=max_embedding_workers) as executor:
-        futures = {
-            executor.submit(process_chunks_for_embedding, batch): batch_idx
-            for batch_idx, batch in enumerate(all_batches)
-        }
+        if use_albert:
+            futures = {
+                executor.submit(process_chunks_for_embedding, batch, space): batch_idx
+                for batch_idx, batch in enumerate(all_batches)
+            }
+        else:
+            futures = {
+                executor.submit(process_chunks_for_embedding, batch): batch_idx
+                for batch_idx, batch in enumerate(all_batches)
+            }
 
         for future in tqdm(as_completed(futures), total=total_batches, desc="Generating embeddings"):
             batch_idx = futures[future]
@@ -1544,10 +1894,11 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
             except RateLimitError:
                 rate_limit_hits += 1
                 logging.error(f"Batch {batch_idx} failed after retries (rate limit)")
-                # Mark as failed - assign zero vectors
+                # Mark as failed - assign zero vectors (OpenAI only; never on Albert)
                 failed_batch = all_batches[batch_idx]
                 for chunk in failed_batch:
-                    chunk["embedding"] = [0.0] * 3072
+                    chunk["embedding"] = _failed_batch_embedding(space)
+                    _apply_space_fields(chunk, space)
                 results[batch_idx] = failed_batch
                 embeddings_generated += len(failed_batch)
 
@@ -1555,7 +1906,8 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
                 logging.error(f"Batch {batch_idx} failed with error: {e}")
                 failed_batch = all_batches[batch_idx]
                 for chunk in failed_batch:
-                    chunk["embedding"] = [0.0] * 3072
+                    chunk["embedding"] = _failed_batch_embedding(space)
+                    _apply_space_fields(chunk, space)
                 results[batch_idx] = failed_batch
                 embeddings_generated += len(failed_batch)
 
@@ -1580,13 +1932,13 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
             metrics_collector.increment_counter(
                 'embeddings_generated',
                 embeddings_generated,
-                model='text-embedding-3-large',
+                model=space.model,
                 type='dense'
             )
             metrics_collector.observe_histogram(
                 'embedding_duration',
                 elapsed,
-                model='text-embedding-3-large'
+                model=space.model
             )
             if rate_limit_hits > 0:
                 metrics_collector.increment_counter(
@@ -1599,8 +1951,50 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
             pass  # Don't fail on metrics errors
 
     save_processed_chunks_to_json_overwrite(all_chunks_with_embeddings, output_json_file)
+    if use_albert:
+        _finish_albert_embeddings(all_chunks_with_embeddings, output_json_file, albert_cfg, space)
     print(f"Tous les embeddings denses ont été générés. Total {len(all_chunks_with_embeddings)} chunks sauvegardés dans '{output_json_file}'.")
     return output_json_file
+
+
+def _finish_albert_embeddings(chunks, output_json_file, albert_cfg, space):
+    """Fin de la phase dense Albert, une fois le fichier écrit.
+
+    Journal d'usage (``albert_usage.jsonl`` et synthèse) si Albert a été appelé,
+    puis : erreur de compte mémorisée → ``exit 2`` (ligne ``albert_abort_marker``) ;
+    part d'embeddings manquants au-delà de ``ALBERT_EMBED_MAX_MISSING_RATIO`` →
+    ``exit 1`` avec un message français (jamais d'index silencieusement incomplet).
+
+    Args:
+        chunks: chunks écrits dans le fichier de sortie.
+        output_json_file: fichier de sortie (son dossier reçoit le journal d'usage).
+        albert_cfg: ``AlbertConfig`` du run.
+        space: espace Albert du run.
+
+    Raises:
+        SystemExit: 2 (erreur de compte) ou 1 (manques au-delà du seuil).
+    """
+    report_albert_usage(os.path.dirname(os.path.abspath(output_json_file)))
+    abort = _ALBERT_EMBED_ABORT
+    if abort is not None:
+        message = f"Erreur critique Albert : {abort} Embeddings arrêtés (code 2)."
+        print(message)
+        logging.error(message)
+        print(albert_abort_marker(abort))
+        raise SystemExit(2)
+    total = len(chunks)
+    missing = sum(1 for chunk in chunks if not _valid_space_vector(chunk.get("embedding"), space))
+    ratio = (missing / total) if total else 0.0
+    threshold = float(albert_cfg.embed_max_missing_ratio)
+    if missing and ratio > threshold:
+        message = (
+            f"Erreur : {missing}/{total} embedding(s) Albert manquant(s) (part {ratio:.4f}, "
+            f"au-delà du seuil ALBERT_EMBED_MAX_MISSING_RATIO={threshold:g}). "
+            f"Fichier écrit dans '{output_json_file}', phase dense en échec (code 1)."
+        )
+        print(message)
+        logging.error(message)
+        raise SystemExit(1)
 
 # ----------------------------------------------------------------------
 # PART 3: Chunk sparse embedding
@@ -1692,13 +2086,28 @@ def generate_sparse_embeddings(input_json_file=DEFAULT_INPUT_JSON_WITH_EMBEDDING
     return output_json_file
 
 
+def _dense_requires_openai():
+    """Vrai si la phase dense emprunte l'espace OpenAI (défaut), donc le client OpenAI.
+
+    Une configuration d'embeddings refusée n'exige pas OpenAI : l'erreur est
+    rapportée par ``albert_embed_startup_exception`` (sortie en 2).
+    """
+    try:
+        return resolve_embedding_config().space.provider != PROVIDER_ALBERT
+    except ValueError:
+        return False
+
+
 def missing_llm_client_for_phase(phase, model):
     """Indique si un client requis par la phase CLI demandée est absent.
 
     Garde de la CLI (plus de saisie interactive de clé) :
 
     * ``sparse`` : n'exige aucun client (spaCy seulement) ;
-    * ``dense`` : exige le client OpenAI (embeddings ``text-embedding-3-large``) ;
+    * ``dense`` : exige le client OpenAI pour l'espace OpenAI seulement
+      (``text-embedding-3-large``) ; l'espace Albert (``EMBEDDING_PROVIDER=albert``)
+      n'utilise jamais OpenAI, sa clé est contrôlée par
+      ``albert_embed_startup_exception`` ;
     * ``initial`` : exige un client pour le fournisseur du modèle de recodage
       (``legacy_provider``). Pour un modèle OpenRouter, le client OpenAI suffit
       aussi : ``gpt_recode_batch`` y replie déjà sur ``gpt-4o-mini`` quand le
@@ -1714,7 +2123,7 @@ def missing_llm_client_for_phase(phase, model):
     Returns:
         ``True`` si la phase ne peut pas s'exécuter faute de client.
     """
-    if phase in ("dense", "all") and client is None:
+    if phase in ("dense", "all") and client is None and _dense_requires_openai():
         return True
     if phase in ("initial", "all"):
         if _selects_albert(effective_recode_model(model, rad_recode_cache.RecodeConfig.from_env())):
@@ -1736,8 +2145,15 @@ if __name__ == '__main__':
                              "(OpenRouter) or 'albert/<id>' (Albert, DINUM: e.g. 'albert/ministral-3-8b-instruct-2512'; "
                              "requires ALBERT_ENABLED=1 and ALBERT_API_KEY, never falls back to OpenAI/OpenRouter). "
                              "Default: gpt-4o-mini")
+    parser.add_argument("--embedding-provider", choices=["openai", "albert"], default=None,
+                        help="Dense embedding provider for the 'dense' phase: 'openai' (text-embedding-3-large, "
+                             "3072 dimensions) or 'albert' (bge-m3 served by Albert, DINUM: separate 1024-dimension "
+                             "vector space, requires ALBERT_ENABLED=1 and ALBERT_API_KEY, never falls back to OpenAI). "
+                             "Sets EMBEDDING_PROVIDER for this run. Default: EMBEDDING_PROVIDER, else openai")
 
     args = parser.parse_args()
+    if args.embedding_provider:
+        os.environ["EMBEDDING_PROVIDER"] = args.embedding_provider
 
     # Setup logging for chunking phase
     chunking_log_path = os.path.join(args.output, "chunking.log")
@@ -1806,6 +2222,13 @@ if __name__ == '__main__':
             logger.error(f"Erreur critique Albert : {albert_startup_exc} Arrêt.")
             print(albert_abort_marker(albert_startup_exc))
             exit(2)
+    # Espace d'embeddings de la phase dense (EMBEDDING_PROVIDER) : valeur connue,
+    # Albert activé et clé présente pour ``albert`` ; sinon message et code 2,
+    # avant tout traitement (jamais de repli vers OpenAI).
+    if args.phase in ('dense', 'all'):
+        embed_startup_exc = albert_embed_startup_exception()
+        if embed_startup_exc is not None:
+            abort_embeddings(embed_startup_exc, code=2)
     if missing_llm_client_for_phase(args.phase, args.model):
         print("Erreur critique: Client OpenAI non initialisé (OPENAI_API_KEY manquante?). Arrêt.")
         logger.error("Erreur critique: Client OpenAI non initialisé (OPENAI_API_KEY manquante?). Arrêt.")
