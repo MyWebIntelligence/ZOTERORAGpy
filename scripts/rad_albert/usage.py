@@ -1,8 +1,12 @@
 """Ledger d'usage des appels Albert — stdlib seulement.
 
-Chaque réponse d'inférence (chat, OCR, embeddings, recherche) est enregistrée
-avec le modèle **envoyé** (``model`` : id épinglé après résolution, modèle de
-repli compris), le champ ``model`` **renvoyé** par l'API (``response_model``,
+Chaque réponse d'inférence (chat, OCR, embeddings, recherche) est enregistrée,
+ainsi que chaque envoi de chunks (rôle ``push`` : vectorisation côté serveur
+qui consomme le quota bge-m3, D19 ; sans modèle ni tokens, la réponse n'en
+porte pas) ; les appels de gestion (collections, documents, listes) ne le
+sont pas. Chaque enregistrement porte le modèle **envoyé** (``model`` : id
+épinglé après résolution, modèle de repli compris), le champ ``model``
+**renvoyé** par l'API (``response_model``,
 qui recopie le nom demandé, alias compris : D5, D12), les tokens,
 ``usage.cost`` et ``usage.impacts`` (D7). Le ledger ne produit rien tant
 qu'Albert n'a pas été appelé : ``write_jsonl`` n'écrit pas de fichier vide et

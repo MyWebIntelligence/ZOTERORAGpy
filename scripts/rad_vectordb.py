@@ -630,6 +630,236 @@ class _QdrantDedupAdapter:
         return out
 
 
+def _albert_root():
+    """Racine d'import du paquet ``rad_albert`` : celle de ``rad_dedup``.
+
+    ``scripts.rad_albert`` en contexte paquet (application, Celery, tests),
+    ``rad_albert`` en CLI : les classes d'erreur levées par le client sont
+    ainsi celles que ce module intercepte.
+    """
+    return "scripts.rad_albert" if rad_dedup.__name__.startswith("scripts.") else "rad_albert"
+
+
+def _albert_config_from_env():
+    """``AlbertConfig.from_env()`` en n'important que ``rad_albert.config`` (stdlib).
+
+    Sert au contrôle de l'interrupteur maître ``ALBERT_ENABLED`` avant tout
+    le reste : ni le client ni httpx ne sont chargés pour un refus.
+
+    Raises:
+        ValueError: configuration Albert invalide.
+    """
+    import importlib
+
+    return importlib.import_module(_albert_root() + ".config").AlbertConfig.from_env()
+
+
+def _albert_modules():
+    """Importe paresseusement le paquet ``rad_albert`` (client, collections, config, errors).
+
+    Même racine que ``rad_dedup`` (``_albert_root``). Rien n'est importé tant
+    qu'Albert n'est pas sollicité (httpx compris).
+    """
+    import importlib
+    from types import SimpleNamespace
+
+    root = _albert_root()
+    return SimpleNamespace(
+        client=importlib.import_module(root + ".client"),
+        collections=importlib.import_module(root + ".collections"),
+        config=importlib.import_module(root + ".config"),
+        errors=importlib.import_module(root + ".errors"),
+    )
+
+
+class _AlbertDedupAdapter:
+    """Index en mémoire d'une collection Albert : dédup Tier 2 et idempotence.
+
+    ``preload()`` liste les documents de la collection puis leurs chunks
+    (``list_chunks`` paginé) et construit trois index : documents par nom,
+    ``content_id`` connus par document (append-skip, toujours actif) et
+    métadonnées par ``content_hash`` (Tier 2). Il est appelé par
+    ``insert_to_albert`` **avant** ``_run_dedup``, hors de
+    ``rad_dedup.dedup_filter`` (qui avale les exceptions de ``existing``) : un
+    échec du préchargement fait échouer l'envoi bruyamment, sans aucune
+    écriture. ``existing()`` répond ensuite sans appel HTTP. Pas de
+    ``nearest`` : le Tier 3 est sauté.
+
+    Cohérence (D18) : l'indexation côté serveur prend environ 2,4 s ; des
+    chunks envoyés juste avant peuvent manquer à la liste. Les lignes du
+    manifeste local (``merge_manifest``) comblent cette fenêtre, pour les
+    documents toujours présents et pour les lignes de moins de
+    ``_ALBERT_MANIFEST_TRUST_S`` secondes seulement : au-delà, la liste du
+    serveur fait foi. Limite connue : un chunk supprimé seul côté serveur
+    (``DELETE /v1/documents/{id}/chunks/{chunk_id}``) moins de
+    ``_ALBERT_MANIFEST_TRUST_S`` secondes après son envoi n'est renvoyé qu'à
+    une relance postérieure à cette fenêtre.
+
+    Tier 2 : ``rad_dedup`` compare ``chunk.get(champ)`` ; pour les champs
+    dérivés de la liste blanche (``item_key``, ``year``, ``doi``,
+    ``filename``), ``insert_to_albert`` recopie d'abord la valeur dérivée sur
+    ses copies des chunks (``_albert_align_dedup_fields``).
+    """
+
+    db_name = "albert"
+    metric = None
+
+    def __init__(self, client, collection_id, meta_fields=("title",), collections_module=None):
+        """Mémorise le client, la collection cible et les ``DEDUP_META_FIELDS``.
+
+        Args:
+            client: ``AlbertClient`` déjà construit.
+            collection_id: collection cible (entier).
+            meta_fields: ``DEDUP_META_FIELDS`` effectifs (réhydratés par
+                ``existing``).
+            collections_module: module ``rad_albert.collections`` (défaut :
+                import paresseux).
+        """
+        self._client = client
+        self._collection_id = int(collection_id)
+        self._meta_fields = tuple(meta_fields or ())
+        self._col = collections_module if collections_module is not None else _albert_modules().collections
+        self.documents = {}        # nom -> [ids de documents]
+        self.document_names = {}   # id -> nom
+        self._content_ids = {}     # nom -> set(content_id)
+        self._by_hash = {}         # content_hash -> [métadonnées]
+        self.preloaded = False
+        self.chunk_count = 0
+
+    def preload(self, document_names=None):
+        """Charge les documents de la collection et les chunks de ceux retenus.
+
+        Args:
+            document_names: noms des documents dont les chunks sont listés
+                (``None`` : tous, nécessaire au Tier 2 inter-documents quand la
+                dédup est active).
+
+        Returns:
+            int: nombre de chunks indexés.
+
+        Raises:
+            AlbertError: toute erreur de l'API (jamais avalée ici).
+        """
+        wanted = None if document_names is None else set(document_names)
+        docs = self._client.list_documents(self._collection_id)
+        targets = []
+        for doc in docs or []:
+            if not isinstance(doc, dict) or doc.get("id") is None:
+                continue
+            did = int(doc["id"])
+            name = doc.get("name")
+            self.documents.setdefault(name, []).append(did)
+            self.document_names[did] = name
+            if wanted is None or name in wanted:
+                targets.append((did, name))
+        for did, name in targets:
+            for chunk in self._client.list_chunks(did) or []:
+                if isinstance(chunk, dict):
+                    self._index_chunk(did, name, chunk)
+        self.preloaded = True
+        return self.chunk_count
+
+    def _index_chunk(self, document_id, document_name, chunk):
+        """Ajoute un chunk listé aux index ``content_id`` et ``content_hash``."""
+        meta = dict(chunk.get("metadata") or {})
+        cid = meta.get("content_id")
+        if cid:
+            self._content_ids.setdefault(document_name, set()).add(str(cid))
+        chash = meta.get("content_hash")
+        if chash:
+            entry = dict(meta)
+            entry["id"] = f"{document_id}:{chunk.get('id')}"
+            entry.setdefault("content_hash", chash)
+            entry["document_id"] = document_id
+            entry["document_name"] = document_name
+            self._by_hash.setdefault(str(chash), []).append(entry)
+        self.chunk_count += 1
+
+    def merge_manifest(self, rows, *, now=None, max_age_s=None):
+        """Ajoute les ``content_id`` des lignes de manifeste récentes de cette collection.
+
+        Seules comptent les lignes dont le document existe toujours (un
+        document supprimé, par rollback ou par l'utilisateur, est ignoré) et
+        dont l'âge ne dépasse pas la fenêtre d'indexation (au-delà, ou sans
+        horodatage lisible, la liste du serveur fait foi).
+
+        Args:
+            rows: lignes lues par ``rad_albert.collections.read_manifest``.
+            now: instant de référence (``datetime`` ; défaut : maintenant, UTC).
+            max_age_s: âge maximal d'une ligne prise en compte (défaut :
+                ``_ALBERT_MANIFEST_TRUST_S``).
+
+        Returns:
+            int: nombre de ``content_id`` ajoutés.
+        """
+        window = _ALBERT_MANIFEST_TRUST_S if max_age_s is None else float(max_age_s)
+        added = 0
+        for row in rows or []:
+            if not isinstance(row, dict) or "event" in row:
+                continue
+            try:
+                if int(row.get("collection_id")) != self._collection_id:
+                    continue
+                did = int(row.get("document_id"))
+            except (TypeError, ValueError):
+                continue
+            name = self.document_names.get(did)
+            if name is None:
+                continue
+            age = self._col.manifest_row_age_s(row, now=now)
+            if age is None or age > window:
+                continue
+            known = self._content_ids.setdefault(name, set())
+            for cid in row.get("content_ids") or []:
+                if cid and str(cid) not in known:
+                    known.add(str(cid))
+                    added += 1
+        return added
+
+    def duplicate_names(self, names):
+        """Noms (parmi ``names``) portés par plusieurs documents : ``{nom: [ids]}``."""
+        return {name: list(self.documents[name]) for name in dict.fromkeys(names)
+                if len(self.documents.get(name, [])) > 1}
+
+    def document_id(self, name):
+        """Id du document existant de ce nom, ou ``None``."""
+        ids = self.documents.get(name) or []
+        return ids[0] if len(ids) == 1 else None
+
+    def known_content_ids(self, name):
+        """``content_id`` déjà présents dans le document ``name`` (ensemble, éventuellement vide)."""
+        return self._content_ids.get(name, set())
+
+    def existing(self, chunks_batch):
+        """Tier 2 en mémoire : ``{content_hash: [meta, ...]}`` pour les chunks déjà présents.
+
+        Les ``DEDUP_META_FIELDS`` stockés ont été assainis à l'envoi (titre
+        tronqué à 255 caractères…) : quand la valeur stockée égale la forme
+        assainie de celle du chunk, la valeur d'origine du chunk est
+        réhydratée pour que la corroboration de ``rad_dedup`` compare des
+        valeurs comparables. Aucun appel HTTP.
+        """
+        out = {}
+        for chunk in chunks_batch:
+            chash = chunk.get("content_hash")
+            metas = self._by_hash.get(str(chash)) if chash else None
+            if not metas:
+                continue
+            rows = []
+            for meta in metas:
+                row = dict(meta)
+                for field in self._meta_fields:
+                    stored = row.get(field)
+                    if stored is None:
+                        continue
+                    raw = self._col.field_value(chunk, field)
+                    if raw is not None and self._col.albert_scalar(raw) == stored:
+                        row[field] = raw
+                rows.append(row)
+            out[chash] = rows
+        return out
+
+
 def _run_dedup(all_chunks, adapter, embeddings_json_file, target_desc):
     """Wrapper commun aux 3 connecteurs : lit ``DedupConfig.from_env()``, place le
     journal à côté du JSON d'embeddings, lance ``rad_dedup.dedup_filter``.
@@ -1179,6 +1409,705 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
     return _vectordb_result("success", msg, inserted_count=total_inserted_count, skipped_count=dedup_skipped, journal_path=dedup_journal)
 
 
+## BASE VECTORIELLE Albert (collections DINUM)
+
+_ALBERT_RETENTION_NOTICE = (
+    "Acquittement de rétention requis : les textes et métadonnées envoyés à une "
+    "collection Albert sont stockés par la DINUM (sous-traitant, art. 28 RGPD) "
+    "jusqu'à leur suppression. Relancer avec l'acquittement explicite "
+    "(--albert-ack-retention en ligne de commande)."
+)
+"""Message de refus d'un envoi Albert sans acquittement de rétention."""
+
+_ALBERT_DISABLED_MESSAGE = (
+    "Albert est désactivé sur ce serveur (ALBERT_ENABLED=0) : cible albert indisponible"
+)
+"""Message de refus d'un envoi Albert quand l'interrupteur maître est coupé."""
+
+_ALBERT_RECONCILE_WAITS_S = (3.0, 3.0, 4.0)
+"""Attentes (s) avant chacune des relectures qui rapprochent une tranche à
+l'issue incertaine : la première couvre l'indexation mesurée (D18 : environ
+2,4 s pour un petit envoi), le total (10 s) l'attente retenue par les tests
+live (D18 ``live_test_index_wait_s``), une tranche de 64 chunks pouvant être
+plus lente à indexer."""
+
+_ALBERT_MANIFEST_TRUST_S = 600.0
+"""Âge maximal (s) d'une ligne de manifeste prise en compte par le
+préchargement : au-delà, la liste des chunks du serveur fait foi."""
+
+
+def _albert_result(status, message, inserted_count=0, skipped_count=0, journal_path=None,
+                   existing_count=0, manifest_path=None, credential_required=None):
+    """Retour de ``insert_to_albert`` : forme unifiée de ``_vectordb_result``
+    enrichie de ``existing_count`` (chunks déjà présents, non renvoyés) et de
+    ``manifest_path`` (manifeste écrit pendant ce run, sinon ``None``) ;
+    ``credential_required`` est ajouté pour une erreur de compte."""
+    res = _vectordb_result(status, message, inserted_count=inserted_count,
+                           skipped_count=skipped_count, journal_path=journal_path)
+    res["existing_count"] = int(existing_count)
+    res["manifest_path"] = manifest_path
+    if credential_required:
+        res["credential_required"] = credential_required
+    return res
+
+
+def _albert_safe_text(value, api_key=None):
+    """Texte d'erreur sans la clé (masquage de ``rad_albert.errors.redact`` si disponible)."""
+    text = str(value)
+    try:
+        return _albert_modules().errors.redact(text, secrets=(api_key,) if api_key else (), limit=500)
+    except Exception:
+        if api_key and len(str(api_key)) >= 4:
+            text = text.replace(str(api_key), "***")
+        return text[:500]
+
+
+class _AlbertPushRun:
+    """État partagé d'un envoi Albert : compteurs, échecs, manifeste, arrêt du job.
+
+    Thread-safe (``ALBERT_PUSH_CONCURRENCY`` > 1). Le manifeste est ouvert à la
+    première tranche réussie, puis chaque ligne est écrite en append et
+    flushée immédiatement : un envoi interrompu laisse un manifeste exact.
+    """
+
+    def __init__(self, manifest_path, collection_id, collection_name, collections_module, sleep=None):
+        """Prépare l'état d'un envoi vers ``collection_id`` (manifeste à ``manifest_path``).
+
+        ``sleep`` sert à l'attente d'indexation avant un rapprochement
+        (défaut ``time.sleep``).
+        """
+        import threading
+
+        self.sleep = sleep if sleep is not None else time.sleep
+        self._lock = threading.Lock()
+        self._col = collections_module
+        self.manifest_path = manifest_path
+        self.collection_id = int(collection_id)
+        self.collection_name = collection_name
+        self._fh = None
+        self.manifest_written = False
+        self.inserted = 0
+        self.slices = 0
+        self.failures = []
+        self.notes = []
+        self.account_error = None
+        self.aborted = False
+
+    def _append_row(self, row):
+        """Écrit une ligne au manifeste (append + flush) ; verrou tenu par l'appelant.
+
+        Un échec d'écriture arrête l'envoi : sans manifeste exact, la relance
+        et l'audit ne sont plus fiables.
+        """
+        try:
+            if self._fh is None:
+                os.makedirs(os.path.dirname(os.path.abspath(self.manifest_path)), exist_ok=True)
+                self._fh = open(self.manifest_path, "a", encoding="utf-8")
+            self._fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            self._fh.flush()
+            self.manifest_written = True
+        except OSError as exc:
+            self.failures.append(f"manifeste non écrit ({exc}) : envoi arrêté")
+            self.aborted = True
+
+    def record_slice(self, document_id, document_name, created, slice_index, content_ids,
+                     chunk_ids=None, reconciled=False):
+        """Compte une tranche réussie et l'écrit au manifeste (append + flush)."""
+        row = self._col.manifest_row(
+            collection_id=self.collection_id, collection_name=self.collection_name,
+            document_id=document_id, document_name=document_name, document_created=created,
+            slice_index=slice_index, content_ids=content_ids, chunk_ids=chunk_ids,
+            reconciled=reconciled,
+        )
+        with self._lock:
+            self.inserted += len(content_ids)
+            self.slices += 1
+            self._append_row(row)
+
+    def rolled_back(self, document_id, document_name, pushed):
+        """Retire du compteur les chunks d'un document supprimé par rollback.
+
+        Quand des tranches de ce document figurent déjà au manifeste
+        (``pushed`` > 0), une ligne d'événement ``rollback`` y est ajoutée
+        (même chemin append + flush) : le relevé d'audit ne présente plus ces
+        chunks comme stockés.
+        """
+        pushed = int(pushed)
+        row = None
+        if pushed > 0:
+            row = self._col.manifest_rollback_row(
+                collection_id=self.collection_id, collection_name=self.collection_name,
+                document_id=document_id, document_name=document_name, chunks_removed=pushed,
+            )
+        with self._lock:
+            self.inserted -= pushed
+            if row is not None:
+                self._append_row(row)
+
+    def fail(self, message):
+        """Enregistre l'échec d'un document (statut ``partial_error``)."""
+        with self._lock:
+            self.failures.append(message)
+
+    def note(self, message):
+        """Enregistre une remarque ajoutée au message final."""
+        with self._lock:
+            self.notes.append(message)
+
+    def abort(self, error):
+        """Erreur de compte ou de quota : arrêt du job entier (décision 22)."""
+        with self._lock:
+            if self.account_error is None:
+                self.account_error = error
+            self.aborted = True
+
+    def close(self):
+        """Ferme le manifeste."""
+        with self._lock:
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+
+
+def _albert_resolve_collection(client, mods, collection_id, collection_name, create_collection):
+    """Collection cible : par id (vérifiée privée) ou par nom exact (get-or-create privée).
+
+    Une création à l'issue incertaine (``AlbertUncertainWriteError``) n'est
+    jamais renvoyée : elle est rapprochée par une nouvelle liste exacte du nom
+    (une correspondance : utilisée ; plusieurs : erreur listant les ids ;
+    aucune : erreur, relancer).
+
+    Returns:
+        tuple: ``(collection_id, collection_name, created)``.
+
+    Raises:
+        AlbertTargetError: cible absente, non privée, de visibilité inconnue,
+            ambiguë ou incohérente.
+        AlbertError: erreur de l'API.
+    """
+    col = mods.collections
+    if collection_id is not None:
+        info = client.get_collection(collection_id)
+        if not isinstance(info, dict):
+            info = {}
+        if col.visibility_of(info) is None:
+            raise col.AlbertTargetError(
+                f"La collection Albert {collection_id} : visibilité inconnue, envoi refusé "
+                "(RAGpy n'envoie que vers des collections dont la visibilité « private » est "
+                "confirmée).", ids=[collection_id])
+        if not col.is_private(info):
+            raise col.AlbertTargetError(
+                f"La collection Albert {collection_id} n'est pas privée : envoi refusé "
+                "(RAGpy n'envoie que vers des collections privées).", ids=[collection_id])
+        actual_name = info.get("name")
+        if collection_name and actual_name is not None and actual_name != collection_name:
+            raise col.AlbertTargetError(
+                f"La collection Albert {collection_id} s'appelle « {actual_name} » et non "
+                f"« {collection_name} » : envoi refusé.", ids=[collection_id])
+        return int(info.get("id", collection_id)), actual_name or collection_name, False
+
+    found = col.select_collection(client.list_collections(name=collection_name), collection_name)
+    if found is not None:
+        return int(found["id"]), collection_name, False
+    if not create_collection:
+        raise col.AlbertTargetError(
+            f"Collection Albert privée « {collection_name} » introuvable ; autoriser sa "
+            "création (--albert-create-collection) ou donner son id.")
+    try:
+        new_id = client.create_collection(collection_name, visibility="private")
+        print(f"Collection Albert privée « {collection_name} » créée (id {new_id}).")
+        return int(new_id), collection_name, True
+    except mods.errors.AlbertUncertainWriteError:
+        found = col.select_collection(client.list_collections(name=collection_name), collection_name)
+        if found is None:
+            raise col.AlbertTargetError(
+                f"Création de la collection « {collection_name} » à l'issue incertaine, "
+                "introuvable après rapprochement : relancer (l'envoi est idempotent).")
+        print(f"Collection Albert « {collection_name} » : création incertaine rapprochée (id {found['id']}).")
+        return int(found["id"]), collection_name, True
+
+
+def _albert_rollback(client, mods, state, document_id, document_name, pushed):
+    """Supprime un document créé pendant ce run après l'échec d'une de ses tranches.
+
+    Une suppression réussie est inscrite au manifeste (ligne ``rollback``)
+    dès que des tranches de ce document y figuraient.
+    """
+    try:
+        client.delete_document(document_id)
+        state.rolled_back(document_id, document_name, pushed)
+        print(f"  Rollback : document {document_id} (« {document_name} ») supprimé "
+              f"({pushed} chunk(s) retiré(s)).")
+    except mods.errors.AlbertError as exc:
+        state.note(f"document {document_id} (« {document_name} ») non supprimé après échec "
+                   f"({exc}) : à supprimer manuellement")
+
+
+def _albert_reconcile_slice(client, errors, state, document_id, content_ids):
+    """Rapproche par relecture une tranche à l'issue incertaine d'un document préexistant.
+
+    Avant chaque relecture des chunks du document, attend l'un des délais de
+    ``_ALBERT_RECONCILE_WAITS_S`` (hors sémaphore). Un chunk visible prouve la
+    tranche entière (envoi atomique, D16). Rien n'est jamais renvoyé.
+
+    Returns:
+        tuple: ``(verdict, detail)`` ; ``verdict`` vaut ``"present"``,
+        ``"absent"`` (aucun chunk visible après toutes les relectures),
+        ``"unreadable"`` (relecture en échec : ``detail`` porte l'erreur) ou
+        ``"aborted"`` (erreur de compte : job arrêté via ``state.abort``).
+    """
+    wanted = {str(cid) for cid in content_ids}
+    for wait in _ALBERT_RECONCILE_WAITS_S:
+        state.sleep(wait)  # hors sémaphore : laisser l'indexation (D18)
+        try:
+            listed = client.list_chunks(document_id)
+        except errors.AlbertAuthError as exc:
+            state.abort(exc)
+            return "aborted", None
+        except errors.AlbertError as exc:
+            return "unreadable", exc
+        present = {str((c.get("metadata") or {}).get("content_id")) for c in listed or [] if isinstance(c, dict)}
+        if present & wanted:
+            return "present", None
+    return "absent", None
+
+
+def _albert_push_document(client, mods, adapter, state, document_name, entries, fields, semaphore):
+    """Crée (si besoin) un document puis y envoie ses chunks par tranches de 64.
+
+    Un échec de tranche d'un document créé pendant ce run déclenche
+    ``delete_document`` (rollback) ; sur un document préexistant, une issue
+    incertaine est rapprochée par relecture des chunks (``content_id``),
+    jamais renvoyée. Une erreur de compte ou de quota arrête le job entier.
+    """
+    errors = mods.errors
+    col = mods.collections
+    if state.aborted:
+        return
+    did = adapter.document_id(document_name)
+    created = False
+    if did is None:
+        try:
+            did = client.create_document(state.collection_id, document_name)
+            created = True
+        except errors.AlbertUncertainWriteError:
+            found = client.list_documents(state.collection_id, name=document_name)
+            if len(found) == 1:
+                did, created = int(found[0]["id"]), True
+            elif found:
+                ids = ", ".join(str(d.get("id")) for d in found)
+                state.fail(f"« {document_name} » : plusieurs documents de ce nom après une création "
+                           f"incertaine (ids : {ids}) ; à vérifier")
+                return
+            else:
+                state.fail(f"« {document_name} » : création du document à l'issue incertaine, "
+                           "introuvable après rapprochement ; relancer (idempotent)")
+                return
+        except errors.AlbertAuthError as exc:
+            state.abort(exc)
+            return
+        except errors.AlbertError as exc:
+            state.fail(f"« {document_name} » : création du document impossible ({exc})")
+            return
+
+    pushed = 0
+    for slice_index, part in enumerate(col.iter_slices(entries), start=1):
+        if state.aborted:
+            if created:
+                _albert_rollback(client, mods, state, did, document_name, pushed)
+            return
+        content_ids = [cid for cid, _chunk in part]
+        payload = [
+            {"content": col.chunk_text(chunk), "metadata": col.sanitize_metadata(chunk, fields, content_id=cid)}
+            for cid, chunk in part
+        ]
+        try:
+            chunk_ids = client.add_chunks(did, payload, semaphore=semaphore)
+        except errors.AlbertAuthError as exc:
+            state.abort(exc)
+            if created:
+                _albert_rollback(client, mods, state, did, document_name, pushed)
+            return
+        except errors.AlbertUncertainWriteError as exc:
+            if created:
+                state.fail(f"« {document_name} » : tranche {slice_index} à l'issue incertaine ({exc})")
+                _albert_rollback(client, mods, state, did, document_name, pushed)
+                return
+            verdict, detail = _albert_reconcile_slice(client, errors, state, did, content_ids)
+            if verdict == "aborted":
+                return
+            if verdict == "present":
+                # Envoi atomique (D16) : un chunk visible prouve la tranche entière.
+                state.record_slice(did, document_name, created, slice_index, content_ids, reconciled=True)
+                pushed += len(content_ids)
+                continue
+            if verdict == "unreadable":
+                state.fail(f"« {document_name} » : tranche {slice_index} à l'issue incertaine, "
+                           f"relecture impossible ({detail}) : issue inconnue, relancer "
+                           "(l'envoi est idempotent)")
+                return
+            waited = sum(_ALBERT_RECONCILE_WAITS_S)
+            state.fail(f"« {document_name} » : tranche {slice_index} à l'issue incertaine, absente "
+                       f"après {len(_ALBERT_RECONCILE_WAITS_S)} relecture(s) sur {waited:g} s ; "
+                       "relancer (l'envoi est idempotent)")
+            return
+        except errors.AlbertError as exc:
+            state.fail(f"« {document_name} » : échec de la tranche {slice_index} ({exc})")
+            if created:
+                _albert_rollback(client, mods, state, did, document_name, pushed)
+            return
+        state.record_slice(did, document_name, created, slice_index, content_ids, chunk_ids=chunk_ids)
+        pushed += len(content_ids)
+    origin = "créé" if created else "existant"
+    print(f"  Document {did} ({origin}) « {document_name} » : {pushed} chunk(s) envoyé(s).")
+
+
+def insert_to_albert(embeddings_json_file, collection_id=None, collection_name=None, albert_api_key=None, *,
+                     create_collection=False, ack_retention=False, transport=None, sleep=None):
+    """Envoie les chunks d'un fichier JSON vers une collection Albert privée (DINUM).
+
+    Les embeddings sont calculés côté serveur : ``embedding`` et
+    ``sparse_embedding`` sont retirés et seuls le texte et une liste blanche
+    de métadonnées scalaires sont envoyés. Étapes :
+
+    1. refus avant tout appel réseau : Albert désactivé (``ALBERT_ENABLED=0``,
+       contrôlé en premier) ou mal configuré, sans ``ack_retention``
+       (rétention des textes jusqu'à suppression), sans clé, sans cible, ou
+       avec une ``ALBERT_METADATA_FIELDS`` invalide ;
+    2. collection par id (vérifiée privée) ou par nom exact (get-or-create
+       d'une collection privée ; plusieurs homonymes = erreur listant les ids) ;
+    3. ``_AlbertDedupAdapter.preload()`` (échec bruyant), puis ``_run_dedup``
+       (Tier 2 en mémoire, pas de Tier 3), puis append-skip par
+       ``content_id_for`` (toujours actif : une relance n'envoie rien de déjà
+       présent) ;
+    4. un document par ``document_name_for``, chunks envoyés par tranches de 64
+       (``add_chunks``) sous ``ALBERT_PUSH_CONCURRENCY`` et le limiteur du rôle
+       ``embed`` (D19) ; une ligne de manifeste par tranche réussie (append +
+       flush, ids de chunks D16) ; échec d'une tranche d'un document créé
+       pendant ce run : ``delete_document`` (ligne ``rollback`` au
+       manifeste) puis ``partial_error`` ;
+    5. une erreur de compte ou de quota arrête le job entier ;
+    6. si Albert a été appelé, ``albert_usage.jsonl`` est écrit à côté du
+       fichier d'entrée (sauf ``ALBERT_USAGE_LOG=0``) et la ligne de synthèse
+       du ledger est affichée (décision 8).
+
+    Les créations à l'issue incertaine ne sont jamais renvoyées : elles sont
+    rapprochées par relecture. La fonction ne lève jamais : toute erreur est
+    renvoyée sous forme de dict.
+
+    Args:
+        embeddings_json_file (str): fichier JSON des chunks (sparse, dense ou
+            ``output_chunks.json`` : aucun vecteur n'est requis).
+        collection_id (int, optional): collection cible (prioritaire sur le nom).
+        collection_name (str, optional): nom exact de la collection cible.
+        albert_api_key (str, optional): clé Bearer (jamais lue ici dans l'env).
+        create_collection (bool): crée la collection privée si le nom est absent.
+        ack_retention (bool): acquittement explicite de la rétention (requis).
+        transport: transport httpx injecté (``httpx.MockTransport`` en test).
+        sleep: fonction de sommeil des réessais (défaut ``time.sleep``).
+
+    Returns:
+        dict: ``{"status", "message", "inserted_count", "existing_count",
+        "manifest_path"}`` (+ ``skipped_count`` / ``journal_path`` si la dédup a
+        refusé des chunks, + ``credential_required`` pour une erreur de compte).
+        ``status`` ∈ {"success", "success_partial_data", "partial_error", "error"}.
+    """
+    try:
+        return _insert_to_albert(
+            embeddings_json_file, collection_id, collection_name, albert_api_key,
+            create_collection=create_collection, ack_retention=ack_retention,
+            transport=transport, sleep=sleep,
+        )
+    except Exception as exc:  # contrat : jamais d'exception vers l'appelant
+        msg = f"Erreur inattendue de l'envoi Albert : {type(exc).__name__} : {_albert_safe_text(exc, albert_api_key)}"
+        print(msg)
+        return _albert_result("error", msg)
+
+
+def _insert_to_albert(embeddings_json_file, collection_id, collection_name, albert_api_key, *,
+                      create_collection, ack_retention, transport, sleep):
+    """Implémentation de ``insert_to_albert`` (peut lever ; enveloppée par l'appelant)."""
+    # Interrupteur maître d'abord (« ALBERT_ENABLED=0 : ni appel ») : aucun
+    # acquittement n'est demandé pour une cible indisponible.
+    try:
+        cfg = _albert_config_from_env()
+    except ValueError as exc:
+        print(str(exc))
+        return _albert_result("error", str(exc))
+    if not cfg.enabled:
+        print(_ALBERT_DISABLED_MESSAGE)
+        return _albert_result("error", _ALBERT_DISABLED_MESSAGE)
+    if not ack_retention:
+        print(_ALBERT_RETENTION_NOTICE)
+        return _albert_result("error", _ALBERT_RETENTION_NOTICE)
+    if not os.path.exists(embeddings_json_file):
+        msg = f"Le fichier {embeddings_json_file} n'existe pas."
+        print(msg)
+        return _albert_result("error", msg)
+    if not isinstance(albert_api_key, str) or not albert_api_key.strip():
+        msg = "Clé API Albert (DINUM) requise. Configurez-la dans Paramètres > Mes Identifiants."
+        print(msg)
+        return _albert_result("error", msg, credential_required="albert_api_key")
+    name = collection_name.strip() if isinstance(collection_name, str) and collection_name.strip() else None
+    if collection_id is None and name is None:
+        msg = "Collection Albert cible requise : id (--albert-collection-id) ou nom (--albert-collection-name)."
+        print(msg)
+        return _albert_result("error", msg)
+
+    mods = _albert_modules()
+    col = mods.collections
+    errors = mods.errors
+    try:
+        fields = col.effective_metadata_fields()
+    except ValueError as exc:
+        print(str(exc))
+        return _albert_result("error", str(exc))
+    dedup_cfg = rad_dedup.DedupConfig.from_env()
+
+    try:
+        with open(embeddings_json_file, "r", encoding="utf-8") as f:
+            all_chunks = json.load(f)
+    except Exception as exc:
+        msg = f"Erreur lors du chargement du fichier {embeddings_json_file}: {exc}"
+        print(msg)
+        return _albert_result("error", msg)
+    if not isinstance(all_chunks, list):
+        msg = f"Le fichier {embeddings_json_file} ne contient pas une liste de chunks."
+        print(msg)
+        return _albert_result("error", msg)
+    print(f"Chargement de {len(all_chunks)} chunks depuis {embeddings_json_file}")
+
+    prepared = []
+    invalid = 0
+    for raw in all_chunks:
+        if not isinstance(raw, dict) or not col.chunk_text(raw).strip():
+            invalid += 1
+            continue
+        prepared.append(col.strip_vectors(raw))
+    if not prepared:
+        if all_chunks:
+            msg = "Aucun chunk exploitable (texte vide) : rien n'a été envoyé à Albert."
+            print(msg)
+            return _albert_result("error", msg)
+        msg = "Aucun chunk à envoyer à Albert."
+        print(msg)
+        return _albert_result("success", msg)
+
+    client = mods.client.AlbertClient(cfg, albert_api_key, transport=transport,
+                                      sleep=sleep if sleep is not None else time.sleep)
+    try:
+        return _albert_upload(client, mods, cfg, fields, dedup_cfg, prepared, invalid,
+                              embeddings_json_file, collection_id, name, create_collection, sleep=sleep)
+    except errors.AlbertAuthError as exc:
+        msg = f"Envoi Albert arrêté : {exc}"
+        print(msg)
+        return _albert_result("error", msg, credential_required=getattr(exc, "credential_required", "albert_api_key"))
+    except (errors.AlbertError, col.AlbertTargetError) as exc:
+        msg = f"Envoi Albert impossible : {exc}"
+        print(msg)
+        return _albert_result("error", msg)
+    finally:
+        try:
+            _albert_report_usage(client, cfg, embeddings_json_file)
+        except Exception as exc:  # le compte rendu d'usage ne masque jamais le résultat de l'envoi
+            print(f"Avertissement : synthèse d'usage Albert indisponible ({type(exc).__name__}).")
+        client.close()
+
+
+def _albert_report_usage(client, cfg, embeddings_json_file):
+    """Écrit ``albert_usage.jsonl`` et affiche la synthèse, seulement si Albert a été appelé.
+
+    Décision 8 : les envois de chunks consomment le quota bge-m3 (D19) et
+    sont inscrits au ledger du client (rôle ``push``) ; les appels de gestion
+    (collections, documents, listes) ne le sont pas. Le journal est écrit à
+    côté du fichier d'entrée (même dossier que le manifeste), sauf
+    ``ALBERT_USAGE_LOG=0`` ; la synthèse s'affiche avant le bloc Result.
+
+    Args:
+        client: ``AlbertClient`` de l'envoi.
+        cfg: ``AlbertConfig`` effective.
+        embeddings_json_file: fichier d'entrée de l'envoi.
+
+    Returns:
+        Chemin du journal écrit, ou ``None`` (Albert non appelé, journal
+        désactivé ou erreur d'écriture).
+    """
+    ledger = getattr(client, "ledger", None)
+    if ledger is None or not ledger.called:
+        return None
+    path = None
+    if getattr(cfg, "usage_log", True):
+        try:
+            path = ledger.write_jsonl(os.path.dirname(os.path.abspath(embeddings_json_file)))
+        except OSError as exc:
+            print(f"Avertissement : journal d'usage Albert non écrit ({exc}).")
+    print(ledger.summary_line())
+    if path:
+        print(f"Journal d'usage Albert : {path}")
+    return path
+
+
+def _albert_align_dedup_fields(chunks, meta_fields, col):
+    """Recopie sur les copies des chunks la valeur dérivée de chaque ``DEDUP_META_FIELDS``.
+
+    ``rad_dedup`` corrobore un refus Tier 2 en comparant ``chunk.get(champ)``
+    à la métadonnée stockée. Or plusieurs champs de la liste blanche sont
+    dérivés (``item_key`` ← ``itemKey``, ``year`` ← ``date``, ``doi`` ←
+    ``url``, ``filename`` ← nom de fichier seul) et n'existent pas tels quels
+    dans les chunks : sans cet alignement, la corroboration échouerait
+    toujours et les doublons partiraient sans être signalés. Seules les copies
+    préparées (``strip_vectors``) sont modifiées, jamais le fichier d'entrée ;
+    l'envoi est inchangé (``sanitize_metadata`` et ``document_name_for``
+    relisent les mêmes valeurs).
+
+    Args:
+        chunks: copies préparées des chunks (modifiées en place).
+        meta_fields: ``DEDUP_META_FIELDS`` effectifs.
+        col: module ``rad_albert.collections``.
+
+    Returns:
+        int: nombre de valeurs recopiées.
+    """
+    changed = 0
+    for chunk in chunks:
+        for name in meta_fields:
+            value = col.field_value(chunk, name)
+            if value is not None and chunk.get(name) != value:
+                chunk[name] = value
+                changed += 1
+    return changed
+
+
+def _albert_upload(client, mods, cfg, fields, dedup_cfg, prepared, invalid, embeddings_json_file,
+                   collection_id, collection_name, create_collection, sleep=None):
+    """Collection, préchargement, dédup, append-skip puis envoi ; renvoie le dict final."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    col = mods.collections
+    errors = mods.errors
+    cid, cname, _created = _albert_resolve_collection(
+        client, mods, collection_id, collection_name, create_collection)
+    label = cname or str(cid)
+    print(f"Collection Albert cible : « {label} » (id {cid}, privée).")
+
+    run_names = list(dict.fromkeys(col.document_name_for(c) for c in prepared))
+    adapter = _AlbertDedupAdapter(client, cid, meta_fields=dedup_cfg.meta_fields, collections_module=col)
+    try:
+        adapter.preload(document_names=None if dedup_cfg.enabled else run_names)
+    except errors.AlbertAuthError:
+        raise
+    except Exception as exc:
+        msg = (f"Échec du préchargement de la collection Albert {cid} : "
+               f"{_albert_safe_text(exc)} ; envoi annulé (aucun chunk envoyé).")
+        print(msg)
+        return _albert_result("error", msg)
+    duplicates = adapter.duplicate_names(run_names)
+    if duplicates:
+        detail = " ; ".join(f"« {n} » (ids : {', '.join(str(i) for i in ids)})" for n, ids in duplicates.items())
+        msg = f"Documents Albert en double dans la collection {cid} : {detail} ; envoi annulé."
+        print(msg)
+        return _albert_result("error", msg)
+    manifest_path = col.manifest_path_for(os.path.dirname(os.path.abspath(embeddings_json_file)))
+    adapter.merge_manifest(col.read_manifest(manifest_path))
+    print(f"Préchargement : {len(adapter.document_names)} document(s), {adapter.chunk_count} chunk(s) indexé(s).")
+
+    if dedup_cfg.enabled:
+        _albert_align_dedup_fields(prepared, dedup_cfg.meta_fields, col)
+    kept, dedup_skipped, dedup_journal = _run_dedup(
+        prepared, adapter, embeddings_json_file, target_desc=f"albert/{label}")
+
+    # existing_count : content_id déjà présents côté serveur (ou au manifeste
+    # récent) ; repeated : répétitions d'un content_id dans ce fichier, pour un
+    # même document (jamais passées par le serveur).
+    existing_count = 0
+    repeated = 0
+    pending = {}
+    seen = {}
+    for chunk in kept:
+        name = col.document_name_for(chunk)
+        content_id = col.content_id_for(chunk)
+        run_seen = seen.setdefault(name, set())
+        if content_id in run_seen:
+            repeated += 1
+            continue
+        run_seen.add(content_id)
+        if content_id in adapter.known_content_ids(name):
+            existing_count += 1
+            continue
+        pending.setdefault(name, []).append((content_id, chunk))
+    if existing_count:
+        print(f"Albert : {existing_count} chunk(s) déjà présent(s) dans la collection, non renvoyé(s).")
+    if repeated:
+        print(f"Albert : {repeated} répétition(s) d'un chunk dans le fichier d'entrée (même "
+              "content_id, même document) ignorée(s) ; jamais comptée(s) comme déjà présente(s).")
+
+    total_pending = sum(len(v) for v in pending.values())
+    if total_pending == 0:
+        msg = (f"Insertion Albert terminée (collection {label}). Aucun nouveau chunk : "
+               f"{existing_count} déjà présent(s).")
+        if repeated:
+            msg += f" {repeated} répétition(s) interne(s) au fichier ignorée(s)."
+        print(msg)
+        status = "success_partial_data" if invalid else "success"
+        return _albert_result(status, msg, inserted_count=0, skipped_count=dedup_skipped,
+                              journal_path=dedup_journal, existing_count=existing_count)
+
+    state = _AlbertPushRun(manifest_path, cid, cname, col, sleep=sleep)
+    concurrency = max(1, int(getattr(cfg, "push_concurrency", 1) or 1))
+    semaphore = threading.BoundedSemaphore(concurrency)
+    items = list(pending.items())
+
+    def push(item):
+        """Envoie un document (nom, entrées) ; toute erreur est versée à l'état partagé."""
+        try:
+            _albert_push_document(client, mods, adapter, state, item[0], item[1], fields, semaphore)
+        except errors.AlbertAuthError as exc:
+            state.abort(exc)
+        except Exception as exc:
+            state.fail(f"« {item[0]} » : {type(exc).__name__} : {_albert_safe_text(exc)}")
+
+    try:
+        if concurrency == 1 or len(items) == 1:
+            for item in items:
+                if state.aborted:
+                    break
+                push(item)
+        else:
+            with ThreadPoolExecutor(max_workers=min(concurrency, len(items))) as pool:
+                list(pool.map(push, items))
+    finally:
+        state.close()
+
+    manifest = manifest_path if state.manifest_written else None
+    parts = [f"Insertion Albert terminée (collection {label}).",
+             f"{state.inserted}/{total_pending} chunk(s) envoyé(s) en {state.slices} tranche(s)."]
+    if existing_count:
+        parts.append(f"{existing_count} déjà présent(s).")
+    if repeated:
+        parts.append(f"{repeated} répétition(s) interne(s) au fichier ignorée(s).")
+    if invalid:
+        parts.append(f"{invalid} chunk(s) sans texte ignoré(s).")
+    if state.failures:
+        parts.append("Échecs : " + " ; ".join(state.failures) + ".")
+    if state.notes:
+        parts.append("Remarques : " + " ; ".join(state.notes) + ".")
+    if state.account_error is not None:
+        parts.append(f"Job arrêté : {state.account_error}")
+    msg = " ".join(parts)
+    print(msg)
+    common = dict(inserted_count=state.inserted, skipped_count=dedup_skipped, journal_path=dedup_journal,
+                  existing_count=existing_count, manifest_path=manifest)
+    if state.account_error is not None:
+        return _albert_result("error", msg, credential_required=getattr(
+            state.account_error, "credential_required", "albert_api_key"), **common)
+    if state.failures:
+        return _albert_result("partial_error", msg, **common)
+    if invalid:
+        return _albert_result("success_partial_data", msg, **common)
+    return _albert_result("success", msg, **common)
+
+
 # ----------------------------------------------------------------------
 # CLI Entry Point
 # ----------------------------------------------------------------------
@@ -1195,7 +2124,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--db",
-        choices=["pinecone", "weaviate", "qdrant"],
+        choices=["pinecone", "weaviate", "qdrant", "albert"],
         required=True,
         help="Target vector database"
     )
@@ -1221,6 +2150,32 @@ if __name__ == "__main__":
     parser.add_argument(
         "--collection",
         help="Qdrant collection name (required for qdrant)"
+    )
+    # Options Albert : toutes préfixées --albert-, sans préfixe commun avec
+    # --class(-name), --tenant, --index, --namespace ou --collection (les routes
+    # passent l'abréviation --class).
+    parser.add_argument(
+        "--albert-collection-id",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Albert collection id (albert; takes precedence over the name)"
+    )
+    parser.add_argument(
+        "--albert-collection-name",
+        default=None,
+        metavar="NAME",
+        help="Exact name of the private Albert collection (albert)"
+    )
+    parser.add_argument(
+        "--albert-create-collection",
+        action="store_true",
+        help="Create the private Albert collection if the name is not found (albert)"
+    )
+    parser.add_argument(
+        "--albert-ack-retention",
+        action="store_true",
+        help="Acknowledge that texts are stored by DINUM until deleted (required for albert)"
     )
 
     args = parser.parse_args()
@@ -1294,6 +2249,42 @@ if __name__ == "__main__":
             qdrant_api_key=qdrant_api_key
         )
 
+    elif args.db == "albert":
+        # Contrôles locaux d'abord (aucun appel réseau) : interrupteur maître
+        # (exit 2 : aucun acquittement demandé pour une cible indisponible),
+        # puis acquittement, cible et clé (lue dans l'env, jamais affichée).
+        try:
+            albert_enabled = _albert_config_from_env().enabled
+        except ValueError as exc:
+            print(f"ERROR: configuration Albert invalide : {exc}")
+            exit(2)
+        if not albert_enabled:
+            print(f"ERROR: {_ALBERT_DISABLED_MESSAGE}")
+            exit(2)
+        if not args.albert_ack_retention:
+            print(f"ERROR: {_ALBERT_RETENTION_NOTICE}")
+            exit(1)
+        if args.albert_collection_id is None and not (args.albert_collection_name or "").strip():
+            print("ERROR: --albert-collection-id ou --albert-collection-name est requis pour Albert")
+            exit(1)
+        albert_api_key = os.getenv("ALBERT_API_KEY")
+        if not albert_api_key:
+            print("ERROR: ALBERT_API_KEY environment variable not set")
+            exit(1)
+
+        print(f"Collection id: {args.albert_collection_id if args.albert_collection_id is not None else '(par nom)'}")
+        print(f"Collection name: {args.albert_collection_name or '(par id)'}")
+        print(f"Create collection: {'yes' if args.albert_create_collection else 'no'}")
+
+        result = insert_to_albert(
+            embeddings_json_file=args.input,
+            collection_id=args.albert_collection_id,
+            collection_name=args.albert_collection_name,
+            albert_api_key=albert_api_key,
+            create_collection=args.albert_create_collection,
+            ack_retention=True,
+        )
+
     # Print result
     print(f"\n=== Result ===")
     if isinstance(result, dict):
@@ -1307,6 +2298,15 @@ if __name__ == "__main__":
         print(f"Skipped (dedup): {result.get('skipped_count', 0)}")
         if result.get('journal_path'):
             print(f"Dedup journal: {result['journal_path']}")
+        if args.db == "albert":
+            # Lignes propres à Albert (jamais émises pour les 3 autres bases) :
+            # chunks déjà présents (idempotence) et manifeste d'envoi (ligne entière).
+            print(f"Skipped (existing): {result.get('existing_count', 0)}")
+            if result.get('manifest_path'):
+                print(f"Albert manifest: {result['manifest_path']}")
+            if result.get('credential_required'):
+                # Erreur de compte ou de quota Albert : arrêt du job (décision 22).
+                exit(2)
         # success_partial_data = tous les chunks *valides* insérés, certains chunks
         # d'entrée n'avaient pas d'embedding → succès non-fatal. Seuls partial_error
         # (échec d'upsert réel) et error doivent faire échouer (exit 1).

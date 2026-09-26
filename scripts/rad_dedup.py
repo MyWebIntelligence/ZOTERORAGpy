@@ -211,17 +211,33 @@ class DedupAdapter(Protocol):
     """Contrat d'accès base, dépendant de la base mais pas de ce module.
 
     Attributs :
-        db_name : "pinecone" | "weaviate" | "qdrant"
-        metric  : "cosine" | "dotproduct" | "distance" | None (sens du seuil Tier 3)
+        db_name : "pinecone" | "weaviate" | "qdrant" | "albert"
+        metric  : "cosine" | "dotproduct" | "distance" | None (sens du seuil Tier 3 ;
+                  None pour Albert, qui n'a pas de Tier 3)
 
     Méthodes :
         existing(chunks_batch) -> dict[content_hash, list[meta_dict]]
             Existence serveur-side batchée. Clé de retour = ``content_hash`` du
             chunk. ``meta_dict`` porte au minimum les ``DEDUP_META_FIELDS`` + ``id``
             + ``content_hash`` + ``chunk_index``. Pinecone résout par
-            ``index.fetch(content_id)`` ; Weaviate/Qdrant par filtre ``content_hash``.
+            ``index.fetch(content_id)`` ; Weaviate/Qdrant par UUID adressé par
+            contenu (``fetch_objects`` / ``retrieve``) ; Albert répond en mémoire,
+            sans appel HTTP, depuis l'index construit par ``preload()``, et
+            réhydrate les ``DEDUP_META_FIELDS`` assainis à l'envoi (titre tronqué
+            à 255 caractères…) pour que la corroboration reste possible. La
+            corroboration lisant ``chunk.get(champ)``, le connecteur Albert
+            recopie d'abord sur ses copies des chunks la valeur des champs
+            dérivés de sa liste blanche (``item_key``, ``year``, ``doi``,
+            ``filename``).
+            ``dedup_filter`` avale les exceptions de ``existing`` (lot conservé).
         nearest(embedding, meta_filter) -> list[dict] (OPTIONNEL, Tier 3)
-            Chaque dict : ``{"score": float, "meta": dict, "text": str}``.
+            Chaque dict : ``{"score": float, "meta": dict, "text": str}``. Absente
+            chez Albert : le Tier 3 est alors sauté.
+        preload(...) (OPTIONNEL, hors de ce module)
+            Albert seulement : liste les documents et chunks de la collection.
+            Le connecteur l'appelle **avant** ``dedup_filter`` (qui ne l'appelle
+            jamais) ; un échec fait échouer l'envoi bruyamment au lieu d'être
+            avalé comme une erreur de ``existing``.
     """
 
     db_name: str

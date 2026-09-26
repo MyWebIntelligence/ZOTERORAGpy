@@ -1139,6 +1139,55 @@ def test_ledger_model_is_sent_id_response_model_is_echo():
         assert chat_records[0]["response_model"] == "openweight-small"
 
 
+def test_ledger_records_chunk_push_not_management_calls(tmp_path):
+    # Un envoi de chunks consomme le quota bge-m3 côté serveur (D19) : il est
+    # inscrit au ledger (rôle ``push``) ; les appels de gestion ne le sont pas.
+    fake = FakeAlbert()
+    ledger = albert_usage.UsageLedger()
+    client = _client(fake, ledger=ledger)
+    cid, did = _make_document(client)
+    assert not ledger.called
+
+    ids = client.add_chunks(did, [{"content": f"chunk {i}", "metadata": {"chunk_index": i}} for i in range(3)])
+    assert len(ids) == 3
+    (record,) = ledger.records
+    assert record["endpoint"] == albert_client_mod.PUSH_LEDGER_ENDPOINT
+    assert str(did) not in record["endpoint"]
+    assert record["role"] == "push"
+    assert record["items"] == 3
+    assert record["model"] is None and record["response_model"] is None
+    assert record["prompt_tokens"] is None and record["cost"] is None
+    assert record["latency_s"] is not None
+
+    client.list_chunks(did)
+    client.list_documents(cid)
+    client.get_document(did)
+    client.list_collections()
+    assert len(ledger.records) == 1 and ledger.errors == 0
+
+    # Entrée refusée avant tout envoi : ni enregistrement ni échec compté.
+    with pytest.raises(ValueError):
+        client.add_chunks(did, [])
+    assert len(ledger.records) == 1 and ledger.errors == 0
+
+    # Échecs (permanent, puis issue incertaine d'une écriture) : comptés, non détaillés.
+    fake.inject("POST", "/v1/documents/*/chunks", 422, 502)
+    with pytest.raises(AlbertPermanentError):
+        client.add_chunks(did, ["texte"])
+    with pytest.raises(AlbertTransientError):
+        client.add_chunks(did, ["texte"])
+    assert len(ledger.records) == 1 and ledger.errors == 2
+
+    line = ledger.summary_line()
+    assert "1 appel(s)" in line and "2 échec(s)" in line
+    out = tmp_path / "albert_usage.jsonl"
+    assert ledger.write_jsonl(str(out)) == str(out)
+    text = out.read_text(encoding="utf-8")
+    rows = [json.loads(x) for x in text.splitlines() if x.strip()]
+    assert [r["role"] for r in rows] == ["push"]
+    assert FAKE_ALBERT_KEY not in text
+
+
 def test_preflight_expired_raises(caplog):
     expired = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
     fake = FakeAlbert(me_overrides={"expires": expired})

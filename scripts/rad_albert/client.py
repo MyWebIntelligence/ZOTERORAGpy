@@ -77,6 +77,9 @@ SEARCH_METHODS = ("semantic", "lexical", "hybrid")
 CHUNKS_PER_EMBED_REQUEST = 32
 """Chunks vectorisés par requête d'embeddings côté serveur (D19 : 64 chunks = 2 requêtes)."""
 
+PUSH_LEDGER_ENDPOINT = "/v1/documents/{document_id}/chunks"
+"""Libellé ``endpoint`` des envois de chunks dans le ledger (gabarit, sans id de document)."""
+
 _MAX_PAGES = 10000
 _FORBIDDEN_BODY_KEYS = frozenset({"user", "model", "messages", "dimensions", "max_completion_tokens"})
 _NOT_SENT_ERRORS: Tuple[type, ...] = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError)
@@ -1441,8 +1444,11 @@ class AlbertClient:
         """``POST /v1/documents/{id}/chunks`` : 1 à 64 chunks en un envoi (atomique, D16).
 
         La vectorisation côté serveur consomme le quota bge-m3 (D19) : l'envoi
-        passe par le limiteur du rôle ``embed``. Le découpage en tranches et
-        l'assainissement des métadonnées reviennent à l'appelant.
+        passe par le limiteur du rôle ``embed`` et chaque envoi réussi est
+        inscrit au ledger (rôle ``push``, ``items`` = nombre de chunks, sans
+        modèle : le client n'en envoie pas) ; un envoi en échec y est compté
+        par ``record_error``. Le découpage en tranches et l'assainissement des
+        métadonnées reviennent à l'appelant.
 
         Args:
             document_id: document cible.
@@ -1483,17 +1489,34 @@ class AlbertClient:
                 )
             payload.append(entry)
         path = f"/v1/documents/{did}/chunks"
-        data = self._call(
-            "POST",
-            path,
-            timeout=self.cfg.timeout_collections,
-            role="push",
-            json_body={"chunks": payload},
-            requests=max(1, math.ceil(len(payload) / CHUNKS_PER_EMBED_REQUEST)),
-            semaphore=semaphore,
-            single_attempt=single_attempt,
-            idempotent=False,
-        )
+
+        def handle(data: Any, latency: float) -> Any:
+            """Inscrit l'envoi au ledger (quota bge-m3 consommé côté serveur, D19) ; renvoie le corps."""
+            self.ledger.record(
+                endpoint=PUSH_LEDGER_ENDPOINT,
+                usage=data,
+                role="push",
+                latency_s=latency,
+                items=len(payload),
+            )
+            return data
+
+        try:
+            data = self._call(
+                "POST",
+                path,
+                timeout=self.cfg.timeout_collections,
+                role="push",
+                json_body={"chunks": payload},
+                requests=max(1, math.ceil(len(payload) / CHUNKS_PER_EMBED_REQUEST)),
+                semaphore=semaphore,
+                single_attempt=single_attempt,
+                handler=handle,
+                idempotent=False,
+            )
+        except (AlbertTransientError, AlbertAuthError, AlbertPermanentError):
+            self.ledger.record_error(endpoint=PUSH_LEDGER_ENDPOINT)
+            raise
         ids = data.get("ids") if isinstance(data, Mapping) else None
         return [int(i) for i in ids] if isinstance(ids, list) else []
 
@@ -1587,6 +1610,7 @@ __all__ = [
     "MAX_CHUNKS_PER_POST",
     "MAX_EMBED_BATCH",
     "PAGE_LIMIT",
+    "PUSH_LEDGER_ENDPOINT",
     "SEARCH_METHODS",
     "USER_AGENT",
     "AlbertClient",
