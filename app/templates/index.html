@@ -920,7 +920,49 @@ do{% extends "base.html" %}
             <input type="text" class="form-input" id="mistralUrl" name="MISTRAL_API_BASE_URL" autocomplete="off" placeholder="https://api.mistral.ai">
           </div>
         </div>
-      </div>
+      </div>{% if albert_enabled %}
+
+      <!-- Albert (DINUM) -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <h4 class="text-brand mb-3"><i class="bi bi-bank"></i> Albert <span class="badge badge-neutral">DINUM</span></h4>
+          <div class="form-group">
+            <label class="form-label" for="albertKey">API Key</label>
+            <input type="text" class="form-input" id="albertKey" name="ALBERT_API_KEY" autocomplete="off" placeholder="Albert API Key">
+            <small class="text-secondary">Cle masquee par le serveur (4 derniers caracteres) : laisser le masque conserve la cle enregistree, vider le champ la supprime. Reservee aux agents publics eligibles ; une cle expire au plus tard un an apres sa creation.</small>
+          </div>
+          <div class="form-group mb-0">
+            <button type="button" class="btn btn-secondary" id="albertTestBtn" onclick="testAlbertConnection()">Tester la connexion</button>
+            <a href="https://albert.playground.etalab.gouv.fr/" target="_blank" rel="noopener noreferrer">Playground Albert (creation de cle)</a>
+            <div id="albertTestStatus" class="text-sm text-secondary mt-2"></div>
+            <small class="text-secondary">Le test utilise la cle enregistree : enregistrer d'abord une nouvelle cle.</small>
+          </div>
+          <script>
+            async function testAlbertConnection() {
+              const statusEl = document.getElementById('albertTestStatus');
+              statusEl.textContent = 'Test en cours...';
+              const token = localStorage.getItem('access_token');
+              const headers = token ? { 'Authorization': 'Bearer ' + token } : {};
+              try {
+                const res = await fetch('/api/albert/status', { headers: headers });
+                const json = await res.json().catch(() => ({}));
+                if (res.ok && json.success) {
+                  const account = json.account || {};
+                  let msg = 'Connexion Albert OK';
+                  if (typeof account.expires_in_days === 'number') {
+                    msg += ' (compte valable encore ' + account.expires_in_days + ' jour(s))';
+                  }
+                  statusEl.textContent = json.warning ? msg + ' - ' + json.warning : msg;
+                } else {
+                  statusEl.textContent = 'Erreur ' + res.status + ' : ' + (json.error || json.detail || 'connexion impossible');
+                }
+              } catch (err) {
+                statusEl.textContent = 'Echec de la requete : ' + err;
+              }
+            }
+          </script>
+        </div>
+      </div>{% endif %}
 
       <!-- Pinecone -->
       <div class="card mb-4">

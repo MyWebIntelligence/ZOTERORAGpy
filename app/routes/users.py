@@ -21,8 +21,12 @@ from app.middleware.auth import get_current_active_user
 from app.core.credentials import (
     get_masked_credentials,
     update_user_credentials,
-    CREDENTIAL_KEYS
+    albert_enabled,
+    visible_credential_keys,
 )
+
+# Identifiant Albert : masque des reponses et ignore en ecriture quand Albert est desactive.
+ALBERT_CREDENTIAL_KEY = "albert_api_key"
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -159,18 +163,28 @@ async def delete_my_account(
 
 # --- Credentials Management ---
 
-@router.get("/me/credentials", response_model=UserCredentialsResponse)
+@router.get(
+    "/me/credentials",
+    response_model=UserCredentialsResponse,
+    response_model_exclude_none=True,
+)
 async def get_my_credentials(
     current_user: User = Depends(get_current_active_user)
 ):
     """
     Retourne les credentials de l'utilisateur connecte (valeurs masquees).
+    \f
+    ``albert_api_key`` n'est liste que si Albert est active
+    (``albert_enabled()``) ; sinon le champ vaut ``None`` et
+    ``response_model_exclude_none`` le retire du JSON, identique a l'octet
+    a la reponse historique. Le texte qui suit le saut de page (``\\f``)
+    n'entre pas dans la description OpenAPI, identique a l'historique.
     """
     masked = get_masked_credentials(current_user)
 
-    # Build response with all credential keys
+    # Build response with all visible credential keys (albert only when enabled)
     response_data = {}
-    for key in CREDENTIAL_KEYS:
+    for key in visible_credential_keys():
         if key in masked:
             response_data[key] = CredentialValue(**masked[key])
         else:
@@ -191,9 +205,17 @@ async def update_my_credentials(
 
     Seuls les champs fournis sont mis a jour.
     Pour supprimer un credential, envoyer une chaine vide.
+    \f
+    ``albert_api_key`` est ignore quand Albert est desactive
+    (``albert_enabled()`` faux). Le texte qui suit le saut de page
+    (``\\f``) n'entre pas dans la description OpenAPI.
     """
     # Convert Pydantic model to dict, excluding None values
     updates = credentials.model_dump(exclude_unset=True)
+
+    # Albert desactive : la cle Albert n'est ni ecrite ni effacee.
+    if not albert_enabled():
+        updates.pop(ALBERT_CREDENTIAL_KEY, None)
 
     if not updates:
         return {"message": "Aucune modification"}

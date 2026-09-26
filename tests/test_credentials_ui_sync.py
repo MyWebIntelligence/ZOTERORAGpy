@@ -12,10 +12,18 @@ database credentials and makes ``GET /get_credentials`` return the *effective*
 value (database first, then ``.env``). These tests assert the resulting
 invariant: **the value entered in the UI is the value the pipeline uses.**
 
-Author: Claude Code
+With Albert enabled (``ALBERT_ENABLED=1``), ``ALBERT_API_KEY`` follows the same
+round trip, except that the form only ever receives it masked (``••••`` plus
+its last 4 characters) and posting that mask back never overwrites the key.
+
+A form value carrying a control or line separator character (``\\r``, ``\\n``…)
+is refused with a 400 before anything is written, so the form can never inject
+extra ``.env`` lines.
+
 Date: 2026-05-27
 """
 
+import json
 import os
 import tempfile
 
@@ -160,8 +168,73 @@ def test_get_credentials_returns_effective_value_db_first(client, admin_user, db
     assert resp.json()["MISTRAL_API_KEY"] == "DB_VALUE"
 
 
+def test_save_credentials_refuses_line_injection(client, admin_user, db_session, tmp_path, monkeypatch):
+    monkeypatch.setattr("app.routes.settings.RAGPY_DIR", str(tmp_path))
+    env_file = tmp_path / ".env"
+    env_file.write_text("MISTRAL_API_KEY=ENV_VALUE\n", encoding="utf-8")
+
+    resp = client.post(
+        "/save_credentials",
+        json={"MISTRAL_API_KEY": "UI_KEY\r\nOPENAI_API_KEY=INJECTED", "PINECONE_ENV": "us-east-1"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["invalid_keys"] == ["MISTRAL_API_KEY"]
+    assert "INJECTED" not in resp.text
+
+    # Nothing written: neither the .env file nor the personal DB store.
+    assert env_file.read_text(encoding="utf-8") == "MISTRAL_API_KEY=ENV_VALUE\n"
+    db_session.refresh(admin_user)
+    assert get_user_credentials(admin_user) == {}
+
+
 def test_env_to_cred_reverse_mapping_is_unambiguous():
     """The reverse mapping used by save_credentials must be bijective."""
     env_to_cred = {env: cred for cred, env in CREDENTIAL_ENV_MAPPING.items()}
     assert len(env_to_cred) == len(CREDENTIAL_ENV_MAPPING)
     assert env_to_cred["MISTRAL_API_KEY"] == "mistral_api_key"
+
+
+# ---------------------------------------------------------------------------
+# Albert (ALBERT_ENABLED=1): the masked key never overwrites the stored key
+# ---------------------------------------------------------------------------
+ALBERT_UI_KEY = "fake-albert-ui-key-4242"
+ALBERT_MASK_PREFIX = "\u2022\u2022\u2022\u2022"
+
+
+def _env_file_values(path):
+    """Parse a ``.env`` file into a dict (``NAME=value`` lines)."""
+    values = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "=" in line and not line.startswith("#"):
+            name, value = line.split("=", 1)
+            values[name.strip()] = value.strip()
+    return values
+
+
+def test_albert_key_roundtrip_when_enabled_mask_never_overwrites(client, admin_user, db_session, tmp_path, monkeypatch):
+    monkeypatch.setattr("app.routes.settings.RAGPY_DIR", str(tmp_path))
+    monkeypatch.setenv("ALBERT_ENABLED", "1")
+    monkeypatch.delenv("ALBERT_API_KEY", raising=False)
+
+    # The UI saves a new key: .env and the personal DB store both get it.
+    resp = client.post("/save_credentials", json={"ALBERT_API_KEY": ALBERT_UI_KEY})
+    assert resp.status_code == 200 and resp.json().get("status") == "success"
+    db_session.refresh(admin_user)
+    assert (get_user_credentials(admin_user).get("albert_api_key") == ALBERT_UI_KEY) is True
+    assert (_env_file_values(tmp_path / ".env").get("ALBERT_API_KEY") == ALBERT_UI_KEY) is True
+
+    # The form only ever receives the mask, never the key.
+    form = client.get("/get_credentials").json()
+    assert form["ALBERT_API_KEY"] == ALBERT_MASK_PREFIX + ALBERT_UI_KEY[-4:]
+    assert ALBERT_UI_KEY not in json.dumps(form)
+
+    # Posting the whole form back (mask included) keeps the stored key.
+    resp = client.post("/save_credentials", json=form)
+    assert resp.status_code == 200
+    db_session.refresh(admin_user)
+    assert (get_user_credentials(admin_user).get("albert_api_key") == ALBERT_UI_KEY) is True
+    assert (_env_file_values(tmp_path / ".env").get("ALBERT_API_KEY") == ALBERT_UI_KEY) is True
+
+    # End-to-end: the pipeline subprocess env uses the UI value, not the mask.
+    uses_ui_key = build_subprocess_env(admin_user).get("ALBERT_API_KEY") == ALBERT_UI_KEY
+    assert uses_ui_key is True

@@ -167,7 +167,25 @@
                                    placeholder="https://api.mistral.ai">
                         </div>
                     </div>
-                </div>
+                </div>{% if albert_enabled %}
+
+                <!-- Albert (DINUM) -->
+                <div class="credentials-section">
+                    <h3 class="credentials-section-title">
+                        <i class="bi bi-bank"></i>
+                        Albert (DINUM)
+                    </h3>
+
+                    <div class="form-group">
+                        <label for="cred_albert_api_key" class="form-label">Albert API Key</label>
+                        <div class="input-with-status">
+                            <input type="password" class="form-input" id="cred_albert_api_key"
+                                   placeholder="Cle creee sur le playground Albert" autocomplete="off">
+                            <span class="credential-status" id="status_albert_api_key"></span>
+                        </div>
+                        <div class="form-hint">API souveraine de l'Etat (DINUM), reservee aux agents publics eligibles ; la cle expire au plus tard un an apres sa creation</div>
+                    </div>
+                </div>{% endif %}
 
                 <!-- Vector Databases -->
                 <div class="credentials-section">
@@ -719,7 +737,8 @@ async function deleteAccount() {
 
 const credentialKeys = [
     'openai_api_key', 'openrouter_api_key', 'openrouter_model',
-    'mistral_api_key', 'mistral_model', 'mistral_url',
+    'mistral_api_key', 'mistral_model', 'mistral_url',{% if albert_enabled %}
+    'albert_api_key',{% endif %}
     'pinecone_api_key', 'pinecone_env',
     'weaviate_api_key', 'weaviate_url',
     'qdrant_api_key', 'qdrant_url',

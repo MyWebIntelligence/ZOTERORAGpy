@@ -14,6 +14,7 @@ Key Schemas:
 from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel, EmailStr, Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 class UserBase(BaseModel):
@@ -167,6 +168,9 @@ class UserCredentialsResponse(BaseModel):
     mistral_api_key: CredentialValue
     mistral_model: CredentialValue
     mistral_url: CredentialValue
+    # Albert (DINUM) : absent de la reponse (None, exclu) quand Albert est desactive ;
+    # hors du schema OpenAPI (SkipJsonSchema), identique au schema historique.
+    albert_api_key: SkipJsonSchema[Optional[CredentialValue]] = None
     # Vector Databases
     pinecone_api_key: CredentialValue
     pinecone_env: CredentialValue
@@ -199,6 +203,9 @@ class UserCredentialsUpdate(BaseModel):
     mistral_api_key: Optional[str] = Field(None, description="Mistral API Key")
     mistral_model: Optional[str] = Field(None, description="Mistral model for OCR")
     mistral_url: Optional[str] = Field(None, description="Mistral API base URL")
+    # Albert (DINUM) : ignore par PUT /users/me/credentials quand Albert est desactive ;
+    # hors du schema OpenAPI (SkipJsonSchema), identique au schema historique.
+    albert_api_key: SkipJsonSchema[Optional[str]] = Field(None, description="Albert (DINUM) API Key")
     # Vector Databases
     pinecone_api_key: Optional[str] = Field(None, description="Pinecone API Key")
     pinecone_env: Optional[str] = Field(None, description="Pinecone environment")
@@ -214,7 +221,7 @@ class UserCredentialsUpdate(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "openai_api_key": "sk-xxxxxxxxxxxxxxxxxxxxx",
+                "openai_api_key": "sk-XXXXXXXXXXXXXXXXXXXXX",
                 "pinecone_api_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
             }
         }

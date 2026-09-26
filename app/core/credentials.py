@@ -12,7 +12,10 @@ Key Features:
 - Encryption and decryption of credential dictionaries.
 - Masking of credentials for safe UI display.
 - Role-based credential access (ADMIN can fallback to .env, non-admin cannot).
-- Subprocess environment builder for secure credential injection.
+- Subprocess environment builder for secure credential injection (non-admin
+  subprocesses lose the server secrets of SERVER_SECRET_ENV_VARS and receive
+  RAGPY_DOTENV_DENY so they cannot reload the stripped credential *_API_KEY
+  secrets from .env).
 
 Security Model:
     - ADMIN users: Personal credentials first, then fallback to .env
@@ -21,6 +24,7 @@ Security Model:
 import os
 import json
 import base64
+import functools
 import hashlib
 import logging
 from typing import Dict, Optional, Any, List
@@ -83,6 +87,11 @@ CREDENTIAL_KEYS = [
     "mistral_api_key",
     "mistral_model",
     "mistral_url",
+    # Albert (DINUM). Always registered, even when Albert is disabled, so that
+    # the non-admin purge of build_subprocess_env covers ALBERT_API_KEY. Hidden
+    # from UI/JSON listings when disabled: see visible_credential_keys().
+    # ALBERT_BASE_URL is server configuration, never a user credential.
+    "albert_api_key",
     # Pinecone
     "pinecone_api_key",
     "pinecone_env",
@@ -106,6 +115,7 @@ CREDENTIAL_ENV_MAPPING = {
     "mistral_api_key": "MISTRAL_API_KEY",
     "mistral_model": "MISTRAL_OCR_MODEL",
     "mistral_url": "MISTRAL_API_BASE_URL",
+    "albert_api_key": "ALBERT_API_KEY",
     "pinecone_api_key": "PINECONE_API_KEY",
     "pinecone_env": "PINECONE_ENV",
     "weaviate_api_key": "WEAVIATE_API_KEY",
@@ -125,6 +135,7 @@ CREDENTIAL_ERROR_MESSAGES = {
     "mistral_api_key": "Clé API Mistral requise pour l'OCR des PDFs. Configurez-la dans Paramètres > Mes Identifiants.",
     "mistral_model": "Modèle Mistral OCR requis.",
     "mistral_url": "URL API Mistral requise.",
+    "albert_api_key": "Clé API Albert (DINUM) requise. Configurez-la dans Paramètres > Mes Identifiants.",
     "pinecone_api_key": "Clé API Pinecone requise. Configurez-la dans Paramètres > Mes Identifiants.",
     "pinecone_env": "Environnement Pinecone requis (ex: us-east-1).",
     "weaviate_api_key": "Clé API Weaviate requise. Configurez-la dans Paramètres > Mes Identifiants.",
@@ -135,6 +146,92 @@ CREDENTIAL_ERROR_MESSAGES = {
     "zotero_user_id": "ID utilisateur Zotero requis. Configurez-le dans Paramètres > Mes Identifiants.",
     "zotero_group_id": "ID groupe Zotero requis (si bibliothèque de groupe). Configurez-le dans Paramètres > Mes Identifiants.",
 }
+
+
+# Credential shown in UI/JSON listings only when Albert is enabled (see albert_enabled()).
+_ALBERT_CREDENTIAL_KEY = "albert_api_key"
+
+# Master switch of the Albert integration (server configuration).
+_ALBERT_SWITCH_ENV_VAR = "ALBERT_ENABLED"
+
+# Environment variable set for NON-ADMIN subprocesses by build_subprocess_env:
+# sorted, comma-separated (no spaces) names of the *_API_KEY variables that were
+# stripped and not re-injected, which the subprocess must not reload from .env
+# (read by scripts/rad_env.load_dotenv_guarded).
+DOTENV_DENY_ENV_VAR = "RAGPY_DOTENV_DENY"
+
+# Server secrets that the pipeline scripts never need. NON-ADMIN subprocesses
+# do not inherit them (JWT_SECRET_KEY also derives the Fernet key that decrypts
+# every stored user credential). They are only stripped from the inherited env:
+# RAGPY_DOTENV_DENY keeps its contract (mapped *_API_KEY names only).
+SERVER_SECRET_ENV_VARS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "RESEND_API_KEY")
+
+
+@functools.lru_cache(maxsize=16)
+def _parse_albert_switch(raw: str) -> bool:
+    """
+    Interpret a raw ``ALBERT_ENABLED`` value with the parser of ``AlbertConfig``.
+
+    Only the switch is handed to ``AlbertConfig.from_env``, so an invalid
+    ``ALBERT_BASE_URL`` never raises here and nothing is logged. The stdlib
+    module ``rad_albert.config`` is imported with the double-import pattern of
+    the pipeline scripts; when it cannot be imported, Albert is considered OFF.
+    The result only depends on ``raw``, hence the cache.
+
+    Args:
+        raw: The raw value of ``ALBERT_ENABLED`` (never empty here).
+
+    Returns:
+        True when the parser of ``AlbertConfig`` reads the value as enabled.
+    """
+    try:
+        from scripts.rad_albert.config import AlbertConfig
+    except ImportError:
+        try:
+            from rad_albert.config import AlbertConfig
+        except ImportError:
+            return False
+    return bool(AlbertConfig.from_env({_ALBERT_SWITCH_ENV_VAR: raw}).enabled)
+
+
+def albert_enabled() -> bool:
+    """
+    Tell whether the server enables Albert (master switch ``ALBERT_ENABLED``).
+
+    Single switch shared by the credential listings, the settings form, the
+    ``/api/albert/*`` routes and the page templates. The value is interpreted
+    by the parser of ``AlbertConfig.from_env`` (``scripts/rad_albert/config.py``:
+    ``1``, ``true``, ``yes`` or ``on``, case-insensitive, surrounding blanks
+    ignored), so the web layer, the pipeline scripts and ``EmbeddingConfig``
+    always agree. The environment is read at call time; an absent or empty
+    value means OFF without importing anything.
+
+    Returns:
+        True when Albert is enabled.
+    """
+    raw = os.environ.get(_ALBERT_SWITCH_ENV_VAR)
+    if raw is None or not raw.strip():
+        return False
+    return _parse_albert_switch(raw)
+
+
+def visible_credential_keys() -> List[str]:
+    """
+    List the credential keys that may be exposed in UI forms and JSON responses.
+
+    ``albert_api_key`` stays registered in ``CREDENTIAL_KEYS`` (so storage and
+    the non-admin purge always cover it), but it is hidden from listings unless
+    the server enables Albert (``albert_enabled()``). The environment is read
+    at call time.
+
+    Returns:
+        A new list following the order of ``CREDENTIAL_KEYS``.
+    """
+    enabled = albert_enabled()
+    return [
+        key for key in CREDENTIAL_KEYS
+        if enabled or key != _ALBERT_CREDENTIAL_KEY
+    ]
 
 
 def get_credential_error_message(credential_key: str) -> str:
@@ -388,7 +485,16 @@ def build_subprocess_env(
 
     Security Model:
         - ADMIN users: Keep existing .env credentials, overlay with personal credentials.
-        - NON-ADMIN users: REMOVE all credential env vars, inject only personal credentials.
+        - NON-ADMIN users: REMOVE all credential env vars and the server secrets
+          of ``SERVER_SECRET_ENV_VARS`` (never needed by the pipeline scripts),
+          inject only personal credentials, and set ``RAGPY_DOTENV_DENY`` to the
+          sorted, comma-separated (no spaces) names of the ``*_API_KEY``
+          variables of ``CREDENTIAL_ENV_MAPPING`` that were stripped and not
+          re-injected, so the subprocess cannot reload them from ``.env``
+          (see ``scripts/rad_env.load_dotenv_guarded``). The variable may be an
+          empty string when every such key was re-injected. It is never set for
+          ADMIN users. The server secrets are only stripped from the inherited
+          environment: they are not part of the deny-list.
 
     Args:
         user: User model instance.
@@ -418,10 +524,17 @@ def build_subprocess_env(
         logger.info(f"Building subprocess env for non-admin user - clearing .env credentials")
         for env_key in CREDENTIAL_ENV_MAPPING.values():
             env.pop(env_key, None)
+        # Server secrets (JWT signing key, e-mail API key, Flower password)
+        # are never needed by the pipeline scripts.
+        for env_key in SERVER_SECRET_ENV_VARS:
+            env.pop(env_key, None)
     else:
         logger.debug(f"Building subprocess env for admin user - keeping .env fallbacks")
+        # The dotenv deny-list only concerns non-admin subprocesses.
+        env.pop(DOTENV_DENY_ENV_VAR, None)
 
     # Inject user's personal credentials (overrides .env for admins, sets for non-admins)
+    injected_env_keys = set()
     for cred_key, env_key in CREDENTIAL_ENV_MAPPING.items():
         value = user_creds.get(cred_key)
         if value:
@@ -433,7 +546,17 @@ def build_subprocess_env(
             if cred_key == "mistral_url":
                 value = _normalise_mistral_base_url(value)
             env[env_key] = value
+            injected_env_keys.add(env_key)
             logger.debug(f"Injected user credential '{cred_key}' as '{env_key}'")
+
+    # For NON-ADMIN users: forbid the subprocess from reloading the stripped
+    # secrets from .env (names only, never values).
+    if not is_admin:
+        denied = sorted(
+            env_key for env_key in CREDENTIAL_ENV_MAPPING.values()
+            if env_key.endswith("_API_KEY") and env_key not in injected_env_keys
+        )
+        env[DOTENV_DENY_ENV_VAR] = ",".join(denied)
 
     # Validate required credentials
     if required_keys:

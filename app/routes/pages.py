@@ -21,6 +21,7 @@ from app.database.session import get_db
 from app.models.user import User
 from app.models.project import Project
 from app.middleware.auth import get_optional_user
+from app.core.credentials import albert_enabled
 
 # Default LLM model for citation import (from .env)
 DEFAULT_LLM_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "gpt-4o-mini")
@@ -34,12 +35,19 @@ router = APIRouter(tags=["Pages"])
 
 
 def get_template_context(request: Request, user: Optional[User] = None, **kwargs) -> dict:
-    """Creates the base template context"""
+    """Creates the base template context.
+
+    ``albert_enabled`` (``credentials.albert_enabled()``, the parser shared
+    with ``AlbertConfig``, read at each request) gates the
+    inline Albert blocks of the templates; while it is False the rendered HTML
+    is unchanged.
+    """
     context = {
         "request": request,
         "current_user": user,
         "show_sidebar": kwargs.get("show_sidebar", False),
-        "flash_messages": kwargs.get("flash_messages", [])
+        "flash_messages": kwargs.get("flash_messages", []),
+        "albert_enabled": albert_enabled(),
     }
     context.update(kwargs)
     return context
