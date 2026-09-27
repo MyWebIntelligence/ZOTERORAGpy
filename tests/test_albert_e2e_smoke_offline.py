@@ -19,7 +19,8 @@ tourne qu'à la main (``ALBERT_LIVE=1``). Ces tests couvrent ses parties pures :
   nettoyage (sessions sous ``uploads/``, copies de manifeste) ;
 * les contrôles on1, on2 et on6 sur des sorties fabriquées (API factice) :
   OCR partiel du numérisé, recodage retombé sur le texte brut, ledger des
-  notes informatif ou exigé ;
+  notes exigé (enregistrement servi par l'id épinglé de gpt-oss avec un coût
+  numérique, journal écrit juste après l'événement ``complete``) ;
 * le déroulé du run : nettoyage et résumé après Ctrl-C, exception, SIGTERM ou
   SIGHUP (signaux ignorés pendant le nettoyage, gestionnaires restaurés),
   étapes de nettoyage isolées, serveurs arrêtés avant les collections, arrêt
@@ -750,46 +751,141 @@ def test_check_on2_requires_recoded_chunks_and_a_recode_ledger_record(tmp_path, 
     assert detail["recode_status"] == {"recoded": 2}
 
 
+PINNED_NOTES_MODEL = "gpt-oss-120b"
+NOTES_RECORD = {"role": "notes", "model": PINNED_NOTES_MODEL, "cost": 0.002}
+
+
 def test_notes_ledger_verdict():
-    """Ledger des notes : informatif tant qu'il n'est pas exigé ; enregistrements présents toujours vérifiés."""
-    assert smoke.NOTES_LEDGER_REQUIRED is False
+    """Ledger des notes exigé : un enregistrement servi par l'id épinglé de gpt-oss avec un coût numérique."""
+    assert smoke.NOTES_LEDGER_REQUIRED is True
+    assert smoke.notes_pinned_model() == PINNED_NOTES_MODEL
     issue, info = smoke.notes_ledger_verdict([{"role": "recode", "model": "m", "cost": 0.1}])
-    assert issue is None and info["statut"] == smoke.NOTES_LEDGER_PENDING and info["enregistrements"] == 0
-    issue, info = smoke.notes_ledger_verdict([], required=True)
-    assert issue and info["statut"] == "exigé"
-    good = {"role": "notes", "model": "gpt-oss-120b", "cost": 0.002}
-    issue, info = smoke.notes_ledger_verdict([good, {"role": "long_context", "model": "m2", "cost": 0.001}])
+    assert "sans enregistrement des notes" in issue
+    assert info["statut"] == "exigé" and info["enregistrements"] == 0 and info["avec_modele_epingle"] == 0
+    # Mode non exigé (NOTES_LEDGER_REQUIRED = False) : absence informative seulement.
+    issue, info = smoke.notes_ledger_verdict([], required=False)
+    assert issue is None and info["statut"] == smoke.NOTES_LEDGER_PENDING
+    issue, info = smoke.notes_ledger_verdict(iter([NOTES_RECORD, {"role": "long_context", "model": "m2",
+                                                                  "cost": 0.001}]))
     assert issue is None and info["statut"] == "vérifié"
-    assert info["modeles_servis"] == ["gpt-oss-120b", "m2"] and info["cout"] == 0.003
-    for bad in ({"role": "notes", "model": "gpt-oss-120b", "cost": None},
-                {"role": "notes", "model": "", "cost": 0.002},
-                {"role": "notes", "model": "gpt-oss-120b", "cost": True},
-                {"role": "notes", "model": "gpt-oss-120b", "cost": float("nan")}):
-        assert smoke.notes_ledger_verdict([bad])[0], bad
+    assert info["modele_epingle"] == PINNED_NOTES_MODEL and info["avec_modele_epingle"] == 1
+    assert info["modeles_servis"] == [PINNED_NOTES_MODEL, "m2"] and info["cout"] == 0.003
+    for bad in ({**NOTES_RECORD, "cost": None},
+                {**NOTES_RECORD, "model": ""},
+                {**NOTES_RECORD, "cost": True},
+                {**NOTES_RECORD, "cost": float("nan")},
+                {**NOTES_RECORD, "cost": "0.002"},
+                {**NOTES_RECORD, "model": "ministral-3-8b-instruct-2512"},  # repli : pas gpt-oss
+                {**NOTES_RECORD, "model": "openai/gpt-oss-120b"},  # alias, pas l'id épinglé
+                {**NOTES_RECORD, "role": "recode"}):  # enregistrement d'une autre étape
+        for required in (True, False):
+            issue, info = smoke.notes_ledger_verdict([bad], required=required)
+            if bad["role"] == "recode" and not required:
+                assert issue is None, bad
+            else:
+                assert issue, (bad, required)
+                assert info["avec_modele_epingle"] == 0, bad
+    issue, _info = smoke.notes_ledger_verdict([{**NOTES_RECORD, "model": "ministral-3-8b-instruct-2512"}])
+    assert PINNED_NOTES_MODEL in issue and "ministral-3-8b-instruct-2512" in issue
+    # Un enregistrement conforme suffit, même à côté d'un enregistrement incomplet.
+    assert smoke.notes_ledger_verdict([{**NOTES_RECORD, "cost": None}, NOTES_RECORD])[0] is None
+
+
+def test_wait_for_notes_ledger_reads_a_journal_written_after_complete(tmp_path):
+    """Journal écrit par le ``finally`` de la route juste après ``complete`` : relu jusqu'à l'enregistrement des notes."""
+    path = tmp_path / "albert_usage.jsonl"
+    _write_jsonl(path, [{"role": "recode", "model": "m", "cost": 0.1}])
+    waits = []
+
+    def late_write(seconds):
+        """Attente factice : le journal des notes apparaît à la deuxième attente."""
+        waits.append(seconds)
+        if len(waits) == 2:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(NOTES_RECORD) + "\n")
+
+    records = smoke.wait_for_notes_ledger(path, attempts=5, wait_s=0.25, sleep=late_write)
+    assert waits == [0.25, 0.25]
+    assert smoke.notes_ledger_verdict(records)[0] is None
+    # Enregistrement des notes déjà présent : aucune attente.
+    waits.clear()
+    assert smoke.wait_for_notes_ledger(path, attempts=5, wait_s=0.25, sleep=late_write) == records
+    assert waits == []
+    # Journal absent : relectures bornées, puis liste vide.
+    waits.clear()
+    assert smoke.wait_for_notes_ledger(tmp_path / "absent.jsonl", attempts=3, wait_s=0.0, sleep=waits.append) == []
+    assert waits == [0.0, 0.0, 0.0]
 
 
 def test_check_on6_ledger_is_informational_until_required(tmp_path, monkeypatch):
-    """on6 : notes générées sans ledger réussit (informatif) ; échoue si le ledger est exigé ou incomplet."""
+    """on6 avec NOTES_LEDGER_REQUIRED = False : absence informative ; exigé (valeur du script) → échec.
+
+    Le script fixe désormais ``NOTES_LEDGER_REQUIRED = True`` ; le mode
+    informatif reste disponible en le rabattant à ``False``, et les
+    enregistrements de notes présents y sont toujours vérifiés.
+    """
+    assert smoke.NOTES_LEDGER_REQUIRED is True
+    monkeypatch.setattr(smoke, "NOTES_LEDGER_WAIT_S", 0.0)
     terminal = {"type": "complete", "summary": {"created": 3, "errors": 0}}
     run, folder = _check_run(tmp_path, monkeypatch, terminal)
     notes = [{"item_key": doc.key, "summary": GENERATED_NOTE} for doc in run.corpus.docs]
     (folder / "generated_notes.json").write_text(json.dumps(notes, ensure_ascii=False), encoding="utf-8")
     _write_jsonl(folder / "albert_usage.jsonl", [{"role": "recode", "model": "m", "cost": 0.1}])
+
+    monkeypatch.setattr(smoke, "NOTES_LEDGER_REQUIRED", False)
     assert run.run_check("on", "on6", run.check_on6) is True
     assert run.results["on"]["on6"]["detail"]["ledger_notes"]["statut"] == smoke.NOTES_LEDGER_PENDING
     assert run.api.calls[-1] == ("/generate_zotero_notes_sse", {"session": run.sessions["a"],
                                                                 "note_mode": "short", "model": smoke.NOTES_MODEL})
-
-    monkeypatch.setattr(smoke, "NOTES_LEDGER_REQUIRED", True)
-    assert run.run_check("on", "on6", run.check_on6) is False
-    assert "sans enregistrement des notes" in run.results["on"]["on6"]["message"]
-    monkeypatch.setattr(smoke, "NOTES_LEDGER_REQUIRED", False)
-
-    _write_jsonl(folder / "albert_usage.jsonl", [{"role": "notes", "model": "gpt-oss-120b", "cost": None}])
-    assert run.run_check("on", "on6", run.check_on6) is False
-    _write_jsonl(folder / "albert_usage.jsonl", [{"role": "notes", "model": "gpt-oss-120b", "cost": 0.002}])
+    _write_jsonl(folder / "albert_usage.jsonl", [{**NOTES_RECORD, "cost": None}])
+    assert run.run_check("on", "on6", run.check_on6) is False  # enregistrement présent mais incomplet
+    _write_jsonl(folder / "albert_usage.jsonl", [NOTES_RECORD])
     assert run.run_check("on", "on6", run.check_on6) is True
     assert run.results["on"]["on6"]["detail"]["ledger_notes"]["statut"] == "vérifié"
+
+    monkeypatch.setattr(smoke, "NOTES_LEDGER_REQUIRED", True)
+    _write_jsonl(folder / "albert_usage.jsonl", [{"role": "recode", "model": "m", "cost": 0.1}])
+    assert run.run_check("on", "on6", run.check_on6) is False
+    assert "sans enregistrement des notes" in run.results["on"]["on6"]["message"]
+
+
+def test_check_on6_requires_the_notes_ledger(tmp_path, monkeypatch):
+    """on6 : notes générées mais journal des notes absent, incomplet ou d'un autre modèle → échec ; conforme → succès."""
+    monkeypatch.setattr(smoke, "NOTES_LEDGER_WAIT_S", 0.0)
+    terminal = {"type": "complete", "summary": {"created": 3, "errors": 0}}
+    run, folder = _check_run(tmp_path, monkeypatch, terminal)
+    notes = [{"item_key": doc.key, "summary": GENERATED_NOTE} for doc in run.corpus.docs]
+    (folder / "generated_notes.json").write_text(json.dumps(notes, ensure_ascii=False), encoding="utf-8")
+
+    assert run.run_check("on", "on6", run.check_on6) is False  # aucun journal dans la session
+    assert "sans enregistrement des notes" in run.results["on"]["on6"]["message"]
+    assert run.results["on"]["on6"]["detail"]["journal_present"] is False
+    assert run.api.calls[-1] == ("/generate_zotero_notes_sse", {"session": run.sessions["a"],
+                                                                "note_mode": "short", "model": smoke.NOTES_MODEL})
+
+    _write_jsonl(folder / "albert_usage.jsonl", [{"role": "recode", "model": "m", "cost": 0.1}])
+    assert run.run_check("on", "on6", run.check_on6) is False  # journal des étapes précédentes seulement
+    result = run.results["on"]["on6"]
+    assert "sans enregistrement des notes" in result["message"]
+    assert result["detail"]["journal_present"] is True and result["detail"]["ledger_notes"]["statut"] == "exigé"
+
+    for bad in ({**NOTES_RECORD, "cost": None}, {**NOTES_RECORD, "model": "ministral-3-8b-instruct-2512"}):
+        _write_jsonl(folder / "albert_usage.jsonl", [{"role": "recode", "model": "m", "cost": 0.1}, bad])
+        assert run.run_check("on", "on6", run.check_on6) is False, bad
+        assert PINNED_NOTES_MODEL in run.results["on"]["on6"]["message"], bad
+
+    _write_jsonl(folder / "albert_usage.jsonl", [{"role": "recode", "model": "m", "cost": 0.1}, NOTES_RECORD])
+    assert run.run_check("on", "on6", run.check_on6) is True
+    ledger_detail = run.results["on"]["on6"]["detail"]["ledger_notes"]
+    assert ledger_detail["statut"] == "vérifié" and ledger_detail["avec_modele_epingle"] == 1
+    assert ledger_detail["modele_epingle"] == PINNED_NOTES_MODEL
+
+    # Le journal conforme ne rattrape pas une note issue du gabarit.
+    fallback = [{"item_key": doc.key, "summary": "Résumé à compléter : la note n'a pas pu être générée."}
+                for doc in run.corpus.docs]
+    (folder / "generated_notes.json").write_text(json.dumps(fallback, ensure_ascii=False), encoding="utf-8")
+    assert run.run_check("on", "on6", run.check_on6) is False
+    assert "gabarit" in run.results["on"]["on6"]["message"]
 
 
 # ---------------------------------------------------------------------------

@@ -52,7 +52,9 @@ Contrôles (tableau du lot 8) :
   (``Inserted`` > 0, manifeste copié sous ``data/albert_manifests/``, entrée
   d'audit) ; ``upload_db`` relancé (``Inserted: 0``, ``Skipped (existing): N``) ;
   ``generate_zotero_notes_sse`` avec ``albert/gpt-oss-120b`` en mode court
-  (note différente du gabarit ; ledger : voir ``NOTES_LEDGER_REQUIRED``) ;
+  (note différente du gabarit ; dans ``albert_usage.jsonl``, au moins un
+  enregistrement des notes servi par l'id épinglé de gpt-oss avec un coût
+  numérique) ;
   ``GET /api/albert/collections`` puis ``DELETE …?confirm=true`` (collection
   listée, puis absente) ;
 * isolation : chunking ``albert/…`` de B en 403
@@ -69,12 +71,17 @@ flux : l'issue est alors le dernier événement ``complete`` ou ``error`` (un
 événement ``error`` intermédiaire peut n'être qu'une ligne de journal du
 sous-processus, qui continue).
 
-Ledger des notes (on6) : la route ``generate_zotero_notes_sse`` n'écrit pas
-encore ``albert_usage.jsonl`` (le client Albert des notes garde son ledger en
-mémoire). Tant que ``NOTES_LEDGER_REQUIRED`` vaut ``False``, l'absence
-d'enregistrement de notes est consignée dans le détail d'on6 comme
-informative, sans le faire échouer ; des enregistrements de notes présents
-mais sans modèle servi ni coût numérique le font toujours échouer.
+Ledger des notes (on6) : la route ``generate_zotero_notes_sse`` ajoute les
+enregistrements de ses appels Albert à ``<session>/albert_usage.jsonl`` dans
+son bloc ``finally``, donc éventuellement juste après l'événement
+``complete`` : le fichier est relu quelques instants
+(``NOTES_LEDGER_ATTEMPTS`` × ``NOTES_LEDGER_WAIT_S``) tant qu'aucun
+enregistrement des notes (rôles ``notes`` ou ``long_context``) n'y figure.
+Avec ``NOTES_LEDGER_REQUIRED`` à ``True`` (valeur du script), on6 exige un
+enregistrement des notes dont le modèle est l'id épinglé de gpt-oss
+(``gpt-oss-120b``, pas un alias) et le coût numérique ; à ``False``,
+l'absence d'enregistrement serait seulement informative. Des enregistrements
+de notes présents sont toujours vérifiés.
 
 Fin, dans un bloc ``finally`` : arrêt des serveurs (groupe de processus
 compris) avant toute suppression de collection, suppression par
@@ -194,15 +201,19 @@ RECODED_STATUS = "recoded"
 SKIPPED_STATUS = "skipped"
 RECODE_ROLE = "recode"
 
-# Ledger des notes (on6). La route ``generate_zotero_notes_sse`` n'écrit pas
-# encore ``albert_usage.jsonl`` : son client Albert garde le ledger en mémoire.
-# Tant que ce point reste ouvert, l'absence d'enregistrement de notes est
-# informative (consignée dans le détail d'on6, sans échec) ; des enregistrements
-# de notes présents mais sans modèle servi ni coût numérique font toujours
-# échouer on6. Passer à ``True`` quand la route écrit le ledger.
-NOTES_LEDGER_REQUIRED = False
-NOTES_LEDGER_PENDING = ("informatif : la route generate_zotero_notes_sse n'écrit pas encore "
-                        "albert_usage.jsonl (point reporté)")
+# Ledger des notes (on6). La route ``generate_zotero_notes_sse`` ajoute les
+# enregistrements de ses appels Albert à ``albert_usage.jsonl`` (dans son bloc
+# ``finally``, éventuellement juste après l'événement ``complete``). on6 exige
+# un enregistrement des notes servi par l'id épinglé de gpt-oss avec un coût
+# numérique. ``NOTES_LEDGER_PENDING`` n'est employé qu'avec
+# ``NOTES_LEDGER_REQUIRED = False`` (absence d'enregistrement informative).
+# Le journal est relu au plus ``NOTES_LEDGER_ATTEMPTS`` fois, à
+# ``NOTES_LEDGER_WAIT_S`` secondes d'intervalle, tant qu'il ne porte aucun
+# enregistrement des notes.
+NOTES_LEDGER_REQUIRED = True
+NOTES_LEDGER_PENDING = "informatif : journal des notes non exigé (NOTES_LEDGER_REQUIRED = False)"
+NOTES_LEDGER_ATTEMPTS = 10
+NOTES_LEDGER_WAIT_S = 0.5
 
 # Signaux qui interrompent le run comme un Ctrl-C (le nettoyage s'exécute), et
 # signaux ignorés pendant le nettoyage et l'écriture du résumé.
@@ -732,6 +743,15 @@ def recode_ledger_problem(records: Iterable[Mapping[str, Any]]) -> Optional[str]
     return None
 
 
+def notes_pinned_model() -> str:
+    """Id épinglé du catalogue pour ``NOTES_MODEL``, sans le préfixe ``albert/`` (``gpt-oss-120b``)."""
+    _ensure_repo_on_path()
+    from scripts.rad_albert import catalog
+
+    name = NOTES_MODEL[len(ALBERT_PREFIX):] if NOTES_MODEL.startswith(ALBERT_PREFIX) else NOTES_MODEL
+    return catalog.canonical_id(name)
+
+
 def notes_ledger_verdict(records: Iterable[Mapping[str, Any]],
                          required: Optional[bool] = None) -> Tuple[Optional[str], Dict[str, Any]]:
     """Évalue le ledger des notes (rôles ``NOTES_ROLES``).
@@ -744,21 +764,59 @@ def notes_ledger_verdict(records: Iterable[Mapping[str, Any]],
     Returns:
         ``(défaut ou None, détail)`` : sans enregistrement de notes, défaut si
         ``required``, sinon détail marqué informatif ; avec des enregistrements,
-        défaut si aucun ne porte le modèle servi et un coût numérique.
+        défaut si aucun n'a pour modèle l'id épinglé de gpt-oss
+        (``notes_pinned_model``, un alias ne suffit pas) avec un coût numérique.
+        Le détail est celui de ``ledger_info``, complété de ``modele_epingle``,
+        ``avec_modele_epingle`` (enregistrements conformes) et ``statut``.
     """
+    records = list(records)
     strict = NOTES_LEDGER_REQUIRED if required is None else bool(required)
     info = ledger_info(records, NOTES_ROLES)
+    pinned = notes_pinned_model()
+    info["modele_epingle"] = pinned
+    info["avec_modele_epingle"] = ledger_info(
+        [r for r in records if r.get("model") == pinned], NOTES_ROLES)["avec_cout"]
     if not info["enregistrements"]:
         if strict:
             info["statut"] = "exigé"
             return "albert_usage.jsonl sans enregistrement des notes", info
         info["statut"] = NOTES_LEDGER_PENDING
         return None, info
-    if not info["avec_cout"]:
-        info["statut"] = "vérifié"
-        return "albert_usage.jsonl : enregistrements des notes sans modèle servi ni coût numérique", info
     info["statut"] = "vérifié"
+    if not info["avec_modele_epingle"]:
+        served = ", ".join(info["modeles_servis"]) or "aucun"
+        return (f"albert_usage.jsonl : aucun enregistrement des notes servi par {pinned} avec un coût "
+                f"numérique (modèles servis : {served})"), info
     return None, info
+
+
+def wait_for_notes_ledger(path: Any, attempts: Optional[int] = None, wait_s: Optional[float] = None,
+                          sleep: Optional[Callable[[float], None]] = None) -> List[Dict[str, Any]]:
+    """Enregistrements de ``albert_usage.jsonl``, relus tant qu'aucun ne vient des notes.
+
+    La route des notes écrit le journal dans son bloc ``finally``, donc
+    éventuellement juste après l'événement ``complete`` lu par le client.
+
+    Args:
+        path: chemin du journal.
+        attempts: relectures au plus (défaut : ``NOTES_LEDGER_ATTEMPTS``).
+        wait_s: attente avant chaque relecture, en secondes (défaut :
+            ``NOTES_LEDGER_WAIT_S``).
+        sleep: fonction d'attente (défaut : ``time.sleep``).
+
+    Returns:
+        Les enregistrements de la dernière lecture (vide si le fichier manque).
+    """
+    attempts = NOTES_LEDGER_ATTEMPTS if attempts is None else attempts
+    wait_s = NOTES_LEDGER_WAIT_S if wait_s is None else wait_s
+    sleep = time.sleep if sleep is None else sleep
+    records = read_jsonl(path)
+    for _attempt in range(max(0, int(attempts))):
+        if ledger_info(records, NOTES_ROLES)["enregistrements"]:
+            break
+        sleep(wait_s)
+        records = read_jsonl(path)
+    return records
 
 
 def manifest_label(session: Any) -> str:
@@ -1861,7 +1919,11 @@ class SmokeRun:
         return detail
 
     def check_on6(self) -> Dict[str, Any]:
-        """Notes courtes gpt-oss : note générée (pas le gabarit) ; ledger évalué par ``notes_ledger_verdict``."""
+        """Notes courtes gpt-oss : note générée (pas le gabarit) ; ledger exigé, évalué par ``notes_ledger_verdict``.
+
+        Le journal ``albert_usage.jsonl`` de la session est relu par
+        ``wait_for_notes_ledger`` (écrit par la route dans son ``finally``).
+        """
         folder = self.session_dir("a")
         terminal = require_complete(self.api.sse(
             "/generate_zotero_notes_sse", self.tokens["a"],
@@ -1869,10 +1931,11 @@ class SmokeRun:
         summary = terminal.get("summary") if isinstance(terminal.get("summary"), dict) else {}
         notes = load_json_list(folder / "generated_notes.json")
         abstracts = {doc.key: doc.abstract for doc in self.corpus.docs}
-        ledger = read_jsonl(folder / "albert_usage.jsonl")
+        ledger_path = folder / "albert_usage.jsonl"
+        ledger = wait_for_notes_ledger(ledger_path)
         ledger_issue, ledger_detail = notes_ledger_verdict(ledger)
-        detail = {"resume": summary, "notes": len(notes), "enregistrements_ledger": len(ledger),
-                  "ledger_notes": ledger_detail}
+        detail = {"resume": summary, "notes": len(notes), "journal_present": ledger_path.is_file(),
+                  "enregistrements_ledger": len(ledger), "ledger_notes": ledger_detail}
         problems = []
         if summary.get("errors") not in (0, None) or summary.get("created") != len(self.corpus.docs):
             problems.append(f"résumé de la route {summary} (attendu {len(self.corpus.docs)} note(s), 0 erreur)")
