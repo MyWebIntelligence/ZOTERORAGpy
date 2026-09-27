@@ -79,17 +79,21 @@ def _max_in_window(stamps, window=60.0):
 # Seau local
 # ---------------------------------------------------------------------------
 def test_bucket_rpm_tpm_fake_clock():
-    # RPM : la rafale initiale (une minute de débit) passe sans attendre ; ensuite,
-    # un jeton toutes les 60/rpm secondes, jamais plus de rpm par minute glissante.
+    # RPM : la rafale initiale (au plus une minute de débit) passe sans attendre, mais
+    # elle est prise sur la première minute : la requête suivante attend la fin de
+    # cette minute ; ensuite, un jeton toutes les 60/rpm secondes. Débit saturé dès le
+    # départ : jamais plus de rpm acquisitions par minute glissante, rafale initiale
+    # comprise (après une inactivité, la borne est rpm + rafale − 1, voir
+    # tests/test_albert_review_regressions_f3.py).
     clock = FakeClock()
     bucket = _bucket(clock, rpm=6)
     stamps = _drive(bucket, clock, 6)
     assert stamps == [1000.0] * 6
     assert clock.sleeps == []
     stamps += _drive(bucket, clock, 18)
-    assert clock.sleeps == pytest.approx([10.0] * 18)
-    assert stamps[-1] - stamps[0] == pytest.approx(180.0)
-    assert _max_in_window(stamps[6:]) <= 6
+    assert clock.sleeps == pytest.approx([60.0] + [10.0] * 17)
+    assert stamps[-1] - stamps[0] == pytest.approx(60.0 + 170.0)
+    assert _max_in_window(stamps) <= 6
 
     # Le débit se reconstitue avec le temps (horloge qui avance sans sommeil).
     clock.now += 60.0
@@ -97,11 +101,24 @@ def test_bucket_rpm_tpm_fake_clock():
     _drive(bucket, clock, 6)
     assert len(clock.sleeps) == before
 
-    # TPM : les tokens d'entrée estimés consomment le second budget.
+    # Rafale de départ réduite (concurrence du rôle) : les autres requêtes de la
+    # première minute suivent le débit régulier.
     clock = FakeClock()
-    bucket = _bucket(clock, rpm=1000, tpm=600)  # 10 tokens par seconde
+    bucket = albert_limiter.TokenBucket(6, None, burst=2, clock=clock, sleep=clock.sleep)
+    stamps = _drive(bucket, clock, 8)
+    assert stamps[:2] == [1000.0] * 2
+    assert clock.sleeps == pytest.approx([20.0] + [10.0] * 5)
+    assert _max_in_window(stamps) <= 6
+
+    # TPM : les tokens d'entrée estimés consomment le second budget (10 tokens par
+    # seconde) ; les tokens de la première minute ne dépassent jamais tpm.
+    clock = FakeClock()
+    bucket = _bucket(clock, rpm=1000, tpm=600)
     bucket.acquire(600)
     assert clock.sleeps == []
+    start = clock.now
+    bucket.acquire(300)
+    assert clock.now - start == pytest.approx(90.0)  # fin de la première minute, puis 300 tokens
     start = clock.now
     bucket.acquire(300)
     assert clock.now - start == pytest.approx(30.0)
@@ -115,7 +132,8 @@ def test_bucket_rpm_tpm_fake_clock():
 
 def test_bucket_is_thread_safe():
     # Horloge figée : chaque réservation renvoie son attente ; sous verrou, les attentes
-    # sont exactement 0 (rafale de 60) puis 1, 2, …, 20 s (une par réservation en file).
+    # sont exactement 0 (rafale de 60, prise sur la première minute) puis 60, 61, …,
+    # 79 s (une par réservation en file).
     frozen = FakeClock()
     waits = []
     lock = threading.Lock()
@@ -134,7 +152,7 @@ def test_bucket_is_thread_safe():
     for thread in threads:
         thread.join(timeout=10)
     assert len(waits) == 80
-    assert sorted(round(w, 6) for w in waits) == [0.0] * 60 + [float(i) for i in range(1, 21)]
+    assert sorted(round(w, 6) for w in waits) == [0.0] * 60 + [float(i) for i in range(60, 80)]
 
 
 def test_pause_on_429():
@@ -208,13 +226,15 @@ def test_process_share():
     assert albert_limiter.get_limiter("recode", cfg) is albert_limiter.get_limiter("citation", cfg)
     assert albert_limiter.get_limiter("recode", cfg) is not albert_limiter.get_limiter("notes", cfg)
 
-    # Effet mesuré : à part 0,5, deux fois moins d'acquisitions par minute.
+    # Effet mesuré : à part 0,5, deux fois moins d'acquisitions par minute, première
+    # minute (rafale initiale) comprise.
     clock = FakeClock()
     bucket = _bucket(clock, rpm=60, share=0.5)
     stamps = _drive(bucket, clock, 120)
     assert stamps[:30] == [1000.0] * 30
-    assert _max_in_window(stamps[30:]) <= 30
-    assert stamps[-1] - stamps[0] == pytest.approx(90 * 2.0)
+    assert stamps[30] == pytest.approx(1060.0)
+    assert _max_in_window(stamps) <= 30
+    assert stamps[-1] - stamps[0] == pytest.approx(60.0 + 89 * 2.0)
 
 
 def test_estimate_input_tokens():
@@ -374,9 +394,13 @@ def test_limiter_does_not_block_event_loop():
     # ``aacquire`` du seau local passe aussi par un thread.
     async def via_aacquire():
         """Acquisition asynchrone sur un seau qui doit attendre 0,3 s réelles."""
-        bucket = albert_limiter.TokenBucket(200, None)  # 200 RPM : 0,3 s par jeton après la rafale
-        for _ in range(200):
+        now = [0.0]
+        # 200 RPM : la rafale de départ (200) est prise sur la première minute ; la
+        # 201e réservation part à 60 s, puis un jeton toutes les 0,3 s.
+        bucket = albert_limiter.TokenBucket(200, None, clock=lambda: now[0])
+        for _ in range(201):
             bucket.reserve(0)
+        now[0] = 60.0  # première minute écoulée : l'attente suivante est d'un seul jeton
         ticks = 0
         stop = asyncio.Event()
 

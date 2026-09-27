@@ -33,7 +33,9 @@ Albert (opt-in, ``albert/<id>`` model):
 - ``pre_filter_citation`` and ``filter_citation_with_llm`` go through
   ``run_llm_slot`` (single retry layer, no sleep while holding a semaphore,
   no nested acquisition), outside the historical ``max_retries`` loop, with
-  the role fallback on repeated 503 answers (``citation`` role chain).
+  the role fallback on repeated 503 answers (``citation`` role chain). The
+  limiter budget follows the model sent (gpt-oss: ``notes``; ministral and the
+  other chain models: ``recode``).
 - Pre-filter answers are read as an exact token (first word in {RELEVANT, NA},
   otherwise the citation is kept); account errors are raised, never fail-open.
 - Usage ledger: ``_call_llm_api``, ``pre_filter_citation`` and
@@ -670,7 +672,10 @@ async def _albert_citation_call(
     sends retried by ``run_llm_slot`` (limiter and backoff outside the
     semaphores); after ``ALBERT_BUSY_RETRIES`` answers « Model is too busy »,
     the next model of the chain is used (``ALBERT_MODEL_FALLBACK=0`` keeps the
-    first model only). A 404 never triggers a fallback, and OpenAI or
+    first model only). The limiter budget follows each model sent: an explicit
+    gpt-oss consumes the ``notes`` budget, a ministral fallback the ``recode``
+    budget. Fallbacks absent from the cached ``/v1/models`` listing of the
+    account are skipped. A 404 never triggers a fallback, and OpenAI or
     OpenRouter are never called.
 
     Args:
@@ -872,7 +877,8 @@ async def _pre_filter_citation_albert(
     """
     Branche Albert du pré-filtre : ``run_llm_slot`` et lecture par jeton exact.
 
-    Un seul envoi par essai sous les sémaphores (global puis Albert), limiteur
+    Un seul envoi par essai sous les sémaphores (Albert puis global), limiteur
+    (budget du modèle envoyé : ``notes`` pour gpt-oss, ``recode`` sinon)
     acquis et attente de réessai hors sémaphores ; aucune boucle de réessai
     supplémentaire. Après des 503 répétés, repli sur le modèle suivant de la
     chaîne du rôle ``citation`` (``_albert_citation_call``). Réponse : premier
@@ -1147,8 +1153,9 @@ async def _filter_citation_with_albert(
     """
     Albert branch of ``filter_citation_with_llm`` (``run_llm_slot``, no outer loop).
 
-    One send per attempt under the global then the Albert semaphore; the
-    limiter is acquired and the backoff slept outside them; the historical
+    One send per attempt under the Albert then the global semaphore; the
+    limiter (budget of the model sent: ``notes`` for gpt-oss, ``recode``
+    otherwise) is acquired and the backoff slept outside them; the historical
     ``max_retries`` loop and its 2-second sleep are bypassed (single retry
     layer). After repeated 503 answers, the next model of the ``citation``
     role chain is used (``_albert_citation_call``). The global semaphore is

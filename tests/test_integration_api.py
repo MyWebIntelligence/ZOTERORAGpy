@@ -1,10 +1,10 @@
 """
 Integration tests for a few public API routes (home page, settings, CSV upload).
 
-``/get_credentials`` is ADMIN only: the admin is injected with
-``app.dependency_overrides`` and the settings ``.env`` is a temporary file
-holding fake values, so the host ``.env`` is never read. CSV uploads land in a
-temporary uploads directory.
+``/get_credentials`` is ADMIN only and ``/upload_csv`` requires an
+authenticated user: the fake admin is injected with ``app.dependency_overrides``
+and the settings ``.env`` is a temporary file holding fake values, so the host
+``.env`` is never read. CSV uploads land in a temporary uploads directory.
 """
 
 import os
@@ -22,7 +22,7 @@ RAGPY_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(RAGPY_ROOT))
 
 from app.main import app
-from app.middleware.auth import require_admin
+from app.middleware.auth import get_current_active_user, require_admin
 from app.models.user import User
 from app.routes import ingestion as ingestion_routes
 from app.routes import settings as settings_routes
@@ -66,6 +66,7 @@ class TestIntegrationAPI(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
         self.addCleanup(app.dependency_overrides.pop, require_admin, None)
+        self.addCleanup(app.dependency_overrides.pop, get_current_active_user, None)
         self.client = TestClient(app)
 
     def _as_admin(self):
@@ -110,7 +111,19 @@ class TestIntegrationAPI(unittest.TestCase):
         response = self.client.get("/get_credentials")
         self.assertEqual(response.status_code, 401)
 
+    def _as_user(self):
+        """Authenticate upload requests as the fake admin (no project_id: no database access)."""
+        app.dependency_overrides[get_current_active_user] = _fake_admin
+
+    def test_upload_csv_requires_authentication(self):
+        """Anonymous CSV upload: 401 and nothing written."""
+        files = {'file': ('test.csv', b"header1,text\nval1,some text", 'text/csv')}
+        response = self.client.post("/upload_csv", files=files)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(os.listdir(self.uploads), [])
+
     def test_upload_csv_invalid_extension(self):
+        self._as_user()
         # Test uploading a non-csv file
         files = {'file': ('test.txt', b'some content', 'text/plain')}
         response = self.client.post("/upload_csv", files=files)
@@ -119,6 +132,7 @@ class TestIntegrationAPI(unittest.TestCase):
         self.assertEqual(os.listdir(self.uploads), [])
 
     def test_upload_csv_success(self):
+        self._as_user()
         # Test uploading a valid csv file
         csv_content = b"header1,text\nval1,some text content"
         files = {'file': ('test.csv', csv_content, 'text/csv')}

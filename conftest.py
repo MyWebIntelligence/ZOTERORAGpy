@@ -19,7 +19,14 @@ la racine. Il garantit qu'aucune session de test n'appelle l'API Albert réelle 
   Albert des modules déjà importés et fait échouer le test si une requête a été
   bloquée, même quand le code a avalé l'exception ;
 * ``anyio_backend`` vaut ``'asyncio'`` et toute variante ``[trio]`` est refusée ;
-* les tests marqués ``albert_live`` sont sautés sauf si ``ALBERT_LIVE=1``.
+* les tests marqués ``albert_live`` sont sautés sauf si ``ALBERT_LIVE=1`` ;
+* sans ``TIKTOKEN_CACHE_DIR`` (ni l'ancien ``DATA_GYM_CACHE_DIR``), le cache
+  tiktoken est placé **à l'import** dans ``data/tiktoken_cache`` du dépôt
+  (persistant, ignoré par git) : le cache par défaut, sous le dossier
+  temporaire du système, peut être purgé, et les tests nouveaux échouent alors
+  faute de pouvoir le retélécharger. Rien n'est téléchargé ici (tiktoken n'est
+  pas importé) ; le préchauffage se fait une fois, hors pytest
+  (``.claude/docs/albert.md``, section 10).
 
 Les transports ``httpx.MockTransport`` (``tests/albert_fakes.FakeAlbert``) et le
 ``TestClient`` de Starlette ne passent pas par ``HTTPTransport`` : la garde ne
@@ -80,6 +87,29 @@ if _LIVE_ENV_FILES:
         + ", ".join(_LIVE_ENV_FILES)
         + "). Le retirer ; les tests live s'activent uniquement par ALBERT_LIVE=1 exporté dans le shell."
     )
+
+TIKTOKEN_CACHE_ENV = "TIKTOKEN_CACHE_DIR"
+TIKTOKEN_LEGACY_CACHE_ENV = "DATA_GYM_CACHE_DIR"
+TIKTOKEN_CACHE_DIR = os.path.join(ROOT, "data", "tiktoken_cache")
+
+
+def _default_tiktoken_cache_dir() -> Optional[str]:
+    """Pose ``TIKTOKEN_CACHE_DIR`` sur le cache persistant du dépôt s'il n'est pas choisi.
+
+    Un emplacement déjà choisi (``TIKTOKEN_CACHE_DIR``, même vide, ou l'ancien
+    ``DATA_GYM_CACHE_DIR``, que tiktoken lit aussi) est laissé tel quel. Ni
+    dossier créé ni tiktoken importé : aucun accès réseau possible ici.
+
+    Returns:
+        Le chemin posé, ou ``None`` si l'appelant avait déjà choisi.
+    """
+    if TIKTOKEN_CACHE_ENV in os.environ or TIKTOKEN_LEGACY_CACHE_ENV in os.environ:
+        return None
+    os.environ[TIKTOKEN_CACHE_ENV] = TIKTOKEN_CACHE_DIR
+    return TIKTOKEN_CACHE_DIR
+
+
+_default_tiktoken_cache_dir()
 
 # ---------------------------------------------------------------------------
 # Constantes

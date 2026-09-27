@@ -49,7 +49,6 @@ import os
 import time
 import logging
 import dataclasses
-import unicodedata
 from collections.abc import Mapping
 from typing import Any, List, Optional, Tuple
 
@@ -109,11 +108,12 @@ _ALBERT_COLLECTIONS_MAX_PER_PAGE = 100
 _CONFIRM_VALUES = ("1", "true", "yes", "on")
 ALBERT_DELETE_AUDIT_ACTION = "ALBERT_COLLECTION_DELETE"
 
-# Unicode categories refused in a /save_credentials value: control characters
-# (C0, DEL, C1 including NEL) and the line / paragraph separators.
-_FORBIDDEN_VALUE_CATEGORIES = ("Cc", "Zl", "Zp")
+# Refused in a /save_credentials value: NUL and the line separators recognised
+# by str.splitlines (\n, \r, \v, \f, \x1c-\x1e, NEL, U+2028, U+2029). A tab or
+# any other character is accepted, as before Albert.
+_NUL = "\x00"
 _INVALID_VALUE_MESSAGE = (
-    "Valeur refusée : caractères de contrôle ou retours à la ligne interdits."
+    "Valeur refusée : retours à la ligne et caractère NUL interdits."
 )
 
 
@@ -137,18 +137,20 @@ def _admin_form_env_keys() -> List[str]:
 
 def _has_forbidden_chars(value: str) -> bool:
     """
-    Tell whether a form value contains a control or line separator character.
+    Tell whether a form value contains a line separator or NUL.
 
-    Such a character (``\\r``, ``\\n``, NUL, NEL, U+2028…) would split the
-    ``NAME=value`` line written to ``.env`` and inject extra variables.
+    A line separator in the sense of ``str.splitlines`` (``\\r``, ``\\n``,
+    NEL, U+2028, U+2029…) would split the ``NAME=value`` line written to
+    ``.env`` and inject extra variables; NUL truncates the value for C
+    readers. A tab or any other character is accepted.
 
     Args:
         value: The submitted value, already stripped.
 
     Returns:
-        True when at least one character belongs to a refused Unicode category.
+        True when the value contains NUL or a line separator.
     """
-    return any(unicodedata.category(ch) in _FORBIDDEN_VALUE_CATEGORIES for ch in value)
+    return _NUL in value or len(f"_{value}_".splitlines()) > 1
 
 
 def _mask_albert_key(value: Optional[str]) -> str:
@@ -287,9 +289,10 @@ async def save_credentials(
     server-side mask ``••••`` is the masked key echoed back by the form: it is
     ignored, so the stored key is kept. An empty value clears the key.
 
-    A value containing a control or line separator character (``\\r``,
-    ``\\n``…) is refused with a 400 ``{error, invalid_keys}`` response (names
-    only, never values) before anything is written. The text after the form
+    A value containing a line separator (``\\r``, ``\\n``, NEL, U+2028…) or
+    NUL is refused with a 400 ``{error, invalid_keys}`` response (names only,
+    never values) before anything is written; a tab or any other character is
+    accepted. The text after the form
     feed is left out of the OpenAPI description.
     """
     logger.info(f"Admin user {admin_user.email} saving .env credentials")
@@ -317,7 +320,7 @@ async def save_credentials(
 
     # Accepted values, in form order. The masked Albert key echoed by the form
     # is skipped so that it never overwrites the stored key. A value carrying a
-    # control or line separator character is refused before anything is written.
+    # line separator or NUL is refused before anything is written.
     accepted = {}
     invalid_keys = []
     for key in valid_keys:
@@ -331,7 +334,7 @@ async def save_credentials(
             accepted[key] = value
 
     if invalid_keys:
-        logger.warning(f"Refused credential values with control characters: {', '.join(invalid_keys)}")
+        logger.warning(f"Refused credential values with line separators or NUL: {', '.join(invalid_keys)}")
         return JSONResponse(status_code=400, content={
             "error": _INVALID_VALUE_MESSAGE,
             "invalid_keys": invalid_keys,

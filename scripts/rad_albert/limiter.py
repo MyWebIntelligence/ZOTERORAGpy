@@ -11,15 +11,34 @@ Backends :
 
 * ``TokenBucket`` (``local``, défaut) : seau à jetons thread-safe, horloge et
   sommeil injectables ; chaque appelant réserve sa part sous verrou puis dort
-  **hors** verrou. ``pause(retry_after)`` suspend le débit après un 429.
+  **hors** verrou. ``pause(retry_after)`` suspend le débit après un 429. Le
+  niveau accumulé ne dépasse jamais la rafale (``burst`` requêtes ;
+  ``token_burst`` tokens, la même fraction de minute), même après une
+  inactivité : au plus ``rpm × part + burst − 1`` requêtes et
+  ``tpm × part + token_burst − 1`` tokens sur toute minute glissante. La
+  rafale de départ est prise sur le débit de la première minute : jamais plus
+  de ``rpm × part`` requêtes ni ``tpm × part`` tokens sur la première minute
+  d'un processus. Une requête plus grosse que ``token_burst`` part dès que le
+  seau contient cette rafale : les bornes de tokens ne sont alors dépassées
+  que de son propre excédent.
 * ``RedisWindowLimiter`` (``redis``) : fenêtres fixes d'une minute partagées
   entre processus (Celery, plusieurs sessions) ; URL ``ALBERT_LIMITER_REDIS_URL``,
   sinon ``CELERY_BROKER_URL``, sinon ``redis://localhost:6379/0``. Redis
-  indisponible : repli sur un seau local, avec un seul WARNING.
+  indisponible : repli sur un seau local, avec un seul WARNING par panne ;
+  Redis est retenté après ``REDIS_RETRY_SECONDS`` (jamais de repli définitif).
 
-``get_limiter(role, cfg)`` renvoie l'instance partagée du processus pour le
-budget du rôle. En asynchrone, appeler ``await limiter.aacquire(...)`` (ou
-``asyncio.to_thread(limiter.acquire, ...)``) : la boucle n'est jamais bloquée.
+``get_limiter(role, cfg, model=...)`` renvoie l'instance partagée du processus
+pour le budget de l'appel : celui du rôle, sauf pour un modèle à raisonnement
+(gpt-oss) sous un rôle du budget ``recode``, qui consomme le budget ``notes``
+(``limiter_role``). Le seau démarre presque vide : sa rafale vaut la
+concurrence configurée du budget (``bucket_burst``), au plus une minute de débit,
+et plafonne aussi le niveau accumulé pendant une inactivité.
+
+En asynchrone, passer par ``retry.acall_with_retry`` : un seau local y est
+réservé (``reserve``) puis attendu par ``asyncio.sleep`` ; un limiteur Redis,
+et la pause posée après un 429, passent par l'exécuteur dédié
+``albert-limiter``. La boucle d'événements n'est jamais bloquée et aucun fil de
+l'exécuteur par défaut n'est occupé par une attente de débit.
 """
 
 from __future__ import annotations
@@ -45,6 +64,9 @@ CHARS_PER_TOKEN = 3.0
 
 WINDOW_SECONDS = 60.0
 
+REDIS_RETRY_SECONDS = 30.0
+"""Délai (secondes) avant de retenter Redis après une panne ; seau local entre-temps."""
+
 # Rôle → budget du limiteur (même budget = même instance partagée).
 ROLE_BUCKETS: Mapping[str, str] = {
     "recode": "recode",
@@ -59,6 +81,14 @@ ROLE_BUCKETS: Mapping[str, str] = {
     "embed": "embed",
     "embeddings": "embed",
     "push": "embed",
+}
+
+# Budget → champ de ``AlbertConfig`` donnant sa rafale de départ (concurrence du budget).
+BUCKET_CONCURRENCY: Mapping[str, str] = {
+    "recode": "recode_concurrency",
+    "notes": "notes_concurrency",
+    "ocr": "ocr_concurrency",
+    "embed": "embed_concurrency",
 }
 
 
@@ -157,14 +187,63 @@ def _share(share: Any, process_share: Any) -> float:
     return min(number, 1.0)
 
 
+def _repay(level: float, advance: float, gain: float, ceiling: float) -> Tuple[float, float]:
+    """Applique un remplissage ``gain`` : l'avance de départ est remboursée d'abord.
+
+    Args:
+        level: niveau courant du budget.
+        advance: avance restant à rembourser (rafale de départ prise sur la première minute).
+        gain: jetons apportés par le temps écoulé.
+        ceiling: plafond du niveau accumulé (la rafale du budget).
+
+    Returns:
+        ``(niveau, avance)`` après remplissage (niveau plafonné à ``ceiling``).
+    """
+    paid = min(advance, gain)
+    return min(ceiling, level + (gain - paid)), advance - paid
+
+
+def _wait_for(deficit: float, advance: float, rate: float) -> float:
+    """Attente (secondes) d'une réservation : 0 si le niveau la couvre, sinon avance puis déficit.
+
+    Args:
+        deficit: jetons manquants après la réservation (<= 0 : aucun).
+        advance: avance de départ restant à rembourser avant tout nouveau jeton.
+        rate: débit du budget, en jetons par minute.
+
+    Returns:
+        Secondes d'attente.
+    """
+    if deficit <= 0:
+        return 0.0
+    return (deficit + advance) * WINDOW_SECONDS / rate
+
+
 class TokenBucket:
     """Seau à jetons thread-safe : requêtes par minute et tokens d'entrée par minute.
 
-    Chaque budget a une capacité d'une minute de débit (``rpm × part``,
-    ``tpm × part``) et se remplit en continu. ``acquire`` réserve sous verrou
-    (le niveau peut devenir négatif, ce qui ordonne les appelants) puis dort
-    hors verrou le temps nécessaire. Une requête plus grosse que la capacité
-    TPM attend un seau plein puis passe (dette remboursée par les suivantes).
+    Chaque budget se remplit en continu au débit d'une minute (``rpm × part``,
+    ``tpm × part``) ; son niveau accumulé est plafonné à sa **rafale** :
+    ``burst`` requêtes (au plus une minute de débit ; défaut : une minute) et
+    ``token_burst`` tokens, la même fraction de minute
+    (``burst × tpm / rpm`` ; une minute si le débit de requêtes est illimité).
+    ``acquire`` réserve sous verrou (le niveau peut devenir négatif, ce qui
+    ordonne les appelants) puis dort hors verrou le temps nécessaire. Une
+    requête plus grosse que la rafale de tokens attend que le seau contienne
+    cette rafale puis passe (dette remboursée par les suivantes).
+
+    Borne : même après une inactivité, le seau ne contient jamais plus que sa
+    rafale ; toute fenêtre glissante de 60 s admet donc au plus
+    ``rpm × part + burst − 1`` requêtes et ``tpm × part + token_burst − 1``
+    tokens (une requête plus grosse que ``token_burst`` ne dépasse les bornes
+    de tokens, ici et au départ, que de son propre excédent).
+
+    Départ : la rafale part sans attente, mais elle est une **avance** sur la
+    première minute : le remplissage ne reprend qu'une fois l'avance
+    remboursée (au-delà d'une requête pour le budget de requêtes). Sur débit
+    saturé dès le départ, la première minute n'admet donc jamais plus de
+    ``rpm × part`` requêtes ni ``tpm × part`` tokens ; ensuite, un jeton toutes
+    les ``60 / (rpm × part)`` secondes.
 
     Attributes:
         rpm: requêtes par minute **effectives** (``rpm × part`` ; ``None`` = illimité).
@@ -172,6 +251,10 @@ class TokenBucket:
         base_rpm: requêtes par minute configurées, avant la part.
         base_tpm: tokens par minute configurés, avant la part.
         share: part du quota attribuée au processus.
+        burst: rafale de requêtes : admises d'emblée au départ et plafond du
+            niveau accumulé (``None`` si le débit est illimité).
+        token_burst: rafale de tokens, plafond du niveau de tokens accumulé
+            (``None`` si le débit de tokens est illimité).
         name: nom du budget (journaux).
     """
 
@@ -182,17 +265,21 @@ class TokenBucket:
         *,
         share: float = 1.0,
         process_share: Optional[float] = None,
+        burst: Optional[float] = None,
         name: str = "",
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Any] = time.sleep,
     ) -> None:
-        """Crée un seau plein.
+        """Crée un seau plafonné à sa rafale, rafale de départ prise sur la première minute.
 
         Args:
             rpm: requêtes par minute (``None`` ou <= 0 = illimité).
             tpm: tokens d'entrée par minute (``None`` ou <= 0 = illimité).
             share: part du quota (0 < part <= 1).
             process_share: synonyme de ``share`` (prioritaire s'il est fourni).
+            burst: requêtes admises sans attente au départ et plafond du niveau
+                accumulé, entre 1 et la capacité (``None`` ou <= 0 : une minute
+                de débit) ; la rafale de tokens en est la même fraction de minute.
             name: nom du budget.
             clock: horloge monotone en secondes (injectable).
             sleep: fonction de sommeil (injectable).
@@ -208,8 +295,19 @@ class TokenBucket:
         self._lock = threading.Lock()
         now = clock()
         self._last = now
-        self._req_level = self.request_capacity or 0.0
-        self._tok_level = self.token_capacity or 0.0
+        capacity = self.request_capacity
+        wanted = _positive(burst)
+        if capacity is None:
+            self.burst: Optional[float] = None
+        else:
+            self.burst = capacity if wanted is None else min(capacity, max(1.0, wanted))
+        self.token_burst = self._token_burst()
+        # Rafale de départ = avance sur la première minute (au-delà d'une requête ; tous
+        # les tokens) : remboursée par le remplissage avant tout nouveau jeton.
+        self._req_level = self.burst or 0.0
+        self._req_advance = max(0.0, self._req_level - 1.0)
+        self._tok_level = self.token_burst or 0.0
+        self._tok_advance = self._tok_level
         self._paused_until = now
 
     # --- capacités ---------------------------------------------------------
@@ -235,29 +333,42 @@ class TokenBucket:
         rate = self.effective_tpm
         return max(1.0, rate) if rate is not None else None
 
+    def _token_burst(self) -> Optional[float]:
+        """Rafale de tokens : la même fraction de minute que la rafale de requêtes.
+
+        Returns:
+            ``token_capacity × burst / request_capacity``, entre 1 et la
+            capacité de tokens (une minute de tokens si le débit de requêtes
+            est illimité) ; ``None`` si le débit de tokens est illimité.
+        """
+        capacity = self.token_capacity
+        requests = self.request_capacity
+        if capacity is None:
+            return None
+        if requests is None or self.burst is None:
+            return capacity
+        return min(capacity, max(1.0, capacity * self.burst / requests))
+
     # --- état ----------------------------------------------------------------
     def _refill(self, now: float) -> None:
-        """Remplit les deux budgets pour le temps écoulé (sous verrou)."""
+        """Remplit les deux budgets pour le temps écoulé, avance de départ remboursée d'abord (sous verrou).
+
+        Le niveau accumulé est plafonné à la rafale du budget (``burst``,
+        ``token_burst``), jamais à une minute entière : une inactivité ne
+        laisse pas repartir plus que la rafale d'un coup.
+        """
         elapsed = max(0.0, now - self._last)
         self._last = max(self._last, now)
         if self.effective_rpm is not None:
-            self._req_level = min(self.request_capacity, self._req_level + elapsed * self.effective_rpm / WINDOW_SECONDS)
+            self._req_level, self._req_advance = _repay(
+                self._req_level, self._req_advance, elapsed * self.effective_rpm / WINDOW_SECONDS,
+                self.burst,
+            )
         if self.effective_tpm is not None:
-            self._tok_level = min(self.token_capacity, self._tok_level + elapsed * self.effective_tpm / WINDOW_SECONDS)
-
-    @property
-    def request_level(self) -> Optional[float]:
-        """Jetons de requête disponibles maintenant (négatif = réservations en attente)."""
-        with self._lock:
-            self._refill(self._clock())
-            return self._req_level if self.effective_rpm is not None else None
-
-    @property
-    def token_level(self) -> Optional[float]:
-        """Jetons de tokens disponibles maintenant (négatif = réservations en attente)."""
-        with self._lock:
-            self._refill(self._clock())
-            return self._tok_level if self.effective_tpm is not None else None
+            self._tok_level, self._tok_advance = _repay(
+                self._tok_level, self._tok_advance, elapsed * self.effective_tpm / WINDOW_SECONDS,
+                self.token_burst,
+            )
 
     def reserve(self, tokens: int = 0, *, requests: int = 1) -> float:
         """Réserve une requête (et ses tokens) et renvoie l'attente nécessaire, sans dormir.
@@ -275,16 +386,16 @@ class TokenBucket:
             waits = [max(0.0, self._paused_until - now)]
             rate_r = self.effective_rpm
             if rate_r is not None and requests > 0:
-                need = min(float(requests), self.request_capacity)
+                need = min(float(requests), self.burst)
                 self._req_level -= float(requests)
                 deficit = (need - float(requests)) - self._req_level
-                waits.append(max(0.0, deficit) * WINDOW_SECONDS / rate_r)
+                waits.append(_wait_for(deficit, self._req_advance, rate_r))
             rate_t = self.effective_tpm
             if rate_t is not None and tokens and tokens > 0:
-                need = min(float(tokens), self.token_capacity)
+                need = min(float(tokens), self.token_burst)
                 self._tok_level -= float(tokens)
                 deficit = (need - float(tokens)) - self._tok_level
-                waits.append(max(0.0, deficit) * WINDOW_SECONDS / rate_t)
+                waits.append(_wait_for(deficit, self._tok_advance, rate_t))
             return max(waits)
 
     def acquire(self, tokens: int = 0, *, requests: int = 1) -> float:
@@ -303,7 +414,11 @@ class TokenBucket:
         return wait
 
     async def aacquire(self, tokens: int = 0, *, requests: int = 1) -> float:
-        """``acquire`` exécuté dans un thread (``asyncio.to_thread``)."""
+        """``acquire`` exécuté dans un thread (``asyncio.to_thread``).
+
+        Le fil de l'exécuteur par défaut reste occupé pendant toute l'attente :
+        les appels Albert passent plutôt par ``retry.acall_with_retry``.
+        """
         return await asyncio.to_thread(self.acquire, tokens, requests=requests)
 
     def pause(self, retry_after: Optional[float] = None) -> float:
@@ -381,9 +496,16 @@ class RedisWindowLimiter:
     processus. Le premier appel de la fenêtre passe toujours (une requête
     plus grosse que le budget TPM ne bloque pas indéfiniment).
 
+    Redis injoignable : repli sur un seau local (un seul WARNING par panne),
+    puis nouvelle tentative Redis toutes les ``retry_interval`` secondes ;
+    dès que Redis répond, la fenêtre partagée reprend et le seau local est
+    abandonné (un INFO le signale).
+
     Attributes:
         name: nom du budget (partie des clés Redis ; même nom = fenêtre partagée).
         url: URL Redis (le client n'est créé qu'au premier usage).
+        retry_interval: délai (secondes) avant de retenter Redis après un échec.
+        burst: rafale de départ du seau local de repli (``None`` = une minute de débit).
         rpm, tpm, base_rpm, base_tpm, share: comme ``TokenBucket``.
     """
 
@@ -402,6 +524,8 @@ class RedisWindowLimiter:
         window: float = WINDOW_SECONDS,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Any] = time.sleep,
+        retry_interval: float = REDIS_RETRY_SECONDS,
+        burst: Optional[float] = None,
     ) -> None:
         """Prépare le limiteur (aucune connexion avant le premier ``acquire``).
 
@@ -418,6 +542,9 @@ class RedisWindowLimiter:
             window: durée d'une fenêtre, en secondes.
             clock: horloge murale partagée (``time.time``).
             sleep: fonction de sommeil.
+            retry_interval: délai (secondes) avant de retenter Redis après un
+                échec (défaut ``REDIS_RETRY_SECONDS``).
+            burst: rafale de départ du seau local de repli (voir ``TokenBucket``).
         """
         self.base_rpm = _positive(rpm)
         self.base_tpm = _positive(tpm)
@@ -433,6 +560,9 @@ class RedisWindowLimiter:
         self._sleep = sleep
         self._lock = threading.Lock()
         self._fallback: Optional[TokenBucket] = None
+        self.retry_interval = _positive(retry_interval) or REDIS_RETRY_SECONDS
+        self._retry_at = 0.0
+        self.burst = _positive(burst)
 
     @property
     def request_limit(self) -> Optional[int]:
@@ -459,18 +589,47 @@ class RedisWindowLimiter:
         return base if index is None else f"{base}:{index}"
 
     def _degrade(self, exc: Exception) -> TokenBucket:
-        """Bascule sur un seau local (Redis injoignable), avec un seul WARNING."""
+        """Bascule sur un seau local (Redis injoignable) jusqu'à la prochaine tentative Redis.
+
+        Un seul WARNING par panne : un nouvel échec de la tentative suivante
+        garde le même seau local (son état est conservé) et n'est journalisé
+        qu'en DEBUG.
+        """
         with self._lock:
             if self._fallback is None:
                 logger.warning(
-                    "Limiteur Albert %s : Redis indisponible (%s) ; repli sur un limiteur local.",
+                    "Limiteur Albert %s : Redis indisponible (%s) ; repli sur un limiteur local, "
+                    "nouvelle tentative dans %.0f s.",
                     self.name,
                     type(exc).__name__,
+                    self.retry_interval,
                 )
                 self._fallback = TokenBucket(
-                    self.base_rpm, self.base_tpm, share=self.share, name=self.name, sleep=self._sleep
+                    self.base_rpm, self.base_tpm, share=self.share, burst=self.burst, name=self.name,
+                    clock=self._clock, sleep=self._sleep,
                 )
+            else:
+                logger.debug(
+                    "Limiteur Albert %s : Redis toujours indisponible (%s).", self.name, type(exc).__name__
+                )
+            self._retry_at = self._clock() + self.retry_interval
             return self._fallback
+
+    def _local_bucket(self) -> Optional[TokenBucket]:
+        """Seau local à utiliser maintenant (``None`` : Redis joignable ou à retenter)."""
+        with self._lock:
+            if self._fallback is None or self._clock() >= self._retry_at:
+                return None
+            return self._fallback
+
+    def _recovered(self) -> None:
+        """Redis a répondu : abandonne le seau local de repli (un INFO si une panne était en cours)."""
+        with self._lock:
+            if self._fallback is None:
+                return
+            self._fallback = None
+            self._retry_at = 0.0
+        logger.info("Limiteur Albert %s : Redis de nouveau joignable ; fin du repli local.", self.name)
 
     def _paused_until(self, client: Any) -> float:
         """Échéance de pause partagée (0 si aucune)."""
@@ -500,8 +659,9 @@ class RedisWindowLimiter:
         Returns:
             Secondes attendues.
         """
-        if self._fallback is not None:
-            return self._fallback.acquire(tokens, requests=requests)
+        local = self._local_bucket()
+        if local is not None:
+            return local.acquire(tokens, requests=requests)
         waited = 0.0
         ttl = int(math.ceil(self.window * 2))
         while True:
@@ -509,6 +669,7 @@ class RedisWindowLimiter:
                 client = self._redis()
                 now = self._clock()
                 pause_left = self._paused_until(client) - now
+                self._recovered()
                 if pause_left > 0:
                     self._sleep(pause_left)
                     waited += pause_left
@@ -543,7 +704,11 @@ class RedisWindowLimiter:
             waited += wait
 
     async def aacquire(self, tokens: int = 0, *, requests: int = 1) -> float:
-        """``acquire`` exécuté dans un thread (``asyncio.to_thread``)."""
+        """``acquire`` exécuté dans un thread (``asyncio.to_thread``).
+
+        Le fil de l'exécuteur par défaut reste occupé pendant toute l'attente :
+        les appels Albert passent plutôt par ``retry.acall_with_retry``.
+        """
         return await asyncio.to_thread(self.acquire, tokens, requests=requests)
 
     def pause(self, retry_after: Optional[float] = None) -> float:
@@ -556,13 +721,15 @@ class RedisWindowLimiter:
             La durée de pause appliquée.
         """
         seconds = _positive(retry_after) or 1.0
-        if self._fallback is not None:
-            return self._fallback.pause(seconds)
+        local = self._local_bucket()
+        if local is not None:
+            return local.pause(seconds)
         try:
             client = self._redis()
             until = self._clock() + seconds
             if until > self._paused_until(client):
                 client.set(self._key("pause"), repr(until), ex=int(math.ceil(seconds)) + 1)
+            self._recovered()
         except Exception as exc:  # Redis injoignable : pause locale
             return self._degrade(exc).pause(seconds)
         logger.warning("Limiteur Albert %s : pause partagée de %.1f s après un 429.", self.name, seconds)
@@ -586,6 +753,33 @@ def bucket_for_role(role: Any) -> Optional[str]:
     return ROLE_BUCKETS.get(key)
 
 
+def limiter_role(role: Any, model: Any = None) -> Any:
+    """Rôle dont le budget s'applique à un appel de ``model`` sous ``role``.
+
+    Le budget suit le modèle envoyé : un modèle à raisonnement (gpt-oss, 10 RPM
+    mesurés, D1) consomme le budget ``notes`` même sous un rôle du budget
+    ``recode`` (``recode``, ``citation``, ``book_structure``, ``long_context``,
+    ``chat``). Tous les autres cas gardent le rôle donné : un repli ministral
+    du rôle ``notes`` reste sur ``notes`` ; OCR et embeddings ne changent jamais.
+
+    Args:
+        role: rôle applicatif.
+        model: modèle envoyé (id, alias ou ``albert/<id>``) ; ``None`` = rôle seul.
+
+    Returns:
+        ``"notes"`` pour un modèle à raisonnement sous un rôle du budget
+        ``recode``, sinon ``role`` inchangé.
+    """
+    name = str(model).strip() if model is not None else ""
+    if name[:7].lower() == "albert/":
+        name = name[7:].strip()
+    if not name or bucket_for_role(role) != "recode":
+        return role
+    from . import catalog  # import paresseux : le limiteur reste importable seul
+
+    return "notes" if catalog.is_reasoning(name) else role
+
+
 def role_rates(role: Any, cfg: Any) -> Tuple[Optional[str], Optional[float], Optional[float]]:
     """(budget, rpm, tpm) configurés pour un rôle d'après ``cfg``."""
     bucket = bucket_for_role(role)
@@ -600,6 +794,27 @@ def role_rates(role: Any, cfg: Any) -> Tuple[Optional[str], Optional[float], Opt
     return None, None, None
 
 
+def bucket_burst(bucket: Any, cfg: Any) -> float:
+    """Rafale de départ d'un budget : sa concurrence configurée (1 si inconnue).
+
+    Les envois parallèles d'un processus partent ensemble au démarrage, sans
+    que la première minute dépasse le débit réglé (``TokenBucket`` plafonne la
+    rafale à une minute de débit et la prend sur la première minute). La
+    rafale plafonne aussi le niveau accumulé pendant une inactivité : au plus
+    ``rpm × part + rafale − 1`` requêtes sur toute minute glissante.
+
+    Args:
+        bucket: budget (``recode``, ``notes``, ``ocr``, ``embed``).
+        cfg: ``AlbertConfig`` (champs ``*_concurrency``) ou objet équivalent.
+
+    Returns:
+        Le nombre de requêtes admises d'emblée (au moins 1).
+    """
+    field = BUCKET_CONCURRENCY.get(str(bucket or ""))
+    value = _positive(getattr(cfg, field, None)) if field else None
+    return value if value is not None else 1.0
+
+
 def get_limiter(
     role: Any,
     cfg: Any = None,
@@ -608,6 +823,7 @@ def get_limiter(
     sleep: Optional[Callable[[float], Any]] = None,
     redis_client: Any = None,
     env: Optional[Mapping[str, str]] = None,
+    model: Any = None,
 ) -> Any:
     """Limiteur du rôle ; l'instance est partagée par tout le processus.
 
@@ -619,10 +835,18 @@ def get_limiter(
         sleep: sommeil injecté (instance dédiée, non partagée).
         redis_client: client Redis injecté (instance dédiée, non partagée).
         env: environnement pour ``CELERY_BROKER_URL`` (backend redis).
+        model: modèle envoyé ; un modèle à raisonnement sous un rôle du budget
+            ``recode`` prend le budget ``notes`` (``limiter_role``).
+
+    Le seau démarre presque vide : sa rafale vaut la concurrence du budget
+    (``bucket_burst``), prise sur le débit de la première minute, et plafonne
+    le niveau accumulé pendant une inactivité (seau de repli d'un limiteur
+    Redis compris).
 
     Returns:
         ``TokenBucket``, ``RedisWindowLimiter`` ou ``NullLimiter`` (rôle sans budget).
     """
+    role = limiter_role(role, model)
     if cfg is None:
         from .config import AlbertConfig
 
@@ -631,24 +855,25 @@ def get_limiter(
     if bucket is None:
         return NullLimiter()
     share = getattr(cfg, "process_share", 1.0)
+    burst = bucket_burst(bucket, cfg)
     backend = getattr(cfg, "limiter_backend", "local")
     url = resolve_redis_url(cfg, env=env) if backend == "redis" else None
     dedicated = clock is not None or sleep is not None or redis_client is not None
-    key = (backend, bucket, rpm, tpm, share, url)
+    key = (backend, bucket, rpm, tpm, share, url, burst)
     if not dedicated:
         with _REGISTRY_LOCK:
             existing = _REGISTRY.get(key)
             if existing is not None:
                 return existing
     if backend == "redis":
-        kwargs: Dict[str, Any] = {"share": share, "url": url, "client": redis_client}
+        kwargs: Dict[str, Any] = {"share": share, "url": url, "client": redis_client, "burst": burst}
         if clock is not None:
             kwargs["clock"] = clock
         if sleep is not None:
             kwargs["sleep"] = sleep
         limiter: Any = RedisWindowLimiter(rpm, tpm, name=bucket, **kwargs)
     else:
-        kwargs = {"share": share, "name": bucket}
+        kwargs = {"share": share, "name": bucket, "burst": burst}
         if clock is not None:
             kwargs["clock"] = clock
         if sleep is not None:
@@ -667,14 +892,18 @@ def reset_limiters() -> None:
 
 
 __all__ = [
+    "BUCKET_CONCURRENCY",
     "DEFAULT_REDIS_URL",
+    "REDIS_RETRY_SECONDS",
     "ROLE_BUCKETS",
     "NullLimiter",
     "RedisWindowLimiter",
     "TokenBucket",
+    "bucket_burst",
     "bucket_for_role",
     "estimate_input_tokens",
     "get_limiter",
+    "limiter_role",
     "reset_limiters",
     "resolve_redis_url",
     "role_rates",

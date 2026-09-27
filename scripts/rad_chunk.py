@@ -725,20 +725,6 @@ def albert_recode_startup_exception(model, recode_cfg=None):
     return None
 
 
-def albert_recode_startup_error(model, recode_cfg=None):
-    """Message d'erreur si le recodage Albert sélectionné ne peut pas démarrer, sinon ``None``.
-
-    Texte de ``albert_recode_startup_exception`` (mêmes contrôles locaux, sans
-    appel réseau).
-
-    Args:
-        model: modèle de ``--model``.
-        recode_cfg: ``RecodeConfig`` (défaut : lu dans l'environnement).
-    """
-    exc = albert_recode_startup_exception(model, recode_cfg)
-    return None if exc is None else str(exc)
-
-
 # Ligne de sortie stable émise juste avant chaque ``exit(2)`` Albert de la CLI
 # (contrat lu par les routes et le runner Celery, sur stdout, ancrée en début de
 # ligne) : ``Albert abort: kind=<kind> reason=<reason>`` suivie, pour une erreur
@@ -911,6 +897,41 @@ def report_albert_usage(output_dir):
     return path
 
 
+def recode_uses_openrouter(model, recode_cfg=None):
+    """Indique si le recodage OpenAI/OpenRouter de ``model`` part vers OpenRouter.
+
+    Règle unique du routage de ``gpt_recode_batch`` hors Albert, partagée par la
+    garde de la CLI (``missing_llm_client_for_phase``) pour qu'elles ne puissent
+    pas diverger :
+
+    * durcissement actif (``recode_cfg.harden_enabled``) : OpenAI direct (seed
+      honoré) sauf si OpenRouter est explicitement préféré
+      (``prefer_openai`` faux) ET le fournisseur épinglé
+      (``openrouter_provider``) ; il faut alors aussi que le modèle effectif
+      (``RECODE_MODEL``) soit un slug ``provider/model`` et que le client
+      OpenRouter soit initialisé ;
+    * sinon, sémantique historique : OpenRouter pour un slug
+      ``provider/model`` (le repli vers ``gpt-4o-mini`` sur le client OpenAI
+      quand le client OpenRouter manque reste dans ``gpt_recode_batch``).
+
+    Args:
+        model: modèle demandé (``--model``) ou déjà effectif ; jamais un modèle
+            ``albert/…`` (routé avant par ``gpt_recode_batch``).
+        recode_cfg: ``RecodeConfig`` ou ``None`` (pas de durcissement).
+
+    Returns:
+        ``True`` si l'appel utilise OpenRouter, ``False`` s'il utilise le client
+        OpenAI.
+    """
+    if recode_cfg is not None and recode_cfg.harden_enabled:
+        if recode_cfg.prefer_openai or not recode_cfg.openrouter_provider:
+            return False
+        eff_model = effective_recode_model(model, recode_cfg)  # == recode_cfg.model
+        return (legacy_provider(eff_model) == PROVIDER_OPENROUTER) and (openrouter_client is not None)
+    # OpenRouter models have format "provider/model"
+    return legacy_provider(model) == PROVIDER_OPENROUTER
+
+
 def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3, max_tokens=8000, recode_cfg=None,
                      models_out=None):
     """
@@ -952,14 +973,8 @@ def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3,
         max_tokens = recode_cfg.max_tokens
         top_p = recode_cfg.top_p
         seed = recode_cfg.seed
-        # OpenAI direct (seed honoré) sauf si OpenRouter explicitement préféré ET pinné.
-        if recode_cfg.prefer_openai or not recode_cfg.openrouter_provider:
-            use_openrouter = False
-        else:
-            use_openrouter = (legacy_provider(model) == PROVIDER_OPENROUTER) and (openrouter_client is not None)
-    else:
-        # OpenRouter models have format "provider/model"
-        use_openrouter = legacy_provider(model) == PROVIDER_OPENROUTER
+    # Règle unique du routage OpenAI vs OpenRouter (partagée avec la garde de la CLI).
+    use_openrouter = recode_uses_openrouter(model, recode_cfg)
 
     active_client = openrouter_client if (use_openrouter and openrouter_client) else client
 
@@ -2132,12 +2147,18 @@ def missing_llm_client_for_phase(phase, model):
       (``text-embedding-3-large``) ; l'espace Albert (``EMBEDDING_PROVIDER=albert``)
       n'utilise jamais OpenAI, sa clé est contrôlée par
       ``albert_embed_startup_exception`` ;
-    * ``initial`` : exige un client pour le fournisseur du modèle de recodage
-      (``legacy_provider``). Pour un modèle OpenRouter, le client OpenAI suffit
-      aussi : ``gpt_recode_batch`` y replie déjà sur ``gpt-4o-mini`` quand le
-      client OpenRouter manque. Modèle effectif ``albert/…``
-      (``effective_recode_model``) : exige ``ALBERT_API_KEY`` seulement (aucun
-      client OpenAI ni OpenRouter n'est utilisé pour le recodage) ;
+    * ``initial`` : exige le client que le recodage utilisera réellement.
+      Modèle effectif ``albert/…`` (``effective_recode_model``) : exige
+      ``ALBERT_API_KEY`` seulement (aucun client OpenAI ni OpenRouter n'est
+      utilisé pour le recodage). Durcissement actif
+      (``RECODE_HARDEN_ENABLED``) : même règle que ``gpt_recode_batch``
+      (``recode_uses_openrouter`` sur ``RECODE_MODEL``, ``prefer_openai`` et le
+      fournisseur épinglé) ; le client OpenAI est exigé dès que le routage
+      durci n'emprunte pas OpenRouter, quel que soit le fournisseur de
+      ``--model``. Sinon, client du fournisseur du modèle
+      (``legacy_provider``) ; pour un modèle OpenRouter, le client OpenAI
+      suffit aussi : ``gpt_recode_batch`` y replie déjà sur ``gpt-4o-mini``
+      quand le client OpenRouter manque ;
     * ``all`` : cumule ``initial`` et ``dense``.
 
     Args:
@@ -2150,8 +2171,13 @@ def missing_llm_client_for_phase(phase, model):
     if phase in ("dense", "all") and client is None and _dense_requires_openai():
         return True
     if phase in ("initial", "all"):
-        if _selects_albert(effective_recode_model(model, rad_recode_cache.RecodeConfig.from_env())):
+        recode_cfg = rad_recode_cache.RecodeConfig.from_env()
+        if _selects_albert(effective_recode_model(model, recode_cfg)):
             return not ALBERT_API_KEY
+        if recode_cfg.harden_enabled:
+            # OpenRouter seulement si le routage durci l'emprunte (son client existe
+            # alors) ; sinon le client OpenAI, sans repli possible.
+            return client is None and not recode_uses_openrouter(model, recode_cfg)
         if legacy_provider(model) == PROVIDER_OPENROUTER:
             return openrouter_client is None and client is None
         return client is None

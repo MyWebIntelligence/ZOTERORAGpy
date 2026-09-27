@@ -12,29 +12,40 @@
 * ``call_with_retry`` / ``acall_with_retry`` : boucle de réessai. Ordre de
   chaque essai : acquisition du limiteur **hors** sémaphore, sémaphore(s)
   tenu(s) **pendant l'envoi seulement**, sommeil **après** libération. En
-  asynchrone, l'acquisition passe par ``asyncio.to_thread`` et le sommeil par
-  ``asyncio.sleep`` : la boucle d'événements n'est jamais bloquée.
+  asynchrone, la boucle d'événements n'est jamais bloquée et l'exécuteur par
+  défaut n'est jamais occupé par une attente de débit : un seau local
+  (``TokenBucket``) est réservé sans attendre puis attendu par
+  ``asyncio.sleep`` ; les autres limiteurs (Redis) sont acquis, et toute pause
+  après un 429 posée, dans un exécuteur dédié (``albert-limiter``).
 
 Classes d'erreur (``errors.py``) : seules ``AlbertTransientError`` et
 ``AlbertModelBusy`` sont retentées, et seulement si leur attribut ``retryable``
 est vrai (``AlbertUncertainWriteError`` : création à l'issue inconnue, jamais
 renvoyée). Les erreurs de compte (``AlbertAuthError``, ``AlbertQuotaExhausted``),
 permanentes et de troncature remontent au premier essai. Un 429 qui persiste
-au-delà des réessais devient ``AlbertQuotaExhausted``.
+au-delà des réessais devient ``AlbertQuotaExhausted`` ; sans ``Retry-After``
+(en-tête facultatif chez Albert), seulement une fois qu'une fenêtre de débit
+complète (``RATE_WINDOW_SECONDS``) s'est écoulée depuis le premier 429, pour
+qu'un dépassement par minute ne soit jamais pris pour un quota journalier.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import logging
+import os
 import random
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, Iterable, List, Optional, Sequence, TypeVar, Union
 
 from .errors import AlbertModelBusy, AlbertQuotaExhausted, AlbertTransientError, parse_retry_after
+from .limiter import NullLimiter, TokenBucket
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +56,19 @@ BUSY_MAX_WAIT = 10.0
 
 JITTER_FRACTION = 0.25
 JITTER_MAX = 5.0
+
+RATE_WINDOW_SECONDS = 60.0
+"""Fenêtre des compteurs de débit d'Albert (RPM/TPM : fenêtre fixe d'une minute).
+
+Un 429 sans ``Retry-After`` n'est déclaré quota épuisé qu'après que les
+attentes cumulées depuis le premier 429 ont couvert cette fenêtre (plus
+``RATE_WINDOW_MARGIN``) : un dépassement par minute s'est alors résorbé."""
+
+RATE_WINDOW_MARGIN = 1.0
+"""Marge (secondes) ajoutée à la fenêtre pour que l'essai suive sa remise à zéro."""
+
+_REAL_SLEEP = time.sleep
+"""Sommeil réel : un seau local qui l'utilise peut être attendu par ``asyncio.sleep``."""
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +275,80 @@ def _pause_limiter(limiter: Any, seconds: float) -> None:
         pause(seconds)
 
 
+_LIMITER_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_LIMITER_EXECUTOR_LOCK = threading.Lock()
+
+
+def _limiter_executor() -> ThreadPoolExecutor:
+    """Exécuteur dédié aux attentes et entrées-sorties bloquantes des limiteurs (créé au premier usage).
+
+    Distinct de l'exécuteur par défaut de la boucle : un limiteur qui dort
+    (pause après un 429, fenêtre Redis pleine) n'y retient aucun fil utile au
+    reste de l'application (arrêt d'une session, appels OpenAI, Zotero).
+    """
+    global _LIMITER_EXECUTOR
+    with _LIMITER_EXECUTOR_LOCK:
+        if _LIMITER_EXECUTOR is None:
+            _LIMITER_EXECUTOR = ThreadPoolExecutor(
+                max_workers=min(32, (os.cpu_count() or 1) + 4),
+                thread_name_prefix="albert-limiter",
+            )
+        return _LIMITER_EXECUTOR
+
+
+def _is_local_bucket(limiter: Any) -> bool:
+    """Vrai pour un ``TokenBucket`` en temps réel (réservation en mémoire, attente par ``asyncio.sleep``).
+
+    Un seau dont le sommeil est injecté (horloge virtuelle) garde son propre
+    ``acquire`` : son attente n'est pas du temps réel.
+    """
+    return isinstance(limiter, TokenBucket) and getattr(limiter, "_sleep", None) is _REAL_SLEEP
+
+
+async def _run_in_limiter_executor(func: Callable[..., T], *args: Any) -> T:
+    """Exécute ``func(*args)`` dans l'exécuteur dédié aux limiteurs, sans bloquer la boucle."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_limiter_executor(), functools.partial(func, *args))
+
+
+async def _aacquire_limiter(limiter: Any, tokens: int, requests: int) -> Any:
+    """Acquisition asynchrone du limiteur, sans occuper de fil de l'exécuteur par défaut.
+
+    Un seau local (``TokenBucket``) est réservé sous son verrou (quelques
+    microsecondes, aucune attente) puis attendu par ``asyncio.sleep`` ; tout
+    autre limiteur (Redis, espions de test) est acquis dans l'exécuteur dédié.
+
+    Args:
+        limiter: limiteur proactif (``acquire``, éventuellement ``reserve``).
+        tokens: tokens d'entrée estimés de la requête.
+        requests: unités de requête consommées.
+
+    Returns:
+        Ce que renvoie l'acquisition (secondes attendues pour les limiteurs du module).
+    """
+    if isinstance(limiter, NullLimiter):
+        return 0.0
+    if _is_local_bucket(limiter):
+        wait = limiter.reserve(tokens, requests=requests)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        return wait
+    return await _run_in_limiter_executor(_acquire_limiter, limiter, tokens, requests)
+
+
+async def _apause_limiter(limiter: Any, seconds: float) -> None:
+    """Pause asynchrone après un 429 : en mémoire pour un seau local, sinon hors boucle.
+
+    La pause d'un ``RedisWindowLimiter`` lit et écrit Redis (client sans délai
+    d'expiration) : elle passe par l'exécuteur dédié pour que la boucle
+    d'événements ne soit jamais bloquée par un lien Redis lent.
+    """
+    if isinstance(limiter, (TokenBucket, NullLimiter)):
+        _pause_limiter(limiter, seconds)
+        return
+    await _run_in_limiter_executor(_pause_limiter, limiter, seconds)
+
+
 def quota_exhausted_from(error: AlbertTransientError) -> AlbertQuotaExhausted:
     """Convertit un 429 persistant en ``AlbertQuotaExhausted`` (arrêt du job)."""
     return AlbertQuotaExhausted(
@@ -264,12 +362,45 @@ def quota_exhausted_from(error: AlbertTransientError) -> AlbertQuotaExhausted:
 class _RetryState:
     """Compteurs d'une boucle de réessai et décision après un échec."""
 
-    def __init__(self, policy: RetryPolicy, rng: Any) -> None:
-        """Initialise les compteurs (réessais transitoires, réponses 503)."""
+    def __init__(self, policy: RetryPolicy, rng: Any, *, defer_pause: bool = False) -> None:
+        """Initialise les compteurs (réessais transitoires, réponses 503, attente cumulée sur 429).
+
+        Args:
+            policy: politique de réessai.
+            rng: générateur de la gigue.
+            defer_pause: ne pose pas la pause du limiteur dans ``next_wait`` ;
+                elle est laissée dans ``pending_pause`` pour l'appelant
+                asynchrone, qui la pose hors de la boucle d'événements.
+        """
         self.policy = policy
         self.rng = rng
         self.attempt = 0
         self.busy = 0
+        self.rate_waited = 0.0
+        self.defer_pause = defer_pause
+        self.pending_pause: Optional[float] = None
+
+    def _pause(self, limiter: Any, seconds: float) -> None:
+        """Pose (ou, en mode différé, retient) la pause du limiteur après un 429."""
+        if limiter is None:
+            return
+        if self.defer_pause:
+            self.pending_pause = seconds
+        else:
+            _pause_limiter(limiter, seconds)
+
+    def _window_completion(self, exc: AlbertTransientError) -> Optional[float]:
+        """Attente qui complète une fenêtre de débit avant de conclure à un quota, ou ``None``.
+
+        Seulement pour un 429 sans ``Retry-After`` quand des réessais sont
+        permis : les attentes cumulées depuis le premier 429 doivent couvrir
+        ``RATE_WINDOW_SECONDS`` (plus la marge) ; au-delà, le 429 persistant
+        est bien un quota épuisé. Un seul essai supplémentaire au plus.
+        """
+        if exc.retry_after is not None or self.policy.max_retries <= 0:
+            return None
+        remaining = RATE_WINDOW_SECONDS + RATE_WINDOW_MARGIN - self.rate_waited
+        return remaining if remaining > 0 else None
 
     def next_wait(self, exc: AlbertTransientError, limiter: Any) -> float:
         """Attente avant le prochain essai, ou relève l'erreur si le réessai est exclu.
@@ -278,7 +409,8 @@ class _RetryState:
             AlbertModelBusy: 503 au-delà de ``busy_retries`` (repli de rôle).
             AlbertTransientError: réessais épuisés, mode ``single_attempt`` ou
                 erreur marquée ``retryable = False`` (relevée telle quelle).
-            AlbertQuotaExhausted: 429 persistant.
+            AlbertQuotaExhausted: 429 persistant (sans ``Retry-After`` : après
+                une fenêtre de débit complète).
         """
         policy = self.policy
         if not getattr(exc, "retryable", True):
@@ -290,17 +422,29 @@ class _RetryState:
             return policy.busy_wait(self.busy - 1, exc.retry_after, rng=self.rng)
         if policy.single_attempt:
             if exc.status == 429 and limiter is not None:
-                _pause_limiter(limiter, policy.transient_wait(0, exc.retry_after, rng=self.rng))
+                self._pause(limiter, policy.transient_wait(0, exc.retry_after, rng=self.rng))
             raise exc
         if self.attempt >= policy.max_retries:
             if exc.status == 429:
-                raise quota_exhausted_from(exc) from exc
+                extra = self._window_completion(exc)
+                if extra is None:
+                    raise quota_exhausted_from(exc) from exc
+                self.rate_waited += extra
+                self._pause(limiter, extra)
+                return extra
             raise exc
         wait = policy.transient_wait(self.attempt, exc.retry_after, rng=self.rng)
         self.attempt += 1
-        if exc.status == 429 and limiter is not None:
-            _pause_limiter(limiter, wait)
+        if exc.status == 429:
+            self.rate_waited += wait
+            self._pause(limiter, wait)
         return wait
+
+    async def apply_pending_pause(self, limiter: Any) -> None:
+        """Pose la pause retenue par ``next_wait`` (mode différé), sans bloquer la boucle."""
+        seconds, self.pending_pause = self.pending_pause, None
+        if seconds is not None and limiter is not None:
+            await _apause_limiter(limiter, seconds)
 
     def log(self, exc: AlbertTransientError, wait: float, label: Optional[str]) -> None:
         """Journalise un réessai (WARNING ; le message d'erreur est déjà masqué)."""
@@ -385,9 +529,12 @@ async def acall_with_retry(
 ) -> T:
     """Version asynchrone de ``call_with_retry`` ; la boucle d'événements n'est jamais bloquée.
 
-    L'acquisition du limiteur passe par ``asyncio.to_thread`` (hors
-    sémaphore), l'attente par ``asyncio.sleep`` (hors sémaphore). ``fn`` peut
-    être une fonction coroutine ou une fonction synchrone (exécutée dans un
+    L'acquisition du limiteur se fait hors sémaphore sans occuper l'exécuteur
+    par défaut (``_aacquire_limiter`` : seau local réservé puis attendu par
+    ``asyncio.sleep``, autre limiteur dans l'exécuteur dédié) ; la pause
+    après un 429 est posée hors de la boucle (``_apause_limiter``) ;
+    l'attente passe par ``asyncio.sleep`` (hors sémaphore). ``fn`` peut être
+    une fonction coroutine ou une fonction synchrone (exécutée dans un
     thread si ``run_sync_in_thread``).
 
     Args:
@@ -410,12 +557,12 @@ async def acall_with_retry(
     Raises:
         AlbertError: erreur non retentée, ou dernière erreur après épuisement.
     """
-    state = _RetryState(policy or RetryPolicy(), rng)
+    state = _RetryState(policy or RetryPolicy(), rng, defer_pause=True)
     semaphores = _as_semaphores(semaphore)
     sleeper = sleep if sleep is not None else asyncio.sleep
     while True:
         if limiter is not None:
-            await asyncio.to_thread(_acquire_limiter, limiter, tokens, requests)
+            await _aacquire_limiter(limiter, tokens, requests)
         try:
             async with _aheld(_threading_to_async(semaphores)):
                 if inspect.iscoroutinefunction(fn) or not run_sync_in_thread:
@@ -426,7 +573,10 @@ async def acall_with_retry(
                     result = await result
                 return result
         except AlbertTransientError as exc:
-            wait = state.next_wait(exc, limiter)
+            try:
+                wait = state.next_wait(exc, limiter)
+            finally:
+                await state.apply_pending_pause(limiter)
             state.log(exc, wait, label)
             if on_retry is not None:
                 outcome = on_retry(exc, wait)
@@ -467,6 +617,7 @@ def _threading_to_async(semaphores: Iterable[Any]) -> List[Any]:
 
 __all__ = [
     "BUSY_MAX_WAIT",
+    "RATE_WINDOW_SECONDS",
     "RetryPolicy",
     "acall_with_retry",
     "backoff_seconds",

@@ -21,8 +21,21 @@ Albert (sovereign provider, OFF by default):
   ``gpt-4o-mini`` fallback is reserved to the OpenAI/OpenRouter branch.
 - One retry layer only (``scripts/rad_albert/retry.py``): the historical
   ``max_attempts`` loop is bypassed on the Albert branch.
-- ``run_llm_slot`` holds the global semaphore (then the Albert semaphore) during
+- ``run_llm_slot`` holds the Albert semaphore, then the global semaphore, during
   one attempt only; the limiter is acquired and the backoff slept outside them.
+  A task queued on the (smaller) Albert semaphore holds no global slot, so
+  Albert jobs never starve the OpenAI/OpenRouter callers of the platform.
+- The limiter budget follows the model sent, per model of the fallback chain
+  (``albert_slot_policy(..., model=)``): gpt-oss consumes the ``notes`` budget
+  even for the book structure or the citation filter.
+- The ``/v1/models`` listing cached per key and base URL is installed into
+  every new client (``AlbertClient.set_model_listing``), so the fallback
+  chain drops the models absent from the account without any extra request.
+  When the chain has a fallback and no listing is cached, the listing is
+  loaded once, just before the first fallback (``_albert_load_fallback_listing``,
+  cached ``ALBERT_LISTING_TTL_SECONDS``: at most one ``GET /v1/models`` per key
+  and base URL per 600 s; in a worker thread on the async path); a call
+  answered by the first model sends no listing request.
 - Account errors (``AlbertAuthError``, ``AlbertQuotaExhausted``) always reach the
   caller; a transient error that exhausted its retries falls back to the template.
 - Usage ledger of the web side: the public entry points accept a trailing
@@ -34,12 +47,15 @@ Albert (sovereign provider, OFF by default):
 """
 
 import os
+import time
 import uuid
 import math
 import weakref
 import logging
 import asyncio
+import threading
 import functools
+import contextlib
 import importlib
 import html as html_module
 from dataclasses import dataclass
@@ -56,6 +72,7 @@ try:
     from scripts.rad_albert.errors import (
         AlbertAuthError,
         AlbertDisabledError,
+        AlbertError,
         AlbertModelBusy,
         AlbertQuotaExhausted,
         AlbertTruncatedError,
@@ -72,6 +89,7 @@ except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
     from rad_albert.errors import (
         AlbertAuthError,
         AlbertDisabledError,
+        AlbertError,
         AlbertModelBusy,
         AlbertQuotaExhausted,
         AlbertTruncatedError,
@@ -407,21 +425,352 @@ async def albert_route_async(model: Optional[str]) -> Tuple[Optional[ProviderRes
 
 def albert_wire_id(wire_model: Optional[str]) -> Optional[str]:
     """
-    Return the pinned model id sent to Albert for a wire model name.
+    Return the model name handed to the Albert client for a wire model name.
 
-    A known alias (``openweight-large``, ``openai/gpt-oss-120b``…) is mapped to
-    its pinned id with the static catalog (no network call), because the API
-    echoes the requested alias in ``response.model``; an unknown name is kept.
+    The name is only stripped. An alias (``openweight-medium``,
+    ``openai/gpt-oss-120b``…) is resolved into the id currently served by
+    ``/v1/models`` when the client maps it (``albert_resolve_alias``, installed
+    by ``_get_albert_client``), never with the static catalog: its alias table
+    does not follow an alias re-pointed by Albert (decision 6), so it would
+    send a retired id. A pinned id or a name unknown to the catalog is sent as
+    is.
 
     Args:
         wire_model: Model name without the ``albert/`` prefix (or ``None``).
 
     Returns:
-        The pinned id, the name unchanged, or ``None`` for an empty name.
+        The stripped name, or ``None`` for an empty name.
     """
     if not wire_model or not str(wire_model).strip():
         return None
-    return _albert_module("catalog").canonical_id(wire_model)
+    return str(wire_model).strip()
+
+
+# Lifetime (seconds) of a ``/v1/models`` listing cached by the web path, per
+# client scope (key fingerprint, base URL, injected transport): same lifetime
+# as the preflight cache of the CLI.
+ALBERT_LISTING_TTL_SECONDS = 600.0
+
+_albert_listings: Dict[Any, Tuple[float, List[Any]]] = {}
+_albert_listings_lock = threading.Lock()
+
+
+def clear_albert_listing_cache() -> None:
+    """Empty the ``/v1/models`` listings cached by the web path (tests, key rotation)."""
+    with _albert_listings_lock:
+        _albert_listings.clear()
+
+
+def _albert_cached_listing(client: Any) -> Optional[List[Any]]:
+    """
+    Return the fresh ``/v1/models`` listing cached for the client's scope, without any request.
+
+    Args:
+        client: ``AlbertClient`` (``cache_scope``).
+
+    Returns:
+        The cached listing entries, or ``None`` when the client has no scope,
+        nothing is cached for it, or the entry is older than
+        ``ALBERT_LISTING_TTL_SECONDS``.
+    """
+    scope = getattr(client, "cache_scope", None)
+    if scope is None:
+        return None
+    with _albert_listings_lock:
+        hit = _albert_listings.get(scope)
+    if hit is None or time.monotonic() - hit[0] >= ALBERT_LISTING_TTL_SECONDS:
+        return None
+    return hit[1]
+
+
+def _albert_install_listing(client: Any, listing: Optional[List[Any]]) -> None:
+    """
+    Hand a ``/v1/models`` listing to the client (``AlbertClient.set_model_listing``).
+
+    Once installed, ``wire_model`` and ``chat_chain`` use it without any
+    request: the fallback models absent from the account's listing are
+    dropped from the chain, so a 503 of the model placed first never turns
+    into a permanent 404 on a fallback that the account does not offer. A
+    client without ``set_model_listing`` (test double) is left untouched.
+
+    Args:
+        client: ``AlbertClient`` of the request.
+        listing: Listing entries of the client's scope, or ``None`` (nothing
+            installed).
+    """
+    if listing is None:
+        return
+    install = getattr(client, "set_model_listing", None)
+    if callable(install):
+        install(list(listing))
+
+
+def _albert_account_listing(client: Any) -> List[Any]:
+    """
+    Return the ``/v1/models`` listing of the client's account, cached per client scope.
+
+    At most one ``GET /v1/models`` per scope (``client.cache_scope``: key
+    fingerprint, base URL, injected transport) and per
+    ``ALBERT_LISTING_TTL_SECONDS``; expired entries are dropped whenever a new
+    listing is stored. On a cache hit, the cached listing is installed into
+    the client (``_albert_install_listing``), exactly as ``client.models()``
+    does on a miss, so that its fallback chain is filtered in both cases.
+
+    Args:
+        client: ``AlbertClient`` (``models()``, ``cache_scope`` and
+            ``set_model_listing``).
+
+    Returns:
+        The listing entries.
+
+    Raises:
+        AlbertError: Classified error of ``GET /v1/models`` (after the
+            client's retries).
+    """
+    scope = getattr(client, "cache_scope", None)
+    now = time.monotonic()
+    cached = _albert_cached_listing(client)
+    if cached is not None:
+        _albert_install_listing(client, cached)
+        return cached
+    listing = client.models()
+    if scope is not None:
+        with _albert_listings_lock:
+            expired = [key for key, (stamp, _) in _albert_listings.items()
+                       if now - stamp >= ALBERT_LISTING_TTL_SECONDS]
+            for key in expired:
+                del _albert_listings[key]
+            _albert_listings[scope] = (now, listing)
+    return listing
+
+
+def _albert_load_fallback_listing(client: Any) -> bool:
+    """
+    Load the account's ``/v1/models`` listing into the client before a fallback.
+
+    Used when the fallback chain has more than one model and no listing is
+    cached for the client's scope (key fingerprint, base URL): one request
+    through ``_albert_account_listing`` (cached ``ALBERT_LISTING_TTL_SECONDS``,
+    so at most one ``GET /v1/models`` per key and base URL per 600 s), then
+    ``set_model_listing`` (``_albert_install_listing``), so that
+    ``chat_chain`` drops the fallbacks absent from the account instead of
+    sending them (a permanent 404 that would stop the job after a mere 503 of
+    the first model). A failed listing request other than an account error
+    keeps the catalog chain unchanged, as before.
+
+    Args:
+        client: ``AlbertClient`` of the request.
+
+    Returns:
+        True when a listing was installed into the client.
+
+    Raises:
+        AlbertAuthError: Account error of ``GET /v1/models`` (quota
+            exhaustion included, ``ALBERT_ACCOUNT_ERRORS``).
+    """
+    if not callable(getattr(client, "models", None)):
+        return False
+    try:
+        listing = _albert_account_listing(client)
+    except ALBERT_ACCOUNT_ERRORS:
+        raise
+    except AlbertError as exc:
+        logger.warning(
+            f"Albert: /v1/models unavailable ({type(exc).__name__}); fallback chain kept as in the catalog"
+        )
+        return False
+    _albert_install_listing(client, listing)
+    return True
+
+
+def _albert_listing_pending(client: Any, chain: List[str]) -> bool:
+    """
+    Tell whether the account's listing should be loaded before a fallback of ``chain``.
+
+    Args:
+        client: ``AlbertClient`` of the request.
+        chain: Models of the call, in trial order.
+
+    Returns:
+        True when the chain has a fallback and no fresh listing is cached
+        for the client's scope.
+    """
+    return len(chain) > 1 and _albert_cached_listing(client) is None
+
+
+def _albert_remaining_chain(client: Any, role: str, model: Any, chain: List[str], index: int) -> List[str]:
+    """
+    Rebuild the fallbacks still to try once the account's listing is installed.
+
+    Args:
+        client: ``AlbertClient`` (listing installed).
+        role: Albert role of the call.
+        model: Explicit model of the call (resolved), or ``None``.
+        chain: Models of the call before the listing, in trial order.
+        index: Index of the model that just failed.
+
+    Returns:
+        The models already tried, then the models of the filtered chain not
+        tried yet, in their order.
+    """
+    tried = list(chain[:index + 1])
+    return tried + [name for name in client.chat_chain(role, model) if name not in tried]
+
+
+@contextlib.contextmanager
+def _albert_fixed_chain(client: Any, chain: List[str]):
+    """
+    Make ``client.chat`` try exactly ``chain`` (instance override of ``chat_chain``).
+
+    Same pattern as the ``wire_model`` wrapping of
+    ``_albert_install_alias_resolution``: the client's retries, limiter,
+    timeout and ledger role are unchanged, only the models tried are fixed.
+    The previous ``chat_chain`` is restored on exit.
+
+    Args:
+        client: ``AlbertClient`` of the request (used by one thread).
+        chain: Models to try, in order (non-empty).
+
+    Yields:
+        The client.
+    """
+    previous = client.__dict__.get("chat_chain")
+
+    def chat_chain(role: Any, model: Any = None, **options: Any) -> List[str]:
+        """The fixed chain of the call, whatever the role and model."""
+        return list(chain)
+
+    client.chat_chain = chat_chain
+    try:
+        yield client
+    finally:
+        if previous is None:
+            del client.chat_chain
+        else:
+            client.chat_chain = previous
+
+
+def _albert_sync_chat(
+    client: Any,
+    request: "AlbertChatRequest",
+    model: Any,
+    *,
+    max_tokens: int,
+    reasoning_effort: Optional[str],
+) -> Any:
+    """
+    One synchronous Albert chat call; the account's listing is loaded just before the first fallback.
+
+    With a cached listing (or a chain without fallback), ``client.chat`` runs
+    its chain as before. Otherwise the model placed first is sent alone (the
+    client's retries included); only when it stays busy (503) is the
+    ``/v1/models`` listing loaded (``_albert_load_fallback_listing``), then the
+    fallbacks listed by the account are tried in their order. A call answered
+    by the first model sends no listing request.
+
+    Args:
+        client: ``AlbertClient`` of the request.
+        request: The chat request.
+        model: Explicit model (alias already resolved), or ``None``.
+        max_tokens: Answer budget of this call.
+        reasoning_effort: Reasoning effort (``None`` = server configuration).
+
+    Returns:
+        The ``ChatResult``.
+
+    Raises:
+        AlbertModelBusy: Every model of the chain stayed busy.
+        AlbertError: Other classified errors, after the retries.
+    """
+    options = dict(
+        role=request.role,
+        max_tokens=max_tokens,
+        temperature=request.temperature,
+        response_format=request.response_format,
+        reasoning_effort=reasoning_effort,
+    )
+    chain = client.chat_chain(request.role, model)
+    if not _albert_listing_pending(client, chain):
+        return client.chat(request.messages, model, **options)
+    try:
+        with _albert_fixed_chain(client, chain[:1]):
+            return client.chat(request.messages, model, **options)
+    except AlbertModelBusy:
+        if _albert_load_fallback_listing(client):
+            remaining = _albert_remaining_chain(client, request.role, model, chain, 0)[1:]
+        else:
+            remaining = chain[1:]
+        if not remaining:
+            raise
+        logger.warning(
+            f"Albert: model {chain[0]} busy (503), falling back to {remaining[0]} (role {request.role})"
+        )
+    with _albert_fixed_chain(client, remaining):
+        return client.chat(request.messages, remaining[0], **options)
+
+
+def albert_resolve_alias(client: Any, model: Any) -> Any:
+    """
+    Return the name to send for an Albert model: an alias is resolved by ``/v1/models``.
+
+    Decision 6: aliases are resolved into ids by ``/v1/models``, not by the
+    static catalog, whose alias table does not follow a re-pointed alias
+    (``openweight-medium`` moves to gemma-4-31b-it when mistral-small is
+    retired). Only a name that the catalog knows as an alias triggers the
+    (cached) listing; a pinned id, a name unknown to the catalog, an empty
+    name or ``None`` (role chain) is returned without any request.
+
+    Args:
+        client: ``AlbertClient`` of the request.
+        model: Model name (``albert/`` prefix accepted), or ``None``.
+
+    Returns:
+        The id served for an alias; otherwise the name without its prefix,
+        or ``model`` itself when it is empty or ``None``.
+
+    Raises:
+        ModelNotFoundError: The alias is absent from the account's
+            ``/v1/models`` (explicit error, no chat is sent).
+        AlbertError: Classified error of ``GET /v1/models``.
+    """
+    name = "" if model is None else str(model).strip()
+    if name[:len(ALBERT_PREFIX)].lower() == ALBERT_PREFIX:
+        name = name[len(ALBERT_PREFIX):].strip()
+    if not name:
+        return model
+    albert_catalog = _albert_module("catalog")
+    if albert_catalog.canonical_id(name) == name:
+        return name
+    ident = albert_catalog.resolve_model(name, _albert_account_listing(client))
+    remember = getattr(client, "remember_models", None)
+    if callable(remember):
+        remember({name: ident})
+    return ident
+
+
+def _albert_install_alias_resolution(client: Any) -> Any:
+    """
+    Make ``client`` resolve aliases by ``/v1/models`` whenever it maps a model name.
+
+    ``AlbertClient.wire_model`` (used by ``chat`` and ``chat_chain`` for every
+    model sent) only knows a listing loaded beforehand, and the web path runs
+    no preflight. The instance's ``wire_model`` is therefore wrapped so that
+    ``albert_resolve_alias`` runs first; a pinned id costs no request.
+
+    Args:
+        client: ``AlbertClient`` just built.
+
+    Returns:
+        The same client.
+    """
+    base_wire_model = client.wire_model
+
+    def wire_model(model: Any) -> str:
+        """``AlbertClient.wire_model`` applied after ``albert_resolve_alias``."""
+        return base_wire_model(albert_resolve_alias(client, model))
+
+    client.wire_model = wire_model
+    return client
 
 
 def _get_albert_client(
@@ -448,7 +797,12 @@ def _get_albert_client(
             owns a private ledger, never written).
 
     Returns:
-        An ``AlbertClient`` configured from ``AlbertConfig.from_env()``.
+        An ``AlbertClient`` configured from ``AlbertConfig.from_env()``, whose
+        aliases are resolved by ``/v1/models`` (``albert_resolve_alias``).
+        When a fresh ``/v1/models`` listing of the same scope (key
+        fingerprint, base URL) is cached by the web path, it is installed into
+        the client without any request, so that the fallback chain drops the
+        models absent from the account, for a pinned id or the role chain too.
 
     Raises:
         AlbertMissingKeyError: No key (an ``AlbertAuthError``: account error,
@@ -458,11 +812,13 @@ def _get_albert_client(
     options: Dict[str, Any] = {"use_limiter": use_limiter}
     if ledger is not None:
         options["ledger"] = ledger
-    return AlbertClient(
+    client = _albert_install_alias_resolution(AlbertClient(
         AlbertConfig.from_env(),
         albert_api_key if albert_api_key is not None else "",
         **options,
-    )
+    ))
+    _albert_install_listing(client, _albert_cached_listing(client))
+    return client
 
 
 _albert_llm_semaphore: Optional[asyncio.Semaphore] = None
@@ -474,9 +830,10 @@ def get_albert_llm_semaphore() -> asyncio.Semaphore:
     Get the Albert web semaphore (lazy, ``ALBERT_NOTES_CONCURRENCY`` slots).
 
     It caps the Albert calls of the process (notes, book notes, citation
-    filter) and is always acquired after the global LLM semaphore. It is
-    created again when the running event loop changes (an asyncio semaphore is
-    bound to one loop); in the server there is a single loop.
+    filter) and is always acquired before the global LLM semaphore (a task
+    waiting for an Albert slot holds no global slot). It is created again when
+    the running event loop changes (an asyncio semaphore is bound to one
+    loop); in the server there is a single loop.
 
     Returns:
         The asyncio semaphore of the running loop.
@@ -500,7 +857,8 @@ class AlbertSlotPolicy:
     Attributes:
         retry: ``RetryPolicy`` of the single retry layer (not ``single_attempt``:
             each attempt of the thunk is a single send, the loop is here).
-        limiter: Proactive limiter of the role, acquired outside the semaphores.
+        limiter: Proactive limiter of the budget that applies to the model
+            sent under the role, acquired outside the semaphores.
         tokens: Estimated input tokens of one attempt (TPM budget).
         sleep: Backoff sleep (default ``asyncio.sleep``), outside the semaphores.
         rng: Random generator of the backoff jitter.
@@ -515,23 +873,32 @@ class AlbertSlotPolicy:
     label: Optional[str] = None
 
 
-def albert_slot_policy(role: str, tokens: int = 0, *, cfg: Any = None) -> AlbertSlotPolicy:
+def albert_slot_policy(role: str, tokens: int = 0, *, cfg: Any = None, model: Any = None) -> AlbertSlotPolicy:
     """
-    Build the slot policy of an Albert role from the server configuration.
+    Build the slot policy of an Albert call from the server configuration.
+
+    The limiter budget follows the model actually sent (``get_limiter(role,
+    cfg, model=model)``): a reasoning model (gpt-oss, 10 RPM measured, D1)
+    consumes the ``notes`` budget even under a role of the ``recode`` budget
+    (``citation``, ``book_structure``, ``long_context``…), while any other
+    model keeps the budget of its role.
 
     Args:
         role: Albert role (``notes``, ``citation``, ``book_structure``,
             ``long_context``…), which selects the limiter budget.
         tokens: Estimated input tokens of one attempt.
         cfg: ``AlbertConfig`` (default: ``AlbertConfig.from_env()``).
+        model: Model sent (id, alias or ``albert/<id>``); ``None`` keeps the
+            budget of the role.
 
     Returns:
-        The policy: full retry policy, process-wide limiter of the role.
+        The policy: full retry policy, process-wide limiter of the budget
+        that applies to ``model`` under ``role``.
     """
     cfg = cfg if cfg is not None else AlbertConfig.from_env()
     return AlbertSlotPolicy(
         retry=_albert_module("retry").RetryPolicy.from_config(cfg),
-        limiter=_albert_module("limiter").get_limiter(role, cfg),
+        limiter=_albert_module("limiter").get_limiter(role, cfg, model=model),
         tokens=int(tokens or 0),
         label=role,
     )
@@ -562,13 +929,21 @@ async def run_llm_slot(semaphore: Any, thunk: Callable[[], Any], *, albert_polic
 
     With ``albert_policy`` (Albert), in this order, for each attempt:
 
-    1. the limiter of the role is acquired outside any semaphore
-       (``asyncio.to_thread``);
-    2. one single attempt (``thunk``, run in a thread) under the global
-       semaphore, then under the Albert semaphore (``ALBERT_NOTES_CONCURRENCY``),
-       always acquired in this order and released right after the send;
-    3. on a transient error, the backoff is slept outside both semaphores
-       (``asyncio.sleep``), then a new attempt.
+    1. the limiter of the policy (budget of the model sent, see
+       ``albert_slot_policy``) is acquired outside any semaphore without
+       occupying the default executor of the loop: a local token bucket is
+       reserved then awaited with ``asyncio.sleep``, any other limiter
+       (Redis window) is acquired in the dedicated ``albert-limiter``
+       executor (``rad_albert.retry._aacquire_limiter``);
+    2. one single attempt (``thunk``, run in a thread) under the Albert
+       semaphore (``ALBERT_NOTES_CONCURRENCY``), then under the global
+       semaphore, always acquired in this order and released right after the
+       send: a task queued on the smaller Albert semaphore holds no global
+       slot, so it never delays the OpenAI/OpenRouter callers;
+    3. on a transient error, the pause after a 429 is posted without blocking
+       the loop (in memory for a local bucket, in the dedicated executor for
+       a Redis window), the backoff is slept outside both semaphores
+       (``asyncio.sleep``, or ``albert_policy.sleep``), then a new attempt.
 
     This is the single retry layer of the Albert web path
     (``rad_albert.retry.acall_with_retry``); the event loop is never blocked.
@@ -594,7 +969,7 @@ async def run_llm_slot(semaphore: Any, thunk: Callable[[], Any], *, albert_polic
     return await acall_with_retry(
         thunk,
         policy=albert_policy.retry,
-        semaphore=[semaphore, get_albert_llm_semaphore()],
+        semaphore=[get_albert_llm_semaphore(), semaphore],
         limiter=albert_policy.limiter,
         tokens=albert_policy.tokens,
         sleep=albert_policy.sleep,
@@ -610,7 +985,8 @@ class AlbertChatRequest:
 
     Attributes:
         messages: Chat messages (system + user).
-        model: Pinned model id placed first, or ``None`` for the role chain.
+        model: Model placed first (pinned id, or alias resolved by
+            ``/v1/models`` before the send), or ``None`` for the role chain.
         role: Albert role (fallback chain on repeated 503, limiter, timeout).
         max_tokens: Answer budget before the reasoning headroom (added by the
             client for a reasoning model).
@@ -754,10 +1130,14 @@ def _generate_with_albert(
     Generate note content with Albert, synchronously (single retry layer: the client's).
 
     The client retries transient errors (backoff outside any semaphore, limiter
-    of the role) and falls back along the role chain after repeated 503. An
-    empty answer with ``finish_reason=length`` gets one retry with a budget
-    × 1.5 and a ``low`` reasoning effort, then raises. There is no fallback to
-    OpenAI or OpenRouter.
+    of the role) and falls back along the role chain after repeated 503. When
+    the chain has a fallback and no ``/v1/models`` listing is cached, the
+    listing is loaded just before the first fallback (``_albert_sync_chat``:
+    at most one request per key per 600 s) and the fallbacks absent from the
+    account are dropped. An empty answer
+    with ``finish_reason=length`` gets one retry with a budget × 1.5 and a
+    ``low`` reasoning effort, then raises. There is no fallback to OpenAI or
+    OpenRouter.
 
     Args:
         prompt: User prompt.
@@ -784,18 +1164,14 @@ def _generate_with_albert(
         prompt, wire_model, mode=mode, temperature=temperature, role=role, response_format=response_format
     )
     client = _get_albert_client(albert_api_key, ledger=albert_usage_ledger)
-    logger.info(f"Using Albert with model: {request.model or '(role ' + request.role + ')'}")
     try:
+        model = albert_resolve_alias(client, request.model)
+        logger.info(f"Using Albert with model: {model or '(role ' + request.role + ')'}")
+
         def call(max_tokens: int, reasoning_effort: Optional[str]) -> Any:
             """One Albert chat call (client retries and role fallback included)."""
-            return client.chat(
-                request.messages,
-                request.model,
-                role=request.role,
-                max_tokens=max_tokens,
-                temperature=request.temperature,
-                response_format=request.response_format,
-                reasoning_effort=reasoning_effort,
+            return _albert_sync_chat(
+                client, request, model, max_tokens=max_tokens, reasoning_effort=reasoning_effort
             )
 
         try:
@@ -827,6 +1203,16 @@ async def _albert_slot_chat(
     tried with single-attempt sends retried by ``run_llm_slot``; after
     ``ALBERT_BUSY_RETRIES`` answers « Model is too busy », the next model of
     the chain is used (``ALBERT_MODEL_FALLBACK=0`` keeps the first model only).
+    The chain only keeps the fallbacks listed by the account's ``/v1/models``
+    when the client knows that listing (``_get_albert_client`` installs the
+    cached one). Without a cached listing, it is loaded once, in a worker
+    thread, just before the first fallback (``_albert_load_fallback_listing``:
+    at most one request per key per 600 s), and the fallbacks absent from the
+    account are dropped; a call answered by the first model sends no listing
+    request. The slot policy is built for each model of the chain
+    (``albert_slot_policy(..., model=wire)``): a reasoning model placed first
+    under a role of the ``recode`` budget consumes the ``notes`` budget, its
+    ministral fallback the ``recode`` budget again.
 
     Args:
         client: ``AlbertClient`` built without its own limiter.
@@ -842,11 +1228,18 @@ async def _albert_slot_chat(
         AlbertModelBusy: Every model of the chain stayed busy.
         AlbertError: Other classified errors, after the retries.
     """
-    chain = client.chat_chain(request.role, request.model)
-    policy = albert_slot_policy(
-        request.role, albert_estimate_tokens(request.messages, client.cfg), cfg=client.cfg
-    )
-    for index, wire in enumerate(chain):
+    model = request.model
+    if model is not None:
+        # Alias resolved by /v1/models (cached) in a worker thread: the event
+        # loop is never blocked by the listing request.
+        model = await asyncio.to_thread(albert_resolve_alias, client, model)
+    chain = client.chat_chain(request.role, model)
+    tokens = albert_estimate_tokens(request.messages, client.cfg)
+    listing_pending = _albert_listing_pending(client, chain)
+    index = 0
+    while index < len(chain):
+        wire = chain[index]
+        policy = albert_slot_policy(request.role, tokens, cfg=client.cfg, model=wire)
         thunk = functools.partial(
             client.chat,
             request.messages,
@@ -861,10 +1254,16 @@ async def _albert_slot_chat(
         try:
             return await run_llm_slot(semaphore, thunk, albert_policy=policy)
         except AlbertModelBusy:
+            if listing_pending and index + 1 < len(chain):
+                listing_pending = False
+                # Worker thread: the listing request never blocks the event loop.
+                if await asyncio.to_thread(_albert_load_fallback_listing, client):
+                    chain = _albert_remaining_chain(client, request.role, model, chain, index)
             if index + 1 < len(chain):
                 logger.warning(
                     f"Albert: model {wire} busy (503), falling back to {chain[index + 1]} (role {request.role})"
                 )
+                index += 1
                 continue
             raise
     raise AlbertModelBusy(detail=f"no model available for role {request.role}")
@@ -885,8 +1284,8 @@ async def agenerate_with_albert(
     """
     Generate note content with Albert from the event loop (``run_llm_slot``).
 
-    Same contract as ``_generate_with_albert``, but each send holds the global
-    semaphore then the Albert semaphore only during the send; the limiter is
+    Same contract as ``_generate_with_albert``, but each send holds the Albert
+    semaphore then the global semaphore only during the send; the limiter is
     acquired and the backoff slept outside them.
 
     Args:

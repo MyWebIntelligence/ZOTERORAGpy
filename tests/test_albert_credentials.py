@@ -697,7 +697,7 @@ def test_save_credentials_rejects_control_characters(web, monkeypatch):
         ({"ALBERT_API_KEY": NEW_ALBERT_KEY + "\rALBERT_BASE_URL=https://" + EVIL_HOST}, ["ALBERT_API_KEY"]),
         ({"OPENAI_API_KEY": "fake-openai-0002 X=1", "ALBERT_API_KEY": NEW_ALBERT_KEY}, ["OPENAI_API_KEY"]),
         ({"MISTRAL_API_KEY": "fake-mistral\x00-0002", "ZOTERO_USER_ID": "12\x8534"}, ["MISTRAL_API_KEY", "ZOTERO_USER_ID"]),
-        ({"QDRANT_URL": "https://qdrant.fake.example.test\tX"}, ["QDRANT_URL"]),
+        ({"QDRANT_URL": "https://qdrant.fake.example.test\x0bX"}, ["QDRANT_URL"]),
     ]
     for payload, invalid in cases:
         response = web.client.post("/save_credentials", json=payload, headers=headers)
@@ -709,6 +709,18 @@ def test_save_credentials_rejects_control_characters(web, monkeypatch):
         assert (env_file.read_bytes() == env_before) is True
     web.db.refresh(admin)
     assert (get_user_credentials(admin) == creds_before) is True
+
+    # Tabulation interne : acceptée comme avant Albert (elle ne coupe pas la ligne
+    # NOM=valeur) ; la valeur est écrite telle quelle dans le .env et la base.
+    tabbed = "https://qdrant.fake.example.test\tX"
+    assert settings_routes._has_forbidden_chars(tabbed) is False
+    response = web.client.post("/save_credentials", json={"QDRANT_URL": tabbed}, headers=headers)
+    assert response.status_code == 200
+    names = _read_env_file(env_file)
+    assert names.get("QDRANT_URL") == tabbed
+    assert "X" not in names
+    web.db.refresh(admin)
+    assert get_user_credentials(admin).get("qdrant_url") == tabbed
 
     # Blancs périphériques (retour à la ligne final compris) : retirés, comme avant.
     response = web.client.post("/save_credentials", json={"ALBERT_API_KEY": NEW_ALBERT_KEY + "\r\n"}, headers=headers)

@@ -15,14 +15,19 @@ réinjectés. ``load_dotenv_guarded`` charge le ``.env`` comme avant, puis :
   restent absents) ;
 * rend aussi leur valeur d'origine aux variables ``*_API_KEY`` déjà présentes
   avant le chargement (clés personnelles réinjectées), pour qu'un
-  ``override=True`` ne les remplace jamais par celles du ``.env`` admin.
+  ``override=True`` ne les remplace jamais par celles du ``.env`` admin ;
+* traite de même les secrets serveur de ``SERVER_SECRET_ENV_VARS`` (clé de
+  signature JWT, clé e-mail, mot de passe Flower), que ``build_subprocess_env``
+  retire de l'environnement non-admin sans les inscrire dans
+  ``RAGPY_DOTENV_DENY`` : absents avant le chargement, ils restent absents.
 
 Conséquences :
 
 * sans ``RAGPY_DOTENV_DENY`` (admin, CLI, tests), le comportement est
   strictement celui de ``dotenv.load_dotenv`` ;
 * avec la variable (même vide) et sans ``override=True``, l'environnement
-  obtenu est celui de ``dotenv.load_dotenv`` privé des noms refusés ;
+  obtenu est celui de ``dotenv.load_dotenv`` privé des noms refusés et des
+  secrets serveur ;
 * la configuration non secrète (modèles, URL, réglages) reste relue du ``.env``,
   selon l'``override`` demandé par l'appelant.
 
@@ -47,6 +52,12 @@ DOTENV_DENY_ENV_VAR = "RAGPY_DOTENV_DENY"
 
 # Suffixe des variables secrètes protégées (même convention que la liste de refus).
 SECRET_ENV_SUFFIX = "_API_KEY"
+
+# Secrets serveur jamais utiles aux scripts du pipeline : ``build_subprocess_env``
+# les retire de l'environnement non-admin (même tuple que
+# ``credentials.SERVER_SECRET_ENV_VARS`` ; un test le vérifie). Protégés dès que
+# ``RAGPY_DOTENV_DENY`` est présent, pour qu'un ``.env`` ne les réinjecte pas.
+SERVER_SECRET_ENV_VARS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "RESEND_API_KEY")
 
 
 def parse_deny_list(value: Optional[str]) -> FrozenSet[str]:
@@ -78,6 +89,8 @@ def load_dotenv_guarded(*args, **kwargs) -> bool:
     clés ont été réinjectées), les noms protégés sont :
 
     * les noms refusés listés dans ``RAGPY_DOTENV_DENY`` ;
+    * les secrets serveur de ``SERVER_SECRET_ENV_VARS`` (retirés par
+      ``build_subprocess_env`` sans figurer dans la liste de refus) ;
     * les variables ``*_API_KEY`` déjà présentes avant l'appel (clés
       personnelles réinjectées par ``build_subprocess_env``).
 
@@ -101,6 +114,7 @@ def load_dotenv_guarded(*args, **kwargs) -> bool:
         return dotenv.load_dotenv(*args, **kwargs)
 
     protected = set(parse_deny_list(raw_deny))
+    protected.update(SERVER_SECRET_ENV_VARS)
     protected.update(name for name in os.environ if name.endswith(SECRET_ENV_SUFFIX))
     before: Dict[str, Optional[str]] = {name: os.environ.get(name) for name in protected}
     try:

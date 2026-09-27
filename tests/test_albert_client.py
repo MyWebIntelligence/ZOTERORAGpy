@@ -422,13 +422,15 @@ def test_client_limiter_acquired_per_attempt_and_paused_on_429():
 
 def test_client_default_limiter_uses_role_rates_and_share():
     # Limiteur par défaut (sommeil injecté = temps virtuel) : débit du rôle × part du processus.
+    # Rafale de départ = concurrence du rôle (2), prise sur la première minute : les deux
+    # premiers envois partent ensemble, le 3e à 60 s, puis un toutes les 30 s (2 par minute).
     fake = FakeAlbert()
     sleep = SleepRecorder()
-    client = AlbertClient(_cfg(recode_rpm=2, embed_rpm=1000), FAKE_ALBERT_KEY, transport=fake.transport,
-                          sleep=sleep)
+    client = AlbertClient(_cfg(recode_rpm=2, recode_concurrency=2, embed_rpm=1000), FAKE_ALBERT_KEY,
+                          transport=fake.transport, sleep=sleep)
     for _ in range(4):
         client.chat(MESSAGES, role="recode", max_tokens=16, today=FIXED_TODAY)
-    assert sleep.calls == pytest.approx([30.0, 30.0], abs=0.5)
+    assert sleep.calls == pytest.approx([60.0, 30.0], abs=0.5)
     client.embed(["a", "b"])  # budget embed distinct : aucune attente
     assert len(sleep.calls) == 2
 
@@ -499,6 +501,42 @@ def test_busy_then_role_fallback():
     with pytest.raises(AlbertModelBusy):
         client.embed(["x"])
     assert {c.json["model"] for c in fake.calls_to("POST", "/v1/embeddings")} == {EMBED_MODEL}
+
+
+def test_set_model_listing_installs_listing_without_request():
+    # Liste /v1/models déjà connue ailleurs (cache du chemin web) : installée sans requête,
+    # elle résout les alias et retire de la chaîne les replis absents du compte.
+    cfg = _cfg(busy_retries=2, model_fallback=True, max_retries=4)
+    fake = FakeAlbert(models=[m for m in FakeAlbert().models if m.get("id") != FALLBACK_RECODE])
+    client = _client(fake, cfg)
+    assert client.chat_chain("recode", today=FIXED_TODAY) == [PRIMARY_RECODE, FALLBACK_RECODE]
+
+    listing = copy.deepcopy(fake.models)
+    assert client.set_model_listing(listing) is None
+    listing.clear()  # copie installée : une mutation ultérieure de l'appelant est sans effet
+    assert client.chat_chain("recode", today=FIXED_TODAY) == [PRIMARY_RECODE]
+    assert client.wire_model("openweight-small") == PRIMARY_RECODE
+    assert client.wire_model("albert/openweight-large") == REASONING_MODEL
+    fake.inject("POST", "/v1/chat/completions", "model_busy", "model_busy")
+    with pytest.raises(AlbertModelBusy):
+        client.chat(MESSAGES, role="recode", max_tokens=16, today=FIXED_TODAY)
+    assert [c.json["model"] for c in fake.calls_to("POST", "/v1/chat/completions")] == [PRIMARY_RECODE] * 2
+    assert fake.calls_to("GET", "/v1/models") == []
+
+    # Même forme que la réponse brute de /v1/models ({"data": [...]}) ; None oublie la liste.
+    other = _client(fake, cfg)
+    other.set_model_listing({"object": "list", "data": copy.deepcopy(fake.models)})
+    assert other.chat_chain("recode", today=FIXED_TODAY) == [PRIMARY_RECODE]
+    other.set_model_listing(None)
+    assert other.chat_chain("recode", today=FIXED_TODAY) == [PRIMARY_RECODE, FALLBACK_RECODE]
+    with pytest.raises(TypeError):
+        other.set_model_listing("openweight-small")
+    assert fake.calls_to("GET", "/v1/models") == []
+
+    # Identique à la liste chargée par models().
+    loaded = _client(fake, cfg)
+    loaded.models()
+    assert loaded.chat_chain("recode", today=FIXED_TODAY) == client.chat_chain("recode", today=FIXED_TODAY)
 
 
 def test_sleep_outside_semaphore():

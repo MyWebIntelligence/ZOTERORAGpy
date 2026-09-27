@@ -10,6 +10,29 @@ Key Features:
 - ZIP Upload: Extracts and organizes files for processing.
 - CSV Upload: Direct ingestion of structured data into DataFrames.
 - Stage Upload: Allows uploading intermediate artifacts for specific pipeline stages.
+
+Session folders (decision of 2026-09-27, lot 9):
+- ``/upload_stage_file/{stage}`` requires an authenticated user (the
+  ``Authorization`` header or the ``access_token`` cookie sent by the page)
+  and checks the session folder before writing anything, with the helpers of
+  ``app/routes/processing.py``: 400 when the folder does not resolve strictly
+  under ``UPLOAD_DIR``, 403 for a registered session of a project the
+  non-admin user cannot access; folders unrelated to any ``PipelineSession``
+  row keep the historical behaviour.
+- ZIP extraction refuses the whole archive, before writing anything, when a
+  member would land outside the extraction directory (``..`` components,
+  absolute names): ``/upload_zip`` answers with its "not a valid ZIP
+  archive" 400.
+- ``/upload_zip`` and ``/upload_csv`` (same decision, extended to every
+  route touching sessions or projects) require an authenticated user (the
+  ``Authorization`` header or the ``access_token`` cookie sent by the page),
+  401 otherwise. When a ``project_id`` is given, the check of the
+  ``/api/pipeline/projects/{id}/upload_*`` routes runs first, before
+  anything is written (``verify_project_access``, then the edit right):
+  404 for an unknown project, 403 for a project the user cannot access or
+  may only read; owner, collaborator and administrator go on. Without
+  ``project_id`` the historical behaviour is kept for the authenticated
+  user (folder created, no ``PipelineSession``).
 """
 import os
 import shutil
@@ -20,14 +43,20 @@ import sys
 import json
 import csv
 import unicodedata
+from typing import Optional, Tuple
+
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import RAGPY_DIR, UPLOAD_DIR
 from app.database.session import get_db
+from app.middleware.auth import get_current_active_user
 from app.models.pipeline_session import PipelineSession, SessionStatus
 from app.models.project import Project
+from app.models.user import User
+from app.routes.pipeline import verify_project_access
+from app.routes.processing import _session_refusal_for, _session_refusal_json
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -91,12 +120,54 @@ def fix_zip_filename_encoding(filename: str) -> str:
     return fixed
 
 
+class UnsafeZipMemberError(zipfile.BadZipFile):
+    """A ZIP member whose name would be extracted outside the destination directory.
+
+    Subclass of ``zipfile.BadZipFile``: callers that already refuse invalid
+    archives (``/upload_zip`` answers 400) refuse these the same way.
+    """
+
+
+def _zip_member_target(dst_dir: str, member_name: str) -> str:
+    """
+    Target path of a ZIP member, refused when it does not stay under ``dst_dir``.
+
+    ``..`` components and absolute names (which ``os.path.join`` would keep
+    as is) are resolved with symbolic links followed, then compared
+    component by component with the resolved destination.
+
+    Args:
+        dst_dir: Extraction directory.
+        member_name: Member name after the encoding fix.
+
+    Returns:
+        ``os.path.join(dst_dir, member_name)``.
+
+    Raises:
+        UnsafeZipMemberError: When the resolved target is not ``dst_dir`` or
+            a path under it (or cannot be resolved).
+    """
+    target_path = os.path.join(dst_dir, member_name)
+    root = os.path.realpath(dst_dir)
+    try:
+        resolved = os.path.realpath(target_path)
+        inside = os.path.commonpath([root, resolved]) == root
+    except ValueError:  # embedded NUL byte, or different drives (Windows)
+        inside = False
+    if not inside:
+        logger.warning(f"Refused ZIP member outside the extraction directory: {member_name!r}")
+        raise UnsafeZipMemberError(f"ZIP member outside the extraction directory: {member_name!r}")
+    return target_path
+
+
 def extract_zip_with_encoding_fix(zip_path: str, dst_dir: str) -> int:
     """
     Extract ZIP file with automatic filename encoding correction.
 
     This function extracts files from a ZIP archive while fixing common
-    encoding issues with French/accented filenames.
+    encoding issues with French/accented filenames. Every member name is
+    checked before anything is written: when one would land outside
+    ``dst_dir`` (zip slip), the whole archive is refused.
 
     Args:
         zip_path: Path to the ZIP file
@@ -106,22 +177,20 @@ def extract_zip_with_encoding_fix(zip_path: str, dst_dir: str) -> int:
         Number of files that had their names corrected
 
     Raises:
-        zipfile.BadZipFile: If the ZIP file is invalid
+        zipfile.BadZipFile: If the ZIP file is invalid, including
+            ``UnsafeZipMemberError`` for a member outside ``dst_dir``
     """
     corrected_count = 0
 
     with zipfile.ZipFile(zip_path, 'r') as z:
-        for member in z.namelist():
-            # Fix the filename encoding
-            fixed_name = fix_zip_filename_encoding(member)
+        members = [(member, fix_zip_filename_encoding(member)) for member in z.namelist()]
+        targets = [_zip_member_target(dst_dir, fixed_name) for _member, fixed_name in members]
 
+        for (member, fixed_name), target_path in zip(members, targets):
             # Track if we made corrections
             if fixed_name != member:
                 corrected_count += 1
                 logger.debug(f"Fixed filename: {member} -> {fixed_name}")
-
-            # Build the target path
-            target_path = os.path.join(dst_dir, fixed_name)
 
             # Handle directories
             if member.endswith('/'):
@@ -198,11 +267,117 @@ def summarize_uploaded_stage(stage_key: str, file_path: str) -> dict:
     return summary
 
 
+# Refusal message of the /api/pipeline/projects/{id}/upload_* routes (read-only member).
+PROJECT_UPLOAD_DENIED_MESSAGE = "Vous n'avez pas les droits pour ajouter des fichiers à ce projet"
+
+
+def _upload_project_or_refusal(
+    db: Session, project_id: Optional[int], user: User
+) -> Tuple[Optional[Project], Optional[JSONResponse]]:
+    """
+    Check the project an upload is attached to, before anything is written.
+
+    Same check as ``/api/pipeline/projects/{id}/upload_zip`` and
+    ``upload_csv``: ``verify_project_access`` (the project exists, the user
+    owns it, is a member of it or is an administrator), then the edit right
+    (owner, collaborator or administrator), since the upload creates a
+    ``PipelineSession`` and replaces ``project.session_folder``.
+
+    Args:
+        db: Database session.
+        project_id: Project sent by the client, or None when absent.
+        user: The authenticated user.
+
+    Returns:
+        ``(project, None)`` when the upload may go on (``project`` is None
+        without ``project_id``); ``(None, response)`` otherwise, the response
+        being a JSON ``{"error": <message>}`` with status 404 (unknown
+        project) or 403 (no access, or read-only member).
+    """
+    if project_id is None:
+        return None, None
+    try:
+        project = verify_project_access(db, project_id, user)
+    except HTTPException as exc:
+        logger.warning(f"Upload refused for user {user.id}: project {project_id} ({exc.status_code})")
+        return None, JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+    if not project.can_edit(user.id) and not user.is_admin:
+        logger.warning(f"Upload refused for user {user.id}: read-only access to project {project_id}")
+        return None, JSONResponse(status_code=403, content={"error": PROJECT_UPLOAD_DENIED_MESSAGE})
+    return project, None
+
+
+def _register_upload_session(
+    db: Session,
+    project: Project,
+    session_folder: str,
+    original_filename: str,
+    source_type: str,
+    status: SessionStatus,
+    row_count: Optional[int] = None,
+) -> Optional[int]:
+    """
+    Record an upload as a ``PipelineSession`` of ``project`` and make it the project's active folder.
+
+    A database failure is logged and leaves the upload in place, as before
+    (the response then carries ``session_id: null``).
+
+    Args:
+        db: Database session.
+        project: Project checked by ``_upload_project_or_refusal``.
+        session_folder: Folder of the upload, relative to ``UPLOAD_DIR``.
+        original_filename: Name of the uploaded file.
+        source_type: ``"zip"`` or ``"csv"``.
+        status: Initial status of the session.
+        row_count: Number of rows (CSV uploads), or None.
+
+    Returns:
+        The id of the new ``PipelineSession``, or None on a database failure.
+    """
+    try:
+        pipeline_session = PipelineSession(
+            project_id=project.id,
+            session_folder=session_folder,
+            original_filename=original_filename,
+            source_type=source_type,
+            status=status,
+            row_count=row_count,
+        )
+        db.add(pipeline_session)
+        project.session_folder = session_folder
+        db.commit()
+        db.refresh(pipeline_session)
+        logger.info(f"Created PipelineSession {pipeline_session.id} for project {project.id}")
+        return pipeline_session.id
+    except Exception as e:
+        logger.error(f"Failed to create PipelineSession: {e}")
+        try:
+            db.rollback()
+        except Exception as rollback_error:
+            logger.error(f"Rollback after PipelineSession failure failed: {rollback_error}")
+        return None
+
+
 @router.post("/upload_zip")
 async def upload_zip(
     file: UploadFile = File(...),
-    project_id: int = Form(None)
+    project_id: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
 ):
+    """Upload a ZIP archive (Zotero export) and extract it under ``UPLOAD_DIR``.
+    \f
+    Requires an authenticated user (``Authorization`` header or
+    ``access_token`` cookie). A given ``project_id`` is checked first, before
+    anything is written (``_upload_project_or_refusal``: 404 unknown project,
+    403 no access or read-only); the new session is then recorded in that
+    project and becomes its active folder. Without ``project_id`` the upload
+    is not attached to any project.
+    """
+    project, refusal = _upload_project_or_refusal(db, project_id, current_user)
+    if refusal is not None:
+        return refusal
+
     # Generate a unique prefix for the filename
     unique_id = str(uuid.uuid4().hex)[:8]
     original_filename, file_extension = os.path.splitext(file.filename)
@@ -266,31 +441,12 @@ async def upload_zip(
     relative_processing_path = os.path.relpath(processing_path, UPLOAD_DIR)
     logger.info(f"Returning relative processing path: {relative_processing_path}")
 
-    # Create PipelineSession if project_id is provided
+    # Create PipelineSession if project_id is provided (checked above)
     session_id = None
-    if project_id:
-        try:
-            db = next(get_db())
-            try:
-                project = db.query(Project).filter(Project.id == project_id).first()
-                if project:
-                    pipeline_session = PipelineSession(
-                        project_id=project_id,
-                        session_folder=relative_processing_path,
-                        original_filename=file.filename,
-                        source_type="zip",
-                        status=SessionStatus.CREATED
-                    )
-                    db.add(pipeline_session)
-                    project.session_folder = relative_processing_path
-                    db.commit()
-                    db.refresh(pipeline_session)
-                    session_id = pipeline_session.id
-                    logger.info(f"Created PipelineSession {session_id} for project {project_id}")
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Failed to create PipelineSession: {e}")
+    if project is not None:
+        session_id = _register_upload_session(
+            db, project, relative_processing_path, file.filename, "zip", SessionStatus.CREATED
+        )
 
     return JSONResponse({
         "path": relative_processing_path,
@@ -303,11 +459,23 @@ async def upload_zip(
 @router.post("/upload_csv")
 async def upload_csv_endpoint(
     file: UploadFile = File(...),
-    project_id: int = Form(None)
+    project_id: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
 ):
     """
     Upload CSV file for direct ingestion (bypass PDF/OCR).
+    \f
+    Requires an authenticated user (``Authorization`` header or
+    ``access_token`` cookie). A given ``project_id`` is checked first, before
+    anything is written (``_upload_project_or_refusal``: 404 unknown project,
+    403 no access or read-only); the new session is then recorded in that
+    project and becomes its active folder.
     """
+    project, refusal = _upload_project_or_refusal(db, project_id, current_user)
+    if refusal is not None:
+        return refusal
+
     unique_id = str(uuid.uuid4().hex)[:8]
     original_filename, file_extension = os.path.splitext(file.filename)
 
@@ -356,30 +524,11 @@ async def upload_csv_endpoint(
         logger.info(f"CSV ingestion successful. Returning path: {relative_processing_path}")
 
         session_id = None
-        if project_id:
-            try:
-                db = next(get_db())
-                try:
-                    project = db.query(Project).filter(Project.id == project_id).first()
-                    if project:
-                        pipeline_session = PipelineSession(
-                            project_id=project_id,
-                            session_folder=relative_processing_path,
-                            original_filename=file.filename,
-                            source_type="csv",
-                            status=SessionStatus.EXTRACTED,
-                            row_count=len(df)
-                        )
-                        db.add(pipeline_session)
-                        project.session_folder = relative_processing_path
-                        db.commit()
-                        db.refresh(pipeline_session)
-                        session_id = pipeline_session.id
-                        logger.info(f"Created PipelineSession {session_id} for project {project_id}")
-                finally:
-                    db.close()
-            except Exception as e:
-                logger.error(f"Failed to create PipelineSession: {e}")
+        if project is not None:
+            session_id = _register_upload_session(
+                db, project, relative_processing_path, file.filename, "csv", SessionStatus.EXTRACTED,
+                row_count=len(df)
+            )
 
         return JSONResponse({
             "path": relative_processing_path,
@@ -397,9 +546,29 @@ async def upload_csv_endpoint(
 
 
 @router.post("/upload_stage_file/{stage}")
-async def upload_stage_file(stage: str, path: str = Form(...), file: UploadFile = File(...)):
-    """Allow operators to upload intermediate artifacts for any stage."""
+async def upload_stage_file(
+    stage: str,
+    path: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Allow operators to upload intermediate artifacts for any stage.
+    \f
+    Requires an authenticated user (``Authorization`` header or
+    ``access_token`` cookie). The session folder is checked first, before
+    anything is written, with the check of the pipeline routes
+    (``_session_refusal_for`` of ``app/routes/processing.py``, on the very
+    path this route writes to): 400 when it does not resolve strictly under
+    ``UPLOAD_DIR``, 403 for a registered session of a project the non-admin
+    user cannot access. A folder unrelated to any ``PipelineSession`` row
+    keeps the historical behaviour.
+    """
     logger.info(f"Received upload for stage '{stage}' targeting path '{path}' with original filename '{file.filename}'")
+
+    refusal = _session_refusal_for(db, path, os.path.join(UPLOAD_DIR, path), current_user)
+    if refusal is not None:
+        return _session_refusal_json(refusal)
 
     config = STAGE_UPLOAD_CONFIG.get(stage)
     if not config:

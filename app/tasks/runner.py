@@ -24,7 +24,8 @@ Components:
       revocation (SIGTERM received by a prefork pool child) and on any
       exception raised while waiting (for instance Celery's soft time limit).
     - ``parse_vectordb_stdout``: the anchored regexes of the ``/upload_db``
-      route parser.
+      route parser for the counts; the ``Dedup journal:`` line naming
+      ``dedup_journal.jsonl`` is taken whole (paths with spaces).
     - Task owner registry: ``ragpy:celery_owner:<task_id>`` in Redis (TTL 7
       days); without Redis, only administrators may read or cancel a task.
 
@@ -107,6 +108,12 @@ VECTORDB_CHOICES = tuple(VECTORDB_REQUIRED_KEYS)
 VECTORDB_INSERTED_PATTERN = r'^Inserted:\s*(\d+)'
 VECTORDB_SKIPPED_PATTERN = r'^Skipped \(dedup\):\s*(\d+)'
 VECTORDB_JOURNAL_PATTERN = r'^Dedup journal:\s*(\S+)'
+# The journal line as a whole (Celery only): rad_vectordb.py prints the
+# absolute path of the journal, whose file name is always
+# rad_dedup.JOURNAL_FILENAME; such a line is taken whole, so a session under
+# a folder with spaces keeps its full path, as the in-process call did on main.
+VECTORDB_JOURNAL_LINE_PATTERN = r'^Dedup journal:\s*(.+)$'
+DEDUP_JOURNAL_FILENAME = "dedup_journal.jsonl"
 
 # Albert target (the albert branch of the /upload_db route): extra lines, and
 # the whole "Dedup journal:" line (paths with spaces) for this target only.
@@ -921,7 +928,10 @@ def check_script_result(result: ScriptResult, cmd: Sequence[str], env: Optional[
 def parse_vectordb_stdout(stdout: Optional[str]) -> Dict[str, Any]:
     """Parse the ``=== Result ===`` block of ``rad_vectordb.py``.
 
-    Same anchored patterns (``re.MULTILINE``) as the ``/upload_db`` route.
+    Same anchored patterns (``re.MULTILINE``) as the ``/upload_db`` route for
+    the counts. The ``Dedup journal:`` line is read by
+    ``_parse_journal_path``: whole when it names the rad_vectordb journal
+    (paths with spaces kept), first token otherwise (as the route).
 
     Args:
         stdout: Standard output of the script.
@@ -938,10 +948,32 @@ def parse_vectordb_stdout(stdout: Optional[str]) -> Dict[str, Any]:
     m = re.search(VECTORDB_SKIPPED_PATTERN, text, re.MULTILINE)
     if m:
         parsed["skipped_count"] = int(m.group(1))
-    m = re.search(VECTORDB_JOURNAL_PATTERN, text, re.MULTILINE)
-    if m:
-        parsed["journal_path"] = m.group(1)
+    parsed["journal_path"] = _parse_journal_path(text)
     return parsed
+
+
+def _parse_journal_path(text: str) -> Optional[str]:
+    """Path printed on the ``Dedup journal:`` line of ``rad_vectordb.py``, or None.
+
+    rad_vectordb.py prints the absolute path of ``dedup_journal.jsonl``
+    (``os.path.abspath`` of the session folder, which may contain spaces, as
+    under ``Google Drive``). A line ending with that file name is taken
+    whole, so the Celery task returns the same path as the in-process call
+    it replaced; any other line keeps the route's first-token reading.
+
+    Args:
+        text: Standard output of the script.
+
+    Returns:
+        The journal path, or None when the line is absent.
+    """
+    m = re.search(VECTORDB_JOURNAL_LINE_PATTERN, text, re.MULTILINE)
+    if m:
+        whole = m.group(1).strip()
+        if os.path.basename(whole) == DEDUP_JOURNAL_FILENAME:
+            return whole
+    m = re.search(VECTORDB_JOURNAL_PATTERN, text, re.MULTILINE)
+    return m.group(1) if m else None
 
 
 def parse_albert_stdout(stdout: Optional[str]) -> Dict[str, Any]:

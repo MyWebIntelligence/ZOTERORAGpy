@@ -909,8 +909,9 @@ async def _book_llm_call(
     OpenAI/OpenRouter: `_generate_with_llm` runs in the executor while the
     global semaphore is held, exactly as before. Albert (`albert/…` model, or
     an `albert/…` default model): `agenerate_with_albert` with the given role;
-    each send holds the semaphores only while it runs, and no other provider
-    is ever called.
+    each send holds the semaphores only while it runs, the limiter budget is
+    the one of the model sent (`notes` for gpt-oss whatever the role), and no
+    other provider is ever called.
 
     Args:
         prompt: Filled phase prompt.
@@ -989,7 +990,9 @@ async def _phase1_detect_structure(
 
     On Albert, the call uses the `book_structure` role and the JSON schema of
     `ALBERT_BOOK_STRUCTURE_RESPONSE_FORMAT` (D10), and is recorded into
-    `albert_usage_ledger` when one is given.
+    `albert_usage_ledger` when one is given. The limiter budget follows the
+    model sent: an explicit `albert/gpt-oss-120b` consumes the `notes` budget
+    (reasoning model), the role chain (ministral…) the `recode` budget.
     Albert account errors are raised (never turned into None).
     """
     if pages:

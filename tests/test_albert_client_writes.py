@@ -199,8 +199,11 @@ def test_virtual_time_is_explicit_or_mock_transport_only():
 
 def test_virtual_clock_counts_a_real_sleep_once(monkeypatch):
     # Le sommeil injecté « attend vraiment » : l'horloge monotone avance d'autant.
+    # 2 RPM, rafale de départ 2 (concurrence recode) prise sur la première minute :
+    # la 3e requête attend 60 s (déficit d'une requête + avance d'une requête à
+    # rembourser), la 4e attend 30 s (un jeton au débit de 2 RPM).
     # Compté deux fois (monotone + décalage virtuel), le seau se remplirait deux
-    # fois trop vite et la 4e requête partirait sans attendre.
+    # fois trop vite et la 4e requête partirait sans attendre (sommeils [60.0]).
     now = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
     slept = []
@@ -215,7 +218,7 @@ def test_virtual_clock_counts_a_real_sleep_once(monkeypatch):
                           virtual_time=True)
     for _ in range(4):
         client.chat(MESSAGES, role="recode", max_tokens=16, today=FIXED_TODAY)
-    assert slept == pytest.approx([30.0, 30.0], abs=1e-6)
+    assert slept == pytest.approx([60.0, 30.0], abs=1e-6)
 
 
 def test_single_retry_after_parser():

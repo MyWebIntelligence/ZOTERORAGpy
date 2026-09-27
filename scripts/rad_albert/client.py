@@ -53,7 +53,7 @@ from .errors import (
     classify_http_error,
     redact,
 )
-from .limiter import bucket_for_role, estimate_input_tokens, get_limiter
+from .limiter import bucket_for_role, estimate_input_tokens, get_limiter, limiter_role
 from .retry import RetryPolicy, call_with_retry, parse_retry_after
 from .usage import UsageLedger, extract_usage
 
@@ -188,11 +188,6 @@ class ChatResult(str):
     def content(self) -> str:
         """Texte de la réponse (``str`` simple)."""
         return str.__str__(self)
-
-    @property
-    def served_model(self) -> Optional[str]:
-        """Synonyme de ``model`` (modèle qui a servi la réponse)."""
-        return self.model
 
     @property
     def truncated(self) -> bool:
@@ -452,7 +447,7 @@ class AlbertClient:
 
         L'id vient des résolutions mémorisées (preflight, ``resolve_model_id``)
         ou, à défaut, de la liste ``/v1/models`` déjà chargée par ``models()``
-        (sans requête) ; il est alors mémorisé. Sans liste connue, le nom part
+        ou installée par ``set_model_listing`` (sans requête) ; il est alors mémorisé. Sans liste connue, le nom part
         tel quel. Un alias n'est jamais envoyé quand son id est connu.
 
         Raises:
@@ -490,6 +485,45 @@ class AlbertClient:
         ident = catalog.resolve_model(name, listing)
         self.remember_models({name: ident})
         return ident
+
+    def set_model_listing(self, listing: Any) -> None:
+        """Installe une liste ``/v1/models`` déjà connue, sans requête.
+
+        ``wire_model`` (alias résolus en id) et ``chat_chain`` (replis absents du
+        compte retirés) l'utilisent ensuite comme la liste chargée par
+        ``models()``. Une copie de la liste est gardée : une mutation ultérieure
+        de celle de l'appelant est sans effet. Les résolutions déjà mémorisées
+        (preflight, ``resolve_model_id``) restent prioritaires.
+
+        Args:
+            listing: entrées renvoyées par ``models()`` (liste de dicts), ou
+                réponse brute ``{"data": [...]}`` ; ``None`` oublie la liste
+                (chaîne du catalogue telle quelle, comme sans liste connue).
+
+        Raises:
+            TypeError: ``listing`` est une chaîne ou des octets (pas une liste).
+        """
+        if isinstance(listing, (str, bytes, bytearray)):
+            raise TypeError("Liste /v1/models attendue (liste d'entrées ou réponse {'data': [...]}).")
+        entries = None if listing is None else list(catalog.listing_entries(listing))
+        with self._lock:
+            self._listing = entries
+
+    def _listed(self, model: Any) -> Optional[bool]:
+        """Présence de ``model`` dans la liste ``/v1/models`` déjà chargée (``None`` : liste inconnue).
+
+        Aucune requête : seule la liste mise en cache par ``models()`` (preflight,
+        ``resolve_model_id``) ou installée par ``set_model_listing`` est consultée.
+        """
+        with self._lock:
+            listing = self._listing
+        if listing is None:
+            return None
+        try:
+            catalog.resolve_model(model, listing)
+        except (catalog.ModelNotFoundError, ValueError):
+            return False
+        return True
 
     # ------------------------------------------------------------------ transport
     def _limiter_for(self, role: Optional[str]) -> Any:
@@ -730,6 +764,14 @@ class AlbertClient:
         suit si ``fallback`` est vrai, sauf avec ``ALBERT_MODEL_FALLBACK=0``, en
         mode ``single_attempt`` ou pour un rôle sans repli.
 
+        Quand la liste ``/v1/models`` du compte est connue (preflight,
+        ``models()``, ``resolve_model_id``, ``set_model_listing``), les modèles de **repli** absents de
+        cette liste sont retirés : un 503 du modèle en tête ne se transforme
+        jamais en 404 permanent sur un repli que le compte n'offre pas. Le
+        modèle en tête est toujours gardé (son absence reste une erreur
+        explicite, jamais un repli silencieux) ; sans liste connue, la chaîne
+        du catalogue est renvoyée telle quelle.
+
         Args:
             role: rôle applicatif.
             model: modèle explicite (id, alias ou ``albert/<id>``).
@@ -761,7 +803,13 @@ class AlbertClient:
             )
         if single_attempt or not fallback or not self.cfg.model_fallback or spec.name in catalog.NO_FALLBACK_ROLES:
             return chain[:1]
-        return chain
+        kept = chain[:1]
+        for name in chain[1:]:
+            if self._listed(name) is False:
+                logger.debug("Albert : repli %s absent de /v1/models, ignoré (rôle %s).", name, spec.name)
+                continue
+            kept.append(name)
+        return kept
 
     def _chat_body(
         self,
@@ -831,9 +879,11 @@ class AlbertClient:
         (gpt-oss), la marge ``ALBERT_REASONING_HEADROOM`` s'y ajoute et
         ``reasoning_effort`` est envoyé (D9). Seul ``message.content`` est
         renvoyé, jamais le champ ``reasoning``. Sans ``role``, seul ``model``
-        est essayé (budget du limiteur : ``notes`` pour un modèle à raisonnement,
-        sinon ``recode``) ; avec ``role``, la chaîne du rôle suit ``model`` (ou
-        la remplace si ``model`` est absent) après des 503 répétés. L'ordre
+        est essayé ; avec ``role``, la chaîne du rôle suit ``model`` (ou la
+        remplace si ``model`` est absent) après des 503 répétés. Le budget du
+        limiteur suit le modèle envoyé (``limiter.limiter_role``) : ``notes``
+        pour un modèle à raisonnement (gpt-oss, D1), même sous un rôle du
+        budget ``recode`` ; le rôle du ledger reste celui demandé. L'ordre
         historique ``chat(model, messages)`` est reconnu (nom de modèle en
         premier, liste de messages en second).
 
@@ -922,6 +972,7 @@ class AlbertClient:
                 return self._chat_once(
                     body,
                     role=spec.name,
+                    budget_role=limiter_role(spec.name, wire),
                     requested=chain[0],
                     fallback_from=fallback_from,
                     timeout=float(timeout),
@@ -943,21 +994,6 @@ class AlbertClient:
         assert last_busy is not None  # chaîne non vide : la boucle renvoie ou relève
         raise last_busy
 
-    def chat_role(self, role: str, messages: Any, *, model: Any = None, **kwargs: Any) -> ChatResult:
-        """Chat par rôle : chaîne du rôle (``model`` éventuel en tête), repli sur 503 répétés.
-
-        Args:
-            role: rôle (``recode``, ``citation``, ``notes``, ``book_structure``,
-                ``long_context``, ``ocr_chat``).
-            messages: messages (ou une chaîne).
-            model: modèle placé en tête de la chaîne (optionnel).
-            **kwargs: paramètres de ``chat`` (``max_tokens``, ``today``…).
-
-        Returns:
-            ``ChatResult`` ; ``fallback_from`` est posé si un repli a servi.
-        """
-        return self.chat(messages, model, role=role, **kwargs)
-
     def _chat_once(
         self,
         body: Dict[str, Any],
@@ -969,8 +1005,13 @@ class AlbertClient:
         tokens: int,
         semaphore: Any,
         single_attempt: bool,
+        budget_role: Optional[str] = None,
     ) -> ChatResult:
-        """Un modèle de la chaîne : envoi avec réessais, ledger, contrôle de troncature."""
+        """Un modèle de la chaîne : envoi avec réessais, ledger, contrôle de troncature.
+
+        ``role`` est le rôle applicatif (ledger, résultat) ; ``budget_role``
+        choisit le budget du limiteur (défaut : ``role``).
+        """
         path = "/v1/chat/completions"
         wire = body["model"]
 
@@ -1021,7 +1062,7 @@ class AlbertClient:
                 "POST",
                 path,
                 timeout=timeout,
-                role=role,
+                role=budget_role or role,
                 json_body=body,
                 tokens=tokens,
                 semaphore=semaphore,

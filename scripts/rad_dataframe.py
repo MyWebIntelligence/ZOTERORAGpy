@@ -441,6 +441,111 @@ def get_errors_file_path(output_csv: str) -> str:
     return f"{base}_errors.json"
 
 
+def get_ocr_fallback_trace_path(output_csv: str) -> str:
+    """
+    Path of the durable trace of the Albert OCR fallbacks (`<base>_ocr_fallbacks.json`).
+
+    Only written when an `OCR_PROVIDER_FALLBACK` entry exists (Albert OCR
+    selected), so it never appears with Albert disabled.
+    """
+    base = os.path.splitext(output_csv)[0]
+    return f"{base}_ocr_fallbacks.json"
+
+
+_OCR_FALLBACK_TRACE_LOCK = threading.Lock()
+
+
+def _load_ocr_fallback_trace(path: str) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Read the fallback trace (`{itemKey: [entries]}`); `{}` when absent or unreadable.
+
+    Args:
+        path: Trace file path (`get_ocr_fallback_trace_path`).
+
+    Returns:
+        The trace, keyed by Zotero item key.
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.warning(f"Failed to read OCR fallback trace {path}: {e}")
+        return {}
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, dict):
+        return {}
+    return {str(key): [e for e in value if isinstance(e, dict)] for key, value in items.items() if isinstance(value, list)}
+
+
+def _record_ocr_fallback_trace(output_csv: str, item_key: str, errors: List[Dict[str, Any]]) -> None:
+    """
+    Persist the `OCR_PROVIDER_FALLBACK` entries of one processed item (Albert invariant 20).
+
+    Called right after the item's rows are appended to the CSV and before its
+    key is saved in the progress file, so a row kept for a resume always has
+    its fallback traced on disk, even if the run is stopped (SIGTERM, kill)
+    before `save_errors`. An item re-processed without fallback clears its
+    previous entries. No file is created or touched when there is no
+    fallback and no trace yet (Albert disabled: strictly nothing happens).
+
+    Args:
+        output_csv: Output CSV path (the trace sits next to it).
+        item_key: Zotero item key (empty keys are never resumed: skipped).
+        errors: Errors of the processed item.
+    """
+    if not item_key:
+        return
+    entries = [e for e in errors if e.get("error_type") == "OCR_PROVIDER_FALLBACK"]
+    path = get_ocr_fallback_trace_path(output_csv)
+    with _OCR_FALLBACK_TRACE_LOCK:
+        if not entries and not os.path.exists(path):
+            return
+        trace = _load_ocr_fallback_trace(path)
+        if entries:
+            trace[item_key] = entries
+        elif trace.pop(item_key, None) is None:
+            return
+        tmp_path = f"{path}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump({"items": trace, "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")},
+                          f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, path)
+        except (OSError, TypeError, ValueError) as e:
+            logger.warning(f"Failed to save OCR fallback trace {path}: {e}")
+
+
+def _carried_ocr_fallbacks(output_csv: str, processed_keys: Set[str], keys_done_now: Set[str]) -> List[Dict[str, Any]]:
+    """
+    Fallback entries of items processed by an earlier run and kept for this one.
+
+    `save_errors` rewrites the errors file with the errors of the current run
+    only; without these entries, a resumed or repeated extraction would erase
+    the trace of the rows served by another provider than Albert.
+
+    Args:
+        output_csv: Output CSV path.
+        processed_keys: Keys recorded in the progress file (rows kept in the CSV).
+        keys_done_now: Keys processed by the current run (their errors are
+            already in the current list).
+
+    Returns:
+        The carried `OCR_PROVIDER_FALLBACK` entries (empty without a trace file).
+    """
+    path = get_ocr_fallback_trace_path(output_csv)
+    if not os.path.exists(path):
+        return []
+    with _OCR_FALLBACK_TRACE_LOCK:
+        trace = _load_ocr_fallback_trace(path)
+    carried: List[Dict[str, Any]] = []
+    for key in sorted(trace):
+        if key in processed_keys and key not in keys_done_now:
+            carried.extend(trace[key])
+    return carried
+
+
 def load_progress(output_csv: str) -> set:
     """
     Load the set of already processed itemKeys from progress file.
@@ -2277,7 +2382,49 @@ def _write_albert_ocr_usage(output_path: str) -> Optional[str]:
             written = ledger.write_jsonl(folder)
         except OSError as exc:
             logger.warning("Ledger d'usage Albert non écrit dans %s : %s", folder, exc)
+        if written is None:
+            # Enregistrements déjà écrits document par document (_flush_albert_ocr_usage).
+            written = _ALBERT_OCR_USAGE_FLUSHED.get(folder)
     logger.info("%s", ledger.summary_line())
+    return written
+
+
+_ALBERT_OCR_USAGE_FLUSHED: Dict[str, str] = {}
+"""Dossier → `albert_usage.jsonl` déjà alimenté par `_flush_albert_ocr_usage`."""
+
+
+def _flush_albert_ocr_usage(output_path: str) -> Optional[str]:
+    """
+    Append the pending Albert usage records of the OCR link, once per processed document.
+
+    Called by the incremental loader after each item is persisted (rows in
+    the CSV, before its key is saved as done), so the ledger of the rows a
+    resume will reuse is on disk even if the run is stopped (SIGTERM, kill,
+    Celery revoke) before `_write_albert_ocr_usage`. Records are appended
+    only once (`UsageLedger.write_jsonl` keeps track of what was written).
+    Nothing happens unless Albert was called in this process, nor with
+    `ALBERT_USAGE_LOG=0`; no summary log line here.
+
+    Args:
+        output_path: Output CSV path (the ledger goes to its directory).
+
+    Returns:
+        Path of `albert_usage.jsonl` when records were appended, else None.
+    """
+    ledger = _ALBERT_OCR_LEDGER
+    if ledger is None or not ALBERT_CONFIG.usage_log:
+        return None
+    folder = os.path.dirname(os.path.abspath(output_path))
+    try:
+        written = ledger.write_jsonl(folder)
+    except OSError as exc:
+        _albert_warn_once(
+            f"usage_flush:{folder}", "Ledger d'usage Albert non écrit dans %s : %s", folder, exc
+        )
+        return None
+    if written:
+        with _ALBERT_STATE_LOCK:
+            _ALBERT_OCR_USAGE_FLUSHED[folder] = written
     return written
 
 
@@ -2942,8 +3089,18 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
         except Exception as e:
             logger.error(f"Failed to remove stale CSV: {e}")
 
+    # Albert: a fresh start (no progress file) also drops the fallback trace of
+    # the previous rows; only exists if the Albert OCR link fell back before.
+    fallback_trace = get_ocr_fallback_trace_path(output_csv)
+    if not os.path.exists(progress_file) and os.path.exists(fallback_trace):
+        try:
+            os.remove(fallback_trace)
+        except OSError as e:
+            logger.warning(f"Failed to remove stale OCR fallback trace: {e}")
+
     # Use thread-safe set for parallel mode
     processed_keys_lock = threading.Lock()
+    keys_done_now: Set[str] = set()
     all_errors = []
     errors_lock = threading.Lock()
     records_count = [0]  # Use list for mutable reference in nested function
@@ -3018,10 +3175,16 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
                     with errors_lock:
                         all_errors.extend(result.errors)
 
+                # Albert: fallback trace and usage ledger on disk before the
+                # item is marked done (both no-ops when Albert was not used).
+                _record_ocr_fallback_trace(output_csv, result.item_key, result.errors)
+                _flush_albert_ocr_usage(output_csv)
+
                 # Mark as processed (thread-safe)
                 if result.item_key:
                     with processed_keys_lock:
                         processed_keys.add(result.item_key)
+                        keys_done_now.add(result.item_key)
                         save_progress(output_csv, processed_keys)
 
                 # Update progress
@@ -3076,9 +3239,15 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
                 # Collect errors
                 all_errors.extend(result.errors)
 
+                # Albert: fallback trace and usage ledger on disk before the
+                # item is marked done (both no-ops when Albert was not used).
+                _record_ocr_fallback_trace(output_csv, result.item_key, result.errors)
+                _flush_albert_ocr_usage(output_csv)
+
                 # Mark as processed
                 if result.item_key:
                     processed_keys.add(result.item_key)
+                    keys_done_now.add(result.item_key)
                     save_progress(output_csv, processed_keys)
 
                 # Emit progress for SSE
@@ -3087,6 +3256,10 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
 
     except Exception as e:
         logger.error(f"Failed to load Zotero JSON: {e}")
+
+    # Albert: keep the fallbacks of the rows processed by an earlier run
+    # (resume after a stop, second click); empty without a trace file.
+    all_errors = all_errors + _carried_ocr_fallbacks(output_csv, processed_keys, keys_done_now)
 
     # Save errors to file
     save_errors(output_csv, all_errors)

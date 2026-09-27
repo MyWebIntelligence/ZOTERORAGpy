@@ -19,8 +19,7 @@ from scripts.rad_albert.config import AlbertConfig
 from scripts.rad_albert.errors import AlbertPermanentError, AlbertUncertainWriteError
 from tests.albert_fakes import FAKE_ALBERT_KEY, FakeAlbert, load_fixture
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-FIXTURES = Path("tests/fixtures/albert")
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "albert"
 FIXED_TODAY = date(2026, 9, 26)
 MESSAGES = [{"role": "user", "content": "Réponds seulement : OK."}]
 SMALL_CHAIN_ROLES = ("recode", "citation", "book_structure", "long_context")
