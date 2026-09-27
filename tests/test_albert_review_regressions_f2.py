@@ -66,10 +66,11 @@ HIGH_RATES = {
     "ALBERT_EMBED_RPM": "1000000",
     "ALBERT_CHAT_TPM": "1000000000",
 }
-SERVER_SECRETS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "RESEND_API_KEY")
+SERVER_SECRETS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "JWT_SECRET_KEY_PREVIOUS", "RESEND_API_KEY")
 FAKE_SERVER_DOTENV = {
     "FLOWER_PASSWORD": "fake-flower-dotenv-0001",
     "JWT_SECRET_KEY": "fake-jwt-dotenv-0001",
+    "JWT_SECRET_KEY_PREVIOUS": "fake-jwt-previous-dotenv-0001",
     "RESEND_API_KEY": "fake-resend-dotenv-0001",
     "MISTRAL_OCR_MODEL": "fake-mistral-ocr-model-dotenv-0001",
 }
@@ -348,8 +349,8 @@ def test_subprocess_cannot_refill_server_secrets_from_dotenv(tmp_path):
     for name in FAKE_SERVER_DOTENV:
         env.pop(name, None)
     presence = _probe(env, tmp_path, FAKE_SERVER_DOTENV)
-    assert presence == {"FLOWER_PASSWORD": False, "JWT_SECRET_KEY": False, "MISTRAL_OCR_MODEL": True,
-                        "RESEND_API_KEY": False}
+    assert presence == {"FLOWER_PASSWORD": False, "JWT_SECRET_KEY": False, "JWT_SECRET_KEY_PREVIOUS": False,
+                        "MISTRAL_OCR_MODEL": True, "RESEND_API_KEY": False}
 
 
 def test_admin_subprocess_still_reloads_server_secrets(tmp_path):

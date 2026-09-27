@@ -19,6 +19,10 @@ la racine. Il garantit qu'aucune session de test n'appelle l'API Albert réelle 
   Albert des modules déjà importés et fait échouer le test si une requête a été
   bloquée, même quand le code a avalé l'exception ;
 * ``anyio_backend`` vaut ``'asyncio'`` et toute variante ``[trio]`` est refusée ;
+  les tests asynchrones sont marqués ``@pytest.mark.anyio`` (plugin d'anyio,
+  déjà installé avec Starlette) : ``pytest-asyncio`` n'est pas une dépendance ;
+* les verrous de ``app.services.job_control`` (``RAGPY_LOCK_DIR``) vont dans un
+  dossier temporaire par test ;
 * les tests marqués ``albert_live`` sont sautés sauf si ``ALBERT_LIVE=1`` ;
 * sans ``TIKTOKEN_CACHE_DIR`` (ni l'ancien ``DATA_GYM_CACHE_DIR``), le cache
   tiktoken est placé **à l'import** dans ``data/tiktoken_cache`` du dépôt
@@ -534,3 +538,13 @@ def network_guard(request):
 def anyio_backend():
     """Backend anyio unique de la suite : ``'asyncio'`` (aucune variante trio)."""
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_job_locks(tmp_path_factory, monkeypatch):
+    """Verrous de ``app.services.job_control`` dans un dossier temporaire propre à chaque test.
+
+    Jamais ``data/locks`` du dépôt : un test ne peut ni bloquer ni être bloqué
+    par un autre, ni par un serveur de développement lancé en parallèle.
+    """
+    monkeypatch.setenv("RAGPY_LOCK_DIR", str(tmp_path_factory.mktemp("job_locks")))

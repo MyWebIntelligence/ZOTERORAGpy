@@ -28,7 +28,7 @@ import functools
 import hashlib
 import logging
 from typing import Dict, Optional, Any, List
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from app.config import settings
 from app.models.user import User
@@ -60,20 +60,45 @@ class CredentialMissingError(Exception):
 
 
 # Derive a Fernet-compatible key from JWT_SECRET_KEY
+def _derive_fernet_key(secret: str) -> bytes:
+    """
+    Derive a 32-byte Fernet key from a secret (SHA256, then urlsafe base64).
+
+    Args:
+        secret: ``JWT_SECRET_KEY`` or ``JWT_SECRET_KEY_PREVIOUS``.
+
+    Returns:
+        The base64-encoded Fernet key.
+    """
+    hashed = hashlib.sha256(secret.encode('utf-8')).digest()
+    return base64.urlsafe_b64encode(hashed)
+
+
 def _get_encryption_key() -> bytes:
     """
     Derive a 32-byte key from JWT_SECRET_KEY for Fernet encryption.
     Uses SHA256 hash and base64 encoding.
     """
-    key_bytes = settings.JWT_SECRET_KEY.encode('utf-8')
-    # SHA256 produces 32 bytes, which we base64 encode for Fernet
-    hashed = hashlib.sha256(key_bytes).digest()
-    return base64.urlsafe_b64encode(hashed)
+    return _derive_fernet_key(settings.JWT_SECRET_KEY)
 
 
-def get_fernet() -> Fernet:
-    """Get Fernet instance with derived key."""
-    return Fernet(_get_encryption_key())
+def get_fernet() -> MultiFernet:
+    """
+    Get the Fernet instance of the stored credentials.
+
+    Encrypts with the key derived from ``JWT_SECRET_KEY``; decrypts with it
+    and, during a rotation, with the key derived from
+    ``JWT_SECRET_KEY_PREVIOUS`` (audit A09: rotating the JWT secret never
+    makes the stored credentials unreadable; ``rotate`` re-encrypts them).
+
+    Returns:
+        A ``MultiFernet`` (same ``encrypt``/``decrypt`` API as ``Fernet``).
+    """
+    keys = [Fernet(_get_encryption_key())]
+    previous = getattr(settings, "JWT_SECRET_KEY_PREVIOUS", None)
+    if previous and previous != settings.JWT_SECRET_KEY:
+        keys.append(Fernet(_derive_fernet_key(previous)))
+    return MultiFernet(keys)
 
 
 # List of all credential keys that can be stored per-user
@@ -164,7 +189,7 @@ DOTENV_DENY_ENV_VAR = "RAGPY_DOTENV_DENY"
 # do not inherit them (JWT_SECRET_KEY also derives the Fernet key that decrypts
 # every stored user credential). They are only stripped from the inherited env:
 # RAGPY_DOTENV_DENY keeps its contract (mapped *_API_KEY names only).
-SERVER_SECRET_ENV_VARS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "RESEND_API_KEY")
+SERVER_SECRET_ENV_VARS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "JWT_SECRET_KEY_PREVIOUS", "RESEND_API_KEY")
 
 
 @functools.lru_cache(maxsize=16)

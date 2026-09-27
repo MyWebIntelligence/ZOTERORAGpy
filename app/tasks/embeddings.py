@@ -119,6 +119,7 @@ def dense_embedding_task(
         result = runner.run_script(
             cmd,
             env,
+            session_dir=output_dir,  # session lock (audit A12)
             on_progress=runner.make_progress_reporter(self, 'Generating embeddings'),
             timeout=runner.task_timeout(runner.DENSE_TIMEOUT, embedding_provider == runner.ALBERT_DB_CHOICE)
         )
@@ -220,6 +221,7 @@ def sparse_embedding_task(
         result = runner.run_script(
             cmd,
             env,
+            session_dir=output_dir,  # session lock (audit A12)
             on_progress=runner.make_progress_reporter(self, 'Generating sparse embeddings'),
             timeout=runner.SPARSE_TIMEOUT
         )

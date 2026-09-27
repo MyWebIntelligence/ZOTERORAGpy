@@ -11,11 +11,13 @@ Models:
 - `ProjectMember`: Many-to-many relationship for project collaboration.
 - `AuditLog`: System audit logging for security and tracking.
 - `BackgroundTask`: Long-running background task tracking.
+- `PipelineSession`, `SessionOwner`: Pipeline sessions and the uploader of sessions outside any project.
 """
 from app.models.user import User
 from app.models.project import Project, ProjectMember
 from app.models.audit import AuditLog
 from app.models.background_task import BackgroundTask, TaskStatus, TaskType
+from app.models.pipeline_session import PipelineSession, SessionOwner
 
 __all__ = [
     "User",
@@ -24,5 +26,7 @@ __all__ = [
     "AuditLog",
     "BackgroundTask",
     "TaskStatus",
-    "TaskType"
+    "TaskType",
+    "PipelineSession",
+    "SessionOwner"
 ]

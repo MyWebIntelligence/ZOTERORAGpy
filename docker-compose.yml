@@ -39,6 +39,11 @@ services:
     environment:
       - APP_URL=${APP_URL:-http://localhost:8000}
       - ENABLE_METRICS=${ENABLE_METRICS:-true}
+      # Même broker que le worker (réseau interne) : soumissions Celery et limiteur Albert
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      # Limiteur Albert partagé entre processus et conteneurs (audit A12) ; repli local si Redis tombe
+      - ALBERT_LIMITER_BACKEND=${ALBERT_LIMITER_BACKEND:-redis}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/detailed"]
       interval: 30s
@@ -100,8 +105,11 @@ services:
     image: redis:7-alpine
     container_name: ragpy-redis
     restart: unless-stopped
+    # Sans authentification : publié sur l'hôte en local seulement (audit A09).
+    # Les conteneurs passent par le réseau interne (redis://redis:6379).
+    # REDIS_BIND=0.0.0.0 ne doit servir qu'avec un pare-feu et un mot de passe.
     ports:
-      - "6379:6379"
+      - "${REDIS_BIND:-127.0.0.1}:6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -119,6 +127,8 @@ services:
         INSTALL_LOCAL_OCR: "${INSTALL_LOCAL_OCR:-false}"
     container_name: ragpy-celery-worker
     restart: unless-stopped
+    # Sans -Q : le worker consomme toutes les files de CELERY_QUEUES
+    # (task_queues de app/celery_app.py, audit A04).
     command: celery -A app.celery_app worker --loglevel=info --concurrency=4
     volumes:
       - ./data:/app/data
@@ -130,6 +140,7 @@ services:
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ALBERT_LIMITER_BACKEND=${ALBERT_LIMITER_BACKEND:-redis}
     depends_on:
       redis:
         condition: service_healthy
@@ -167,9 +178,13 @@ services:
       dockerfile: Dockerfile
     container_name: ragpy-flower
     restart: unless-stopped
-    command: celery -A app.celery_app flower --port=5555 --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
+    # Identifiants obligatoires (audit A09) : sans FLOWER_USER et FLOWER_PASSWORD
+    # (ou avec admin/admin, admin/changeme), Flower refuse de démarrer.
+    # Publié en local seulement (tunnel SSH ou proxy TLS) ; FLOWER_BIND pour exposer.
+    command: >-
+      sh -c 'if [ -z "$$FLOWER_USER" ] || [ -z "$$FLOWER_PASSWORD" ] || [ "$$FLOWER_PASSWORD" = "admin" ] || [ "$$FLOWER_PASSWORD" = "changeme" ]; then echo "Flower : definir FLOWER_USER et FLOWER_PASSWORD (non par defaut) dans .env" >&2; exit 1; fi; exec celery -A app.celery_app flower --port=5555 --basic_auth="$$FLOWER_USER:$$FLOWER_PASSWORD"'
     ports:
-      - "5555:5555"
+      - "${FLOWER_BIND:-127.0.0.1}:5555:5555"
     env_file:
       - .env
     environment:

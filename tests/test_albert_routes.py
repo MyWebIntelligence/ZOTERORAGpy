@@ -842,7 +842,7 @@ def test_upload_pop_json_albert_off_400(albert_env, monkeypatch):
 # Arrêt des scripts : authentification et propriété de la session (report W1)
 # ======================================================================
 def test_stop_all_scripts_requires_auth_and_session_access(albert_env, monkeypatch):
-    """``/stop_all_scripts`` : 401 sans jeton ; session enregistrée d'un projet étranger → 403."""
+    """``/stop_all_scripts`` : 401 sans jeton ; session d'un projet étranger, import d'autrui ou dossier sans propriétaire → 403."""
     env = albert_env
     stopped = []
 
@@ -866,10 +866,17 @@ def test_stop_all_scripts_requires_auth_and_session_access(albert_env, monkeypat
         assert resp.status_code == 200 and errors == [], persona
     assert stopped == ["gsess-full", "gsess-full"]
 
-    # Dossier non enregistré : comportement historique ; dossier absent : 404.
+    # Import hors projet : son auteur seul (audit A02) ; dossier sans propriétaire
+    # ni projet : administrateurs seuls ; dossier absent : 404 pour l'administrateur.
+    resp, errors = _post(env, "member_keys", "/stop_all_scripts", {"session": "gsess-fresh-member-keys"})
+    assert resp.status_code == 200 and stopped[-1] == "gsess-fresh-member-keys"
+    resp, errors = _post(env, "member_keys", "/stop_all_scripts", {"session": "gsess-fresh-member-nokeys"})
+    assert resp.status_code == 403 and stopped[-1] == "gsess-fresh-member-keys"
     resp, errors = _post(env, "member_keys", "/stop_all_scripts", {"session": "gsess-empty"})
+    assert resp.status_code == 403 and stopped[-1] == "gsess-fresh-member-keys"
+    resp, errors = _post(env, "admin", "/stop_all_scripts", {"session": "gsess-empty"})
     assert resp.status_code == 200 and stopped[-1] == "gsess-empty"
-    resp, errors = _post(env, "member_keys", "/stop_all_scripts", {"session": "gsess-missing"})
+    resp, errors = _post(env, "admin", "/stop_all_scripts", {"session": "gsess-missing"})
     assert resp.status_code == 404
     assert env.capture.take() == ([], [])
 

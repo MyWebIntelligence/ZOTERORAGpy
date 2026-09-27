@@ -790,9 +790,10 @@ def test_task_without_user_is_refused(world):
 
 
 def test_parse_vectordb_stdout_parity(world, monkeypatch):
-    # Same literal patterns as the /upload_db route parser.
+    # Same literal patterns as the /upload_db route parser (its body is
+    # ``_upload_db_impl`` since the route holds a job ticket, audit A12).
     route_patterns = set()
-    for node in ast.walk(_find_function(processing_routes.__file__, "upload_db")):
+    for node in ast.walk(_find_function(processing_routes.__file__, "_upload_db_impl")):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "search"
                 and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
             route_patterns.add(node.args[0].value)

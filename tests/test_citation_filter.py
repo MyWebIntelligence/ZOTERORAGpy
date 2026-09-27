@@ -479,7 +479,7 @@ class TestBuildFilterPrompt:
 class TestFilterCitationWithLLM:
     """Test suite for complete filtering workflow."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     @patch('app.utils.citation_filter._call_llm_api')
     @patch('app.utils.citation_filter.get_llm_semaphore')
     async def test_filter_returns_relevant_result(self, mock_semaphore, mock_llm):
@@ -529,7 +529,7 @@ class TestFilterCitationWithLLM:
         assert result["relevance_score"] == 90
         assert result["zotero_item"]["itemType"] == "journalArticle"
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     @patch('app.utils.citation_filter._call_llm_api')
     @patch('app.utils.citation_filter.get_llm_semaphore')
     async def test_filter_returns_na(self, mock_semaphore, mock_llm):
@@ -561,7 +561,7 @@ class TestFilterCitationWithLLM:
 
         assert result == "NA"
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     @patch('app.utils.citation_filter._call_llm_api')
     @patch('app.utils.citation_filter.get_llm_semaphore')
     async def test_filter_retries_on_failure(self, mock_semaphore, mock_llm):
@@ -594,7 +594,7 @@ class TestFilterCitationWithLLM:
         assert result == "NA"
         assert mock_llm.call_count == 2
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     @patch('app.utils.citation_filter._call_llm_api')
     @patch('app.utils.citation_filter.get_llm_semaphore')
     async def test_filter_fails_after_retries(self, mock_semaphore, mock_llm):

@@ -29,9 +29,19 @@ Idempotent : ré-exécuter ne change que ce qui doit l'être (vecteurs déjà ad
 contenu = simple ajout de ``content_hash`` si absent). Sûr : upsert du nouvel ID AVANT
 suppression de l'ancien (aucune fenêtre de perte).
 
+Identifiants (audit A05, 2026-09-27) : ``--id-scheme v2`` (défaut) re-clé vers l'id
+adressé par contenu **et par source** ``{hash[:16]}_s{source[:12]}``
+(``rad_dedup.source_content_id`` ; source = empreinte des ``DEDUP_META_FIELDS``,
+titre par défaut), sans la position : deux documents au même texte gardent deux
+vecteurs, un vecteur sans titre reste intact. Ré-exécuté sur un index déjà
+back-fillé en v1 (``{hash[:16]}_{chunk_index}``), l'outil **migre** ces ids vers v2.
+La migration est facultative : l'existence Tier 2 de la dédup interroge aussi l'id
+v1. ``--id-scheme v1`` garde l'ancien format.
+
 Usage :
     python3 scripts/backfill_pinecone_inplace.py --index articles --dry-run
     python3 scripts/backfill_pinecone_inplace.py --index articles --apply
+    python3 scripts/backfill_pinecone_inplace.py --index articles --id-scheme v1 --dry-run
 """
 
 from __future__ import annotations
@@ -71,10 +81,35 @@ def list_all_ids(index, namespace):
     return ids
 
 
-def scan(index, namespace, min_chars=DEFAULT_MIN_CHARS):
+def target_id_for(meta, chash, cidx, eligible, vid, id_scheme="v2", meta_fields=("title",)):
+    """Id cible d'un vecteur et son éligibilité selon le schéma d'identifiants.
+
+    Args:
+        meta: métadonnées du vecteur.
+        chash: ``content_hash`` du texte stocké.
+        cidx: ``chunk_index``.
+        eligible: éligibilité par la longueur du texte normalisé.
+        vid: id actuel du vecteur.
+        id_scheme: ``"v2"`` (contenu + source) ou ``"v1"`` (contenu + index).
+        meta_fields: champs de source (``DEDUP_META_FIELDS``).
+
+    Returns:
+        ``(target_id, eligible)`` : en v2, un vecteur sans source stable est
+        inéligible et garde son id.
+    """
+    if id_scheme == "v1":
+        return (rad_dedup.content_id(chash, cidx) if eligible else vid), eligible
+    skey = rad_dedup.source_key(dict(meta or {}), meta_fields)
+    eligible = eligible and bool(skey)
+    return (rad_dedup.source_content_id(chash, skey) if eligible else vid), eligible
+
+
+def scan(index, namespace, min_chars=DEFAULT_MIN_CHARS, id_scheme="v2"):
     """Pass 1 — récupère pour chaque vecteur : content_hash, éligibilité,
-    chunk_index, title, id cible. Construit la map des collisions (target_id →
-    titres distincts). Les values sont récupérées mais DISCARD (analyse seule)."""
+    chunk_index, title, id cible (``target_id_for``). Construit la map des
+    collisions (target_id → titres distincts). Les values sont récupérées mais
+    DISCARD (analyse seule)."""
+    meta_fields = rad_dedup.DedupConfig.from_env().meta_fields
     ids = list_all_ids(index, namespace)
     total = len(ids)
     print(f"  {total} ids listés. Récupération des métadonnées par lots de {FETCH_BATCH}…")
@@ -100,7 +135,7 @@ def scan(index, namespace, min_chars=DEFAULT_MIN_CHARS):
             if not norm:
                 n_no_text += 1
             has_ch = bool(meta.get("content_hash"))
-            target = rad_dedup.content_id(chash, cidx) if eligible else vid
+            target, eligible = target_id_for(meta, chash, cidx, eligible, vid, id_scheme, meta_fields)
             records.append({
                 "old_id": vid, "content_hash": chash, "eligible": eligible,
                 "chunk_index": cidx, "title": title, "target_id": target,
@@ -235,6 +270,8 @@ def main():
     p.add_argument("--index", required=True)
     p.add_argument("--namespace", default="")
     p.add_argument("--min-chars", type=int, default=DEFAULT_MIN_CHARS)
+    p.add_argument("--id-scheme", choices=("v2", "v1"), default="v2",
+                   help="v2 (défaut) : id contenu + source (migre les ids v1) ; v1 : contenu + index.")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--dry-run", action="store_true", help="Analyse seule (read-only), aucun écriture.")
     g.add_argument("--apply", action="store_true", help="Applique le plan (re-clé/supprime/patche). DESTRUCTIF.")
@@ -246,7 +283,7 @@ def main():
 
     print(f"=== Back-fill in-place : index '{args.index}', namespace '{args.namespace or '(default)'}' ===")
     t0 = time.time()
-    records, target_titles, n_no_text = scan(index, args.namespace, args.min_chars)
+    records, target_titles, n_no_text = scan(index, args.namespace, args.min_chars, args.id_scheme)
     actions = plan(records, target_titles)
     report(len(records), records, target_titles, actions, n_no_text)
     print(f"(scan {time.time() - t0:.0f}s)")

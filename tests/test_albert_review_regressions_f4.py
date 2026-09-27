@@ -67,11 +67,20 @@ from tests.test_albert_off_golden_routes import _golden_env_hygiene, golden_app 
 # ======================================================================
 DENIED_MESSAGE = "Accès non autorisé à cette session : elle appartient à un projet auquel vous n'avez pas accès."
 INVALID_PATH_MESSAGE = "Chemin de session invalide : le dossier doit se trouver sous uploads/."
+READ_ONLY_MESSAGE = (
+    "Accès en lecture seule à cette session : seuls le propriétaire et les collaborateurs "
+    "du projet peuvent la modifier ou arrêter ses traitements."
+)
+OWNER_DENIED_MESSAGE = "Accès non autorisé à cette session : elle appartient à un autre utilisateur."
+UNOWNED_MESSAGE = (
+    "Session sans propriétaire enregistré (import antérieur au contrôle d'accès, ou projet supprimé) : "
+    "réservée aux administrateurs. Importez de nouveau le fichier pour continuer."
+)
 REGISTERED = "gsess-full"          # session enregistrée du projet de member_nokeys
 FOREIGN_PERSONA = "member_keys"    # ni propriétaire ni membre de ce projet
 OWNER_PERSONA = "member_nokeys"
-UNREGISTERED_OWN = "gsess-fresh-member-keys"      # dossier sans PipelineSession
-UNREGISTERED_OTHER = "gsess-fresh-member-nokeys"  # idem, créé pour une autre persona
+UNREGISTERED_OWN = "gsess-fresh-member-keys"      # import hors projet de member_keys (SessionOwner)
+UNREGISTERED_OTHER = "gsess-fresh-member-nokeys"  # idem, import de member_nokeys
 OUTSIDE_DIR = "outside_dir"        # frère de uploads/ sous tmp_path
 
 # stage -> (nom du fichier écrit, nom du fichier envoyé, contenu envoyé)
@@ -182,13 +191,54 @@ def test_upload_stage_file_owner_and_admin_allowed(env, stage, persona):
     assert (env.uploads / REGISTERED / target).read_bytes() == content
 
 
-@pytest.mark.parametrize("folder", [UNREGISTERED_OWN, UNREGISTERED_OTHER])
-def test_upload_stage_file_unregistered_folder_keeps_behaviour(env, folder):
-    """Dossier sans ``PipelineSession`` (ancien flux) : comportement historique pour un utilisateur authentifié."""
+def test_upload_stage_file_own_upload_allowed(env):
+    """Import hors projet de l'utilisateur (``SessionOwner``) : 200, le fichier d'étape est remplacé."""
     target, _sent, content = STAGES["initial"]
-    resp = _upload_stage(env, "initial", folder, env.headers[FOREIGN_PERSONA])
+    resp = _upload_stage(env, "initial", UNREGISTERED_OWN, env.headers[FOREIGN_PERSONA])
     assert resp.status_code == 200
-    assert (env.uploads / folder / target).read_bytes() == content
+    assert (env.uploads / UNREGISTERED_OWN / target).read_bytes() == content
+
+
+def test_upload_stage_file_refuses_another_users_upload(env):
+    """Import hors projet d'un autre utilisateur : 403 (audit A02), rien n'est écrit."""
+    before = _snapshot(env.uploads)
+    resp = _upload_stage(env, "initial", UNREGISTERED_OTHER, env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 403
+    assert resp.json() == {"error": OWNER_DENIED_MESSAGE}
+    assert _snapshot(env.uploads) == before
+
+
+def test_upload_stage_file_refuses_unowned_legacy_folder(env):
+    """Dossier sans aucune ligne (import antérieur au contrôle) : 403 pour un non-admin, 200 pour l'administrateur."""
+    before = _snapshot(env.uploads)
+    resp = _upload_stage(env, "initial", "gsess-empty", env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 403
+    assert resp.json() == {"error": UNOWNED_MESSAGE}
+    assert _snapshot(env.uploads) == before
+    resp = _upload_stage(env, "initial", "gsess-empty", env.headers["admin"])
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("stage", STAGE_IDS)
+def test_upload_stage_file_refuses_read_only_member(env, stage):
+    """Lecteur (``viewer``) du projet : 403 lecture seule, le fichier d'étape n'est pas remplacé."""
+    _add_project_member(env, FOREIGN_PERSONA, ProjectRole.VIEWER.value)
+    before = _snapshot(env.uploads)
+    resp = _upload_stage(env, stage, REGISTERED, env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 403
+    assert resp.json() == {"error": READ_ONLY_MESSAGE}
+    assert _snapshot(env.uploads) == before
+
+
+def test_upload_stage_file_too_large_keeps_previous_artifact(env, monkeypatch):
+    """Au-delà de ``UPLOAD_MAX_MB`` : 413 et l'artefact précédent reste intact (remplacement atomique)."""
+    monkeypatch.setenv("UPLOAD_MAX_MB", "0.00001")  # ~10 octets
+    target = env.uploads / REGISTERED / "output.csv"
+    before = target.read_bytes()
+    resp = _upload_stage(env, "initial", REGISTERED, env.headers[OWNER_PERSONA])
+    assert resp.status_code == 413
+    assert target.read_bytes() == before
+    assert not [name for name in os.listdir(env.uploads / REGISTERED) if name.endswith(".upload")]
 
 
 @pytest.mark.parametrize("persona", ["admin", FOREIGN_PERSONA])
@@ -490,3 +540,157 @@ def test_index_page_uploads_rely_on_the_cookie():
     assert "fetch('/upload_csv', { method: 'POST', body: formData });" in source
     assert "(json.error || res.statusText)" in source
     assert "credentials: 'omit'" not in source
+
+
+# ======================================================================
+# Audit A01 (2026-09-27) : noms de stockage générés côté serveur
+# ======================================================================
+def _hostile_names(env):
+    """Noms de fichier hostiles visant un marqueur ``.csv`` voisin de ``uploads/`` (noms bruts du client)."""
+    marker = env.uploads.parent / OUTSIDE_DIR / "marker.csv"
+    return {
+        "absolute_posix": str(marker),
+        "parent_posix": f"../{OUTSIDE_DIR}/marker.csv",
+        "deep_parent_posix": f"x/../../{OUTSIDE_DIR}/marker.csv",
+        "parent_windows": f"..\\{OUTSIDE_DIR}\\marker.csv",
+        "absolute_windows": f"C:\\{OUTSIDE_DIR}\\marker.csv",
+        "empty_stem": "   .csv",
+        "dot_dot": "../.. .csv",
+    }
+
+
+HOSTILE_KINDS = ["absolute_posix", "parent_posix", "deep_parent_posix", "parent_windows", "absolute_windows",
+                 "empty_stem", "dot_dot"]
+
+
+def _outside_state(env):
+    """Empreintes des fichiers voisins de ``uploads/`` (tout ce qui n'est pas sous ``uploads/``)."""
+    return _snapshot(env.uploads.parent / OUTSIDE_DIR)
+
+
+@pytest.mark.parametrize("parses", [True, False], ids=["parse_ok", "parse_fails"])
+@pytest.mark.parametrize("kind", HOSTILE_KINDS)
+def test_upload_csv_hostile_names_never_write_outside(env, kind, parses):
+    """CSV au nom absolu, ``..``, séparateurs POSIX/Windows, nom vide : rien n'est créé, écrasé ni supprimé hors du dossier.
+
+    Le marqueur extérieur survit intact, que l'ingestion réussisse (200, dossier
+    ``<8 hex>_<stem sûr>`` sous ``uploads/``) ou échoue (500, dossier retiré).
+    """
+    marker = env.uploads.parent / OUTSIDE_DIR / "marker.csv"
+    marker.write_bytes(b"title,text\nOriginal,untouched marker\n")
+    before_outside = _outside_state(env)
+    before_uploads = set(os.listdir(env.uploads))
+    content = b"title,text\nDoc A,some text content\n" if parses else b"nothing,useful\n1,2\n"
+    resp = env.client.post(
+        "/upload_csv", files={"file": (_hostile_names(env)[kind], content, "text/csv")},
+        headers=env.headers[FOREIGN_PERSONA],
+    )
+    assert _outside_state(env) == before_outside
+    assert marker.read_bytes() == b"title,text\nOriginal,untouched marker\n"
+    if parses:
+        assert resp.status_code == 200, resp.text[:300]
+        path = resp.json()["path"]
+        assert os.sep not in path and "\\" not in path and ".." not in path.split("_", 1)[1].split(os.sep)
+        assert (env.uploads / path / "output.csv").is_file()
+        assert not (env.uploads / path / "_source_upload.csv").exists()
+    else:
+        assert resp.status_code == 500
+        assert set(os.listdir(env.uploads)) == before_uploads
+
+
+@pytest.mark.parametrize("kind", HOSTILE_KINDS)
+def test_upload_zip_hostile_names_never_write_outside(env, kind):
+    """Archive au nom hostile : dossier et archive nommés par le serveur sous ``uploads/``, rien hors du dossier."""
+    before_outside = _outside_state(env)
+    name = _hostile_names(env)[kind][:-4] + ".zip"
+    payload = _zip_bytes([("biblio/biblio.json", b"[]")])
+    resp = env.client.post("/upload_zip", files={"file": (name, payload, "application/zip")},
+                           headers=env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 200, resp.text[:300]
+    assert _outside_state(env) == before_outside
+    path = resp.json()["path"]
+    assert (env.uploads / path).is_dir()
+    assert os.path.realpath(env.uploads / path).startswith(os.path.realpath(env.uploads) + os.sep)
+
+
+@pytest.mark.parametrize("name", [".csv", "...csv", "/", "..\\"])
+def test_upload_csv_names_without_extension_are_refused(env, name):
+    """Nom sans extension ``.csv`` une fois réduit à son dernier composant : 400, rien n'est écrit."""
+    before = set(os.listdir(env.uploads))
+    resp = env.client.post("/upload_csv", files={"file": (name, b"title,text\nA,b c d\n", "text/csv")},
+                           headers=env.headers[FOREIGN_PERSONA])
+    assert resp.status_code in (400, 422)
+    assert set(os.listdir(env.uploads)) == before
+
+
+@pytest.mark.parametrize("route", UPLOAD_ROUTES)
+def test_upload_without_project_records_the_uploader(env, route):
+    """Sans ``project_id`` : l'auteur est enregistré (``SessionOwner``) sur le dossier renvoyé."""
+    from app.models.pipeline_session import SessionOwner
+
+    resp = _upload(env, route, None, env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 200
+    body = resp.json()
+    env.db.expire_all()
+    row = env.db.query(SessionOwner).filter(SessionOwner.session_folder == body["path"]).one()
+    assert row.user_id == env.user_ids[FOREIGN_PERSONA]
+    assert row.source_type == UPLOAD_PAYLOADS[route][3]
+    # Le dossier est ensuite réservé à son auteur (et aux administrateurs).
+    other = _upload_stage(env, "initial", body["path"], env.headers[OWNER_PERSONA])
+    assert other.status_code == 403 and other.json() == {"error": OWNER_DENIED_MESSAGE}
+
+
+@pytest.mark.parametrize("with_project", [False, True])
+@pytest.mark.parametrize("route", UPLOAD_ROUTES)
+def test_upload_owner_record_failure_removes_the_upload(env, route, with_project, monkeypatch):
+    """Échec d'enregistrement du propriétaire (base) : 500 et aucun dossier ni archive laissé sur disque."""
+    before = set(os.listdir(env.uploads))
+
+    def _boom(*_args, **_kwargs):
+        """Simule une base indisponible."""
+        raise RuntimeError("database unavailable")
+
+    if with_project:
+        monkeypatch.setattr(ingestion_routes, "PipelineSession", _boom)
+        project_id, persona = env.project_id, OWNER_PERSONA
+    else:
+        monkeypatch.setattr(ingestion_routes, "record_session_owner", _boom)
+        project_id, persona = None, FOREIGN_PERSONA
+    resp = _upload(env, route, project_id, env.headers[persona])
+    assert resp.status_code == 500
+    assert set(os.listdir(env.uploads)) == before
+
+
+def test_upload_csv_too_large_is_refused(env, monkeypatch):
+    """Au-delà de ``UPLOAD_MAX_MB`` : 413, rien n'est laissé sous ``uploads/``."""
+    monkeypatch.setenv("UPLOAD_MAX_MB", "0.00001")  # ~10 octets
+    before = set(os.listdir(env.uploads))
+    resp = _upload(env, "/upload_csv", None, env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 413
+    assert set(os.listdir(env.uploads)) == before
+
+
+@pytest.mark.parametrize("limit_env, value", [("UPLOAD_MAX_UNZIPPED_MB", "0.00001"), ("UPLOAD_MAX_ZIP_ENTRIES", "1")])
+def test_upload_zip_archive_limits(env, monkeypatch, limit_env, value):
+    """Archive trop volumineuse une fois décompressée ou trop de membres : 413, rien n'est laissé."""
+    monkeypatch.setenv(limit_env, value)
+    before = set(os.listdir(env.uploads))
+    payload = _zip_bytes([("biblio/biblio.json", b"[" + b" " * 4096 + b"]"), ("biblio/other.txt", b"x")])
+    resp = env.client.post("/upload_zip", files={"file": ("biblio.zip", payload, "application/zip")},
+                           headers=env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 413
+    assert set(os.listdir(env.uploads)) == before
+
+
+def test_project_upload_csv_hostile_name_stays_inside(env):
+    """Route ``/api/pipeline/projects/{id}/upload_csv`` : même confinement du nom (A01)."""
+    marker = env.uploads.parent / OUTSIDE_DIR / "marker.csv"
+    marker.write_bytes(b"title,text\nOriginal,untouched\n")
+    before_outside = _outside_state(env)
+    resp = env.client.post(
+        f"/api/pipeline/projects/{env.project_id}/upload_csv",
+        files={"file": (str(marker), b"nothing,useful\n1,2\n", "text/csv")},
+        headers=env.headers[OWNER_PERSONA],
+    )
+    assert resp.status_code == 500
+    assert _outside_state(env) == before_outside

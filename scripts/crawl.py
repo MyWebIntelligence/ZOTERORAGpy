@@ -105,7 +105,7 @@ def crawl(url):
 
     try:
         response = requests.get(url)
-        if response.status_code != 200
+        if response.status_code != 200:
             print(f"⚠️ Page inaccessible : {url}")
             return
 

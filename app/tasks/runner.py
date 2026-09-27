@@ -765,7 +765,67 @@ def _restore_revoke_handler(previous: Any) -> None:
         pass
 
 
+def session_lock_key(session_dir: str) -> str:
+    """Canonical key of a session directory for ``job_control`` (same key as the web routes).
+
+    Args:
+        session_dir: Absolute session directory of a task.
+
+    Returns:
+        The folder relative to ``UPLOAD_DIR`` as listed on disk, or the
+        resolved path when it is outside ``UPLOAD_DIR``.
+    """
+    from app.core.config import UPLOAD_DIR
+    from app.core.session_access import canonical_session_folder
+
+    resolved = os.path.realpath(session_dir)
+    return canonical_session_folder(resolved, UPLOAD_DIR) or resolved
+
+
 def run_script(
+    cmd: Sequence[str],
+    env: Optional[Dict[str, str]],
+    *,
+    session_dir: Optional[str] = None,
+    **kwargs: Any,
+) -> ScriptResult:
+    """Run a pipeline script, holding the pipeline lock of its session (audit A12).
+
+    With ``session_dir``, the task takes the same lock as the web routes
+    (``job_control``, group ``pipeline``) for the whole run: a web stage or
+    another task already working on the session makes the task fail at once
+    (``ScriptFailedError``, never retried) instead of writing the same files.
+    Every other argument goes to ``_run_script_unlocked``.
+
+    Args:
+        cmd: argv of the script.
+        env: Subprocess environment (``build_task_env``).
+        session_dir: Session directory whose lock is held, or None.
+        **kwargs: ``on_progress``, ``timeout``, ``poll_interval``,
+            ``kill_grace``, ``handle_sigterm``.
+
+    Returns:
+        ``ScriptResult(returncode, stdout, stderr)``.
+
+    Raises:
+        ScriptFailedError: The session is busy (or the script could not be launched).
+    """
+    if session_dir is None:
+        return _run_script_unlocked(cmd, env, **kwargs)
+    from app.services import job_control
+
+    ticket, busy = job_control.acquire_job(
+        session_lock_key(session_dir), job_control.GROUP_PIPELINE, None, admission=False
+    )
+    if busy is not None:
+        raise ScriptFailedError(busy[1])
+    try:
+        return _run_script_unlocked(cmd, env, **kwargs)
+    finally:
+        ticket.release()
+
+
+def _run_script_unlocked(
     cmd: Sequence[str],
     env: Optional[Dict[str, str]],
     *,

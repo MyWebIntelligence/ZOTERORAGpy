@@ -8,9 +8,11 @@ import dataclasses
 import importlib
 import pandas as pd
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from tqdm import tqdm
-from openai import OpenAI, RateLimitError
+from openai import (
+    AuthenticationError, NotFoundError, OpenAI, PermissionDeniedError, RateLimitError,
+)
 import spacy
 from collections import Counter
 import subprocess # Added for spacy download subprocess
@@ -56,12 +58,20 @@ try:
     from scripts.rad_providers import (
         ALBERT_PREFIX, PROVIDER_ALBERT, PROVIDER_OPENROUTER,
         EmbeddingConfig, legacy_cache_provider_label, legacy_provider, resolve_llm_provider,
+        valid_dense_vector,
     )
 except ImportError:
     from rad_providers import (
         ALBERT_PREFIX, PROVIDER_ALBERT, PROVIDER_OPENROUTER,
         EmbeddingConfig, legacy_cache_provider_label, legacy_provider, resolve_llm_provider,
+        valid_dense_vector,
     )
+
+# Encodage sparse stable et versionné (audit A06), partagé avec les consommateurs.
+try:
+    from scripts import rad_sparse
+except ImportError:
+    import rad_sparse
 
 # Socle Albert (DINUM) : à l'import, seul le paquet léger (``config`` et
 # ``errors``, stdlib) est chargé, depuis une SEULE racine (``scripts.rad_albert``
@@ -154,6 +164,8 @@ DEFAULT_MAX_WORKERS = get_env_int('DEFAULT_MAX_WORKERS', max(1, _cpu_count - 1))
 DEFAULT_BATCH_SIZE_GPT = get_env_int('DEFAULT_BATCH_SIZE_GPT', 5)
 DEFAULT_EMBEDDING_BATCH_SIZE = get_env_int('DEFAULT_EMBEDDING_BATCH_SIZE', 32)
 DEFAULT_DOC_WORKERS = get_env_int('DEFAULT_DOC_WORKERS', 3)
+# Lots d'embeddings en vol par worker (fenêtre bornée de futures, audit A10).
+EMBEDDING_FUTURES_PER_WORKER = get_env_int('EMBEDDING_FUTURES_PER_WORKER', 4)
 DEFAULT_INPUT_JSON_WITH_EMBEDDINGS = "df_chunks_with_embeddings.json"
 DEFAULT_OUTPUT_JSON_SPARSE = "df_chunks_with_embeddings_sparse.json"
 
@@ -1111,7 +1123,134 @@ def recode_batch_cached(raw_batch, instructions, model, models_out=None):
 
     return texts, statuses
 
-def save_raw_chunks_to_json_incrementally(chunks_to_add, json_file):
+# ----------------------------------------------------------------------
+# Checkpoints JSON (audit A10) : accumulateur en mémoire, écriture atomique
+# ----------------------------------------------------------------------
+# Délai minimal entre deux écritures du fichier de chunks pendant un lot de
+# documents (process_all_documents) ; 0 = écriture à chaque document.
+def _env_seconds(key, default):
+    """Durée en secondes lue dans l'environnement ; valeur absente, invalide ou négative → ``default``."""
+    raw = os.getenv(key, "")
+    try:
+        value = float(raw) if raw.strip() else float(default)
+    except ValueError:
+        return float(default)
+    return value if value >= 0 else float(default)
+
+
+CHUNK_CHECKPOINT_SECONDS = _env_seconds("CHUNK_CHECKPOINT_SECONDS", 30)
+# État par fichier : chunks accumulés, ids vus (dédup), écriture en attente.
+_CHUNK_ACCUMULATORS = {}
+
+
+class _ChunkAccumulator:
+    """Chunks d'un fichier de sortie de la phase initiale, tenus en mémoire.
+
+    Le fichier existant n'est lu qu'une fois (premier ajout) ; chaque ajout
+    coûte ensuite la taille des nouveaux chunks, et l'écriture complète n'a lieu
+    qu'aux points de contrôle : coût total linéaire au lieu de quadratique.
+    """
+
+    def __init__(self, json_file):
+        """Charge le contenu valide de ``json_file`` (conservé à part s'il est illisible)."""
+        self.json_file = json_file
+        self.chunks = _load_existing_chunks(json_file)
+        self.seen_ids = set()
+        self.dirty = False
+        self.last_write = None  # jamais écrit dans ce processus
+        if rad_dedup.DedupConfig.from_env().enabled:
+            for chunk in self.chunks:
+                cid = chunk.get("id") if isinstance(chunk, dict) else None
+                if cid is not None:
+                    self.seen_ids.add(cid)
+
+    def add(self, chunks_to_add):
+        """Ajoute des chunks ; dédup par ``id`` quand ``DEDUP_ENABLED`` (1re occurrence gagne)."""
+        if rad_dedup.DedupConfig.from_env().enabled:
+            for chunk in chunks_to_add:
+                cid = chunk.get("id")
+                # 1re occurrence gagne (existing avant nouveaux) ; idempotent au ré-ingest.
+                if cid is not None and cid in self.seen_ids:
+                    continue
+                if cid is not None:
+                    self.seen_ids.add(cid)
+                self.chunks.append(chunk)
+        else:
+            self.chunks.extend(chunks_to_add)
+        self.dirty = True
+
+    def due(self):
+        """Vrai si un point de contrôle est dû (jamais écrit, ou délai écoulé)."""
+        if self.last_write is None:
+            return True
+        return (time.monotonic() - self.last_write) >= CHUNK_CHECKPOINT_SECONDS
+
+    def write(self):
+        """Écrit tous les chunks, atomiquement, si des ajouts sont en attente."""
+        if not self.dirty:
+            return
+        write_json_atomic(self.chunks, self.json_file)
+        self.dirty = False
+        self.last_write = time.monotonic()
+
+
+def write_json_atomic(data, json_file):
+    """Écrit ``data`` en JSON (``ensure_ascii=False``, ``indent=2``) de façon atomique.
+
+    Fichier temporaire du même dossier, vidé sur disque, puis ``os.replace`` :
+    une interruption laisse l'ancien fichier intact, jamais un fichier tronqué.
+    Octets identiques à l'écriture directe historique.
+
+    Args:
+        data: objet sérialisable.
+        json_file: chemin du fichier cible.
+    """
+    directory = os.path.dirname(os.path.abspath(json_file))
+    temporary = os.path.join(directory, f".{os.path.basename(json_file)}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(temporary, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, json_file)
+    finally:
+        if os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+
+
+def _load_existing_chunks(json_file):
+    """Chunks déjà présents dans ``json_file`` (liste vide si absent).
+
+    Un fichier illisible (JSON invalide, ou autre chose qu'une liste) n'est plus
+    écrasé en silence : il est renommé ``<fichier>.corrupt-<horodatage>`` et un
+    avertissement le signale, puis la phase repart d'une liste vide.
+    """
+    if not os.path.exists(json_file):
+        return []
+    try:
+        with open(json_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+        reason = "le contenu n'est pas une liste"
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        reason = f"JSON invalide ({exc})"
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = f"{json_file}.corrupt-{stamp}"
+    try:
+        os.replace(json_file, backup)
+        print(f"Avertissement : fichier JSON '{json_file}' illisible ({reason}) ; conservé sous '{backup}'. "
+              f"On repart d'une liste vide.")
+    except OSError as exc:
+        print(f"Avertissement : fichier JSON '{json_file}' illisible ({reason}) et non renommé ({exc}). "
+              f"On repart d'une liste vide.")
+    return []
+
+
+def save_raw_chunks_to_json_incrementally(chunks_to_add, json_file, flush=True):
     """
     Sauvegarde les nouveaux chunks dans `json_file` de manière incrémentale et thread-safe.
 
@@ -1120,35 +1259,53 @@ def save_raw_chunks_to_json_incrementally(chunks_to_add, json_file):
     ré-ingéré ne s'empile plus (idempotence cross-run/cross-session). Les chunks
     inéligibles (ids aléatoires uniques) ne collisionnent jamais → tous conservés.
     Quand OFF : concaténation simple, sortie **byte-identique** à avant.
+
+    Audit A10 : les chunks sont accumulés en mémoire (le fichier existant n'est lu
+    qu'une fois par processus) et le fichier est réécrit **atomiquement**.
+    ``flush=True`` (défaut, appel direct) relit le fichier et l'écrit tout de
+    suite, comme avant ; ``flush=False`` (lot de ``process_all_documents``)
+    garde l'accumulateur en mémoire et n'écrit qu'aux points de contrôle
+    (``CHUNK_CHECKPOINT_SECONDS``), la dernière écriture étant faite par
+    ``flush_chunk_checkpoint``.
+
+    Args:
+        chunks_to_add: chunks du document traité.
+        json_file: fichier de sortie de la phase initiale.
+        flush: écrire immédiatement (sinon, seulement si un point de contrôle est dû).
     """
+    key = os.path.abspath(json_file)
     with SAVE_LOCK:
-        existing_chunks = []
-        if os.path.exists(json_file):
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    existing_chunks = json.load(f)
-            except json.JSONDecodeError:
-                print(f"Fichier JSON '{json_file}' corrompu ou vide. On repart d'une liste vide.")
-                existing_chunks = []
+        accumulator = _CHUNK_ACCUMULATORS.get(key)
+        if accumulator is None:
+            accumulator = _ChunkAccumulator(json_file)
+            if not flush:
+                # Lot en cours : l'accumulateur vit jusqu'à flush_chunk_checkpoint.
+                _CHUNK_ACCUMULATORS[key] = accumulator
+        accumulator.add(chunks_to_add)
+        if flush or accumulator.due():
+            accumulator.write()
 
-        if rad_dedup.DedupConfig.from_env().enabled:
-            merged_chunks = []
-            seen_ids = set()
-            for chunk in existing_chunks + chunks_to_add:
-                cid = chunk.get("id")
-                # 1re occurrence gagne (existing avant nouveaux) ; idempotent au ré-ingest.
-                if cid is not None and cid in seen_ids:
-                    continue
-                if cid is not None:
-                    seen_ids.add(cid)
-                merged_chunks.append(chunk)
-        else:
-            merged_chunks = existing_chunks + chunks_to_add
 
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(merged_chunks, f, ensure_ascii=False, indent=2)
+def flush_chunk_checkpoint(json_file):
+    """Écrit les chunks en attente de ``json_file`` et libère son accumulateur.
 
-def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-mini"):
+    Args:
+        json_file: fichier de sortie de la phase initiale.
+    """
+    key = os.path.abspath(json_file)
+    with SAVE_LOCK:
+        accumulator = _CHUNK_ACCUMULATORS.pop(key, None)
+        if accumulator is not None:
+            accumulator.write()
+
+
+def _forget_chunk_accumulator(json_file):
+    """Oublie l'accumulateur de ``json_file`` sans écrire (le fichier sur disque fait foi)."""
+    with SAVE_LOCK:
+        _CHUNK_ACCUMULATORS.pop(os.path.abspath(json_file), None)
+
+
+def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-mini", flush=True):
     """
     Traite un document (représenté par row_data, ex: une ligne de DataFrame).
     1. Extraction et nettoyage du texte (implicite par TEXT_SPLITTER)
@@ -1156,8 +1313,15 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model=
     3. Recodage par batch avec gpt_recode_batch
     4. Sauvegarde des chunks avec save_raw_chunks_to_json_incrementally
 
+    Avec ``DEDUP_ENABLED`` (audit A05), l'id d'un chunk éligible est l'id v2
+    adressé par contenu **et par source** (``rad_dedup.source_key`` des
+    ``DEDUP_META_FIELDS`` du document) ; sans source stable (titre vide…), le
+    chunk est inéligible et garde son id aléatoire.
+
     Args:
         model: Modèle LLM pour le recodage (ex: "gpt-4o-mini" ou "google/gemini-2.5-flash")
+        flush: écrire le fichier tout de suite (appel direct) ; ``False`` dans un
+            lot (``process_all_documents``), qui écrit aux points de contrôle.
     """
     if TEXT_SPLITTER is None:
         print("Erreur: TEXT_SPLITTER n'est pas initialisé. Impossible de traiter le document.")
@@ -1272,7 +1436,8 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model=
             # Posé en DERNIER pour ne pas être écrasé par l'injection row_data.
             if dedup_cfg.enabled:
                 chash, eligible, cid = rad_dedup.compute_dedup_fields(
-                    raw_chunk_text, original_chunk_index, dedup_cfg.min_chars
+                    raw_chunk_text, original_chunk_index, dedup_cfg.min_chars,
+                    source=rad_dedup.source_key(chunk_metadata, dedup_cfg.meta_fields),
                 )
                 chunk_metadata["content_hash"] = chash
                 chunk_metadata["dedup_eligible"] = eligible
@@ -1299,7 +1464,7 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model=
             all_processed_chunks.append(chunk_metadata)
 
     if all_processed_chunks:
-        save_raw_chunks_to_json_incrementally(all_processed_chunks, json_file)
+        save_raw_chunks_to_json_incrementally(all_processed_chunks, json_file, flush=flush)
         print(f"→ {len(all_processed_chunks)} chunks traités et sauvegardés pour le document '{filename}' (doc_id={doc_id}) dans '{json_file}'.")
         # Ajout d'un log pour chaque chunk individuel ajouté (peut être verbeux)
         # for idx, chunk_data in enumerate(all_processed_chunks):
@@ -1325,30 +1490,36 @@ def process_all_documents(df, json_file=DEFAULT_JSON_FILE_CHUNKS, model="gpt-4o-
     # Emit init event for SSE progress tracking
     print(f"PROGRESS|init|{total_docs}|Found {total_docs} documents to chunk", flush=True)
 
-    with ThreadPoolExecutor(max_workers=num_doc_workers) as executor:
-        # df.iterrows() returns (index, Series)
-        futures = {
-            executor.submit(process_document_chunks, row_series, json_file, model): idx
-            for idx, row_series in df.iterrows()
-        }
+    # Lot : accumulateur en mémoire, écritures aux points de contrôle, dernière
+    # écriture garantie en fin de lot (audit A10).
+    _forget_chunk_accumulator(json_file)
+    try:
+        with ThreadPoolExecutor(max_workers=num_doc_workers) as executor:
+            # df.iterrows() returns (index, Series)
+            futures = {
+                executor.submit(process_document_chunks, row_series, json_file, model, False): idx
+                for idx, row_series in df.iterrows()
+            }
 
-        completed_count = 0
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Traitement des Documents (Chunking)"):
-            doc_idx = futures[future]
-            completed_count += 1
-            try:
-                result_chunks = future.result()
-                chunk_count = len(result_chunks) if result_chunks else 0
-                total_chunks_generated += chunk_count
-                # Emit row-level progress
-                print(f"PROGRESS|row|{completed_count}/{total_docs}|Document #{doc_idx}: {chunk_count} chunks", flush=True)
-                print(f"Document #{doc_idx} traité, {chunk_count} chunks produits.")
-            except Exception as e:
-                print(f"PROGRESS|row|{completed_count}/{total_docs}|Document #{doc_idx}: error", flush=True)
-                print(f"Erreur lors du traitement du document #{doc_idx}: {e}")
-                # Track error
-                if METRICS_AVAILABLE and track_error:
-                    track_error('chunking', type(e).__name__)
+            completed_count = 0
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Traitement des Documents (Chunking)"):
+                doc_idx = futures[future]
+                completed_count += 1
+                try:
+                    result_chunks = future.result()
+                    chunk_count = len(result_chunks) if result_chunks else 0
+                    total_chunks_generated += chunk_count
+                    # Emit row-level progress
+                    print(f"PROGRESS|row|{completed_count}/{total_docs}|Document #{doc_idx}: {chunk_count} chunks", flush=True)
+                    print(f"Document #{doc_idx} traité, {chunk_count} chunks produits.")
+                except Exception as e:
+                    print(f"PROGRESS|row|{completed_count}/{total_docs}|Document #{doc_idx}: error", flush=True)
+                    print(f"Erreur lors du traitement du document #{doc_idx}: {e}")
+                    # Track error
+                    if METRICS_AVAILABLE and track_error:
+                        track_error('chunking', type(e).__name__)
+    finally:
+        flush_chunk_checkpoint(json_file)
 
     # Record chunking metrics
     chunking_elapsed = time.time() - chunking_start_time
@@ -1534,16 +1705,11 @@ def _albert_set_embed_abort(exc):
 def _valid_space_vector(vec, space):
     """Vrai si ``vec`` est un vecteur exploitable de l'espace ``space``.
 
-    Liste de nombres de la dimension de l'espace, non entièrement nulle : un
-    vecteur nul ou de mauvaise dimension n'est jamais accepté hors espace par
-    défaut.
+    Liste de nombres finis de la dimension de l'espace, de norme non nulle
+    (``valid_dense_vector``) : un vecteur nul, NaN ou de mauvaise dimension
+    n'est jamais accepté.
     """
-    if not isinstance(vec, (list, tuple)) or len(vec) != space.dim:
-        return False
-    try:
-        return any(float(x) != 0.0 for x in vec)
-    except (TypeError, ValueError):
-        return False
+    return valid_dense_vector(vec, space.dim)
 
 
 def _is_blank_chunk_text(chunk):
@@ -1592,6 +1758,58 @@ def _albert_embed_batch(texts, space):
     return out
 
 
+# Erreurs OpenAI permanentes pour tout le run (clé refusée, droits, modèle absent) :
+# mémorisées une fois, les lots suivants ne font plus d'appel (audit A07).
+_OPENAI_PERMANENT_ERRORS = (AuthenticationError, PermissionDeniedError, NotFoundError)
+_OPENAI_EMBED_ABORT = None
+_OPENAI_EMBED_ABORT_LOCK = threading.Lock()
+
+
+def _openai_set_embed_abort(exc):
+    """Mémorise la première erreur OpenAI permanente du run (message une seule fois)."""
+    global _OPENAI_EMBED_ABORT
+    with _OPENAI_EMBED_ABORT_LOCK:
+        first = _OPENAI_EMBED_ABORT is None
+        if first:
+            _OPENAI_EMBED_ABORT = exc
+    if first:
+        print(f"OpenAI : embeddings arrêtés — erreur permanente ({type(exc).__name__}: {exc}). "
+              f"Lots restants sans vecteur, sans appel.")
+
+
+def reset_openai_embed_state():
+    """Oublie l'erreur permanente mémorisée (début d'une phase dense)."""
+    global _OPENAI_EMBED_ABORT
+    with _OPENAI_EMBED_ABORT_LOCK:
+        _OPENAI_EMBED_ABORT = None
+
+
+def _openai_vectors(response, count):
+    """Vecteurs d'une réponse ``embeddings.create``, index-alignés sur ``count`` textes.
+
+    Chaque élément est rangé à son ``index`` (position dans la réponse à
+    défaut) ; une réponse au mauvais nombre d'éléments ou un vecteur invalide
+    (``valid_dense_vector`` : nul, NaN, vide) donne ``None`` à cette place,
+    jamais un faux succès.
+    """
+    data = list(getattr(response, "data", None) or [])
+    if len(data) != count:
+        logging.error(f"Réponse d'embeddings OpenAI incohérente : {len(data)} vecteur(s) pour {count} texte(s).")
+    out = [None] * count
+    for position, item in enumerate(data):
+        index = getattr(item, "index", position)
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < count:
+            index = position
+        if index >= count or out[index] is not None:
+            continue
+        vec = getattr(item, "embedding", None)
+        out[index] = vec if valid_dense_vector(vec) else None
+    invalid = sum(1 for vec in out if vec is None)
+    if invalid:
+        logging.error(f"{invalid}/{count} embedding(s) OpenAI absent(s) ou invalide(s) dans la réponse.")
+    return out
+
+
 def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, max_retries=3, space=None):
     """
     Generate embeddings avec retry exponentiel et adaptive batching.
@@ -1600,7 +1818,13 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
     robuste des erreurs incluant:
     - Retry avec backoff exponentiel en cas de rate limit
     - Adaptive batching (split du batch si échecs répétés)
-    - Fallback individuel en cas d'erreur persistante
+    - Fallback individuel en cas d'erreur transitoire ou propre à un texte
+
+    Audit A07 : un échec ne produit **jamais** de vecteur nul. Un texte sans
+    vecteur exploitable reçoit ``None`` (réponse incomplète, vecteur nul ou NaN,
+    échec individuel) ; une erreur permanente (clé refusée, droits, modèle
+    introuvable) arrête le run sans appels individuels en cascade
+    (``_OPENAI_EMBED_ABORT``).
 
     Args:
         texts: Liste de textes pour lesquels générer les embeddings.
@@ -1608,18 +1832,21 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
         retry_count: Compteur de tentatives (usage interne pour récursion).
         max_retries: Nombre maximum de tentatives avant échec.
         space: espace d'embeddings. ``None`` ou espace par défaut : chemin OpenAI
-            historique, strictement inchangé. Espace Albert : ``AlbertClient.embed``
+            historique. Espace Albert : ``AlbertClient.embed``
             (``_albert_embed_batch``), ``None`` pour un texte vide ou en échec,
             jamais de vecteur nul ni d'appel OpenAI.
 
     Returns:
-        Liste d'embeddings (vecteurs) correspondant aux textes d'entrée.
-        En cas d'échec total, retourne des vecteurs nuls de dimension 3072
-        (chemin OpenAI seulement).
+        Liste de même longueur que ``texts`` : vecteurs ou ``None``.
+
+    Raises:
+        RateLimitError: Limite de débit toujours atteinte après ``max_retries``.
     """
     if space is not None and space.provider == PROVIDER_ALBERT:
         return _albert_embed_batch(texts, space)
     batch_size = len(texts)
+    if _OPENAI_EMBED_ABORT is not None:
+        return [None] * batch_size
 
     try:
         response = client.embeddings.create(
@@ -1627,7 +1854,7 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
             model=model,
             timeout=60.0  # Timeout explicite
         )
-        return [item.embedding for item in response.data]
+        return _openai_vectors(response, batch_size)
 
     except RateLimitError as e:
         if retry_count >= max_retries:
@@ -1651,24 +1878,30 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
         else:
             return get_embeddings_batch(texts, model, retry_count + 1, max_retries)
 
+    except _OPENAI_PERMANENT_ERRORS as e:
+        logging.error(f"Embedding error (batch {batch_size}), permanent: {type(e).__name__}: {e}")
+        _openai_set_embed_abort(e)
+        return [None] * batch_size
+
     except Exception as e:
         logging.error(f"Embedding error (batch {batch_size}): {e}")
-        # Fallback: process un par un
-        if batch_size > 1:
-            logging.info("Fallback: processing batch individually")
-            embeddings = []
-            for text in texts:
-                try:
-                    resp = client.embeddings.create(input=[text], model=model)
-                    embeddings.append(resp.data[0].embedding)
-                except Exception as e2:
-                    logging.error(f"Failed individual embedding: {e2}")
-                    embeddings.append([0.0] * 3072)  # Zero vector fallback
-            return embeddings
-        else:
-            # Single text failed, return zero vector
-            logging.error(f"Single embedding failed, returning zero vector")
-            return [[0.0] * 3072]
+        # Fallback: process un par un (erreur transitoire ou propre à un texte)
+        embeddings = []
+        for text in texts:
+            if _OPENAI_EMBED_ABORT is not None:
+                embeddings.append(None)
+                continue
+            try:
+                resp = client.embeddings.create(input=[text], model=model)
+                embeddings.append(_openai_vectors(resp, 1)[0])
+            except _OPENAI_PERMANENT_ERRORS as e2:
+                logging.error(f"Failed individual embedding, permanent: {type(e2).__name__}: {e2}")
+                _openai_set_embed_abort(e2)
+                embeddings.append(None)
+            except Exception as e2:
+                logging.error(f"Failed individual embedding: {e2}")
+                embeddings.append(None)  # jamais de vecteur nul
+        return embeddings
 
 def _embed_with_cache_space(texts, recode_cfg, space):
     """Cache de vecteurs denses d'un espace hors défaut (Albert bge-m3).
@@ -1714,6 +1947,8 @@ def _embed_with_cache(texts, recode_cfg, model="text-embedding-3-large", space=N
     """Lot 7.e — cache de vecteurs denses clé par sha256(texte recodé)·model·params.
     HIT → 0 appel embedding. Ferme l'axe vecteur (texte identique → vecteur
     byte-identique). MISS → appel groupé puis PUT. Advisory (erreur cache → recalcul).
+    Audit A07 : un HIT invalide (nul, NaN) est purgé et recalculé ; seuls les
+    vecteurs valides sont mis en cache.
 
     ``space`` hors défaut (Albert) : clé cloisonnée par ``_embed_with_cache_space`` ;
     ``None`` ou espace par défaut : clés et appels historiques inchangés.
@@ -1726,16 +1961,21 @@ def _embed_with_cache(texts, recode_cfg, model="text-embedding-3-large", space=N
     miss_idx = []
     for i, key in enumerate(keys):
         hit = rad_recode_cache.get_embed(recode_cfg, key) if key else None
-        if hit is not None:
+        if valid_dense_vector(hit):
             out[i] = hit
         else:
+            if hit is not None:
+                # Entrée invalide (ancien vecteur nul d'échec) : purgée puis recalculée.
+                rad_recode_cache.delete_embed(recode_cfg, key)
             miss_idx.append(i)
     if miss_idx:
         sub = get_embeddings_batch([texts[i] for i in miss_idx], model=model)
         for j, i in enumerate(miss_idx):
-            vec = sub[j]
+            vec = sub[j] if j < len(sub) else None
+            if not valid_dense_vector(vec):
+                continue  # jamais mis en cache ni écrit comme succès
             out[i] = vec
-            if vec is not None and keys[i]:
+            if keys[i]:
                 rad_recode_cache.put_embed(recode_cfg, keys[i], vec)
     return out
 
@@ -1758,9 +1998,7 @@ def _apply_space_fields(chunk, space):
 
 
 def _failed_batch_embedding(space):
-    """Vecteur d'un lot en échec : zéros à 3072 pour OpenAI (historique), ``None`` sinon."""
-    if space is None or space.is_default:
-        return [0.0] * 3072
+    """Vecteur d'un lot en échec : toujours ``None`` (audit A07 : plus de vecteur nul OpenAI)."""
     return None
 
 
@@ -1769,7 +2007,8 @@ def process_chunks_for_embedding(chunks_batch, space=None):
     Traite un lot de chunks pour y ajouter les embeddings denses.
     Modifie les dictionnaires de chunks en place.
 
-    ``space`` ``None`` (ou espace par défaut) : chemin OpenAI historique inchangé.
+    ``space`` ``None`` (ou espace par défaut) : chemin OpenAI ; un texte vide
+    n'est pas envoyé et tout vecteur invalide devient ``None`` (audit A07).
     Espace hors défaut (Albert) : vecteurs de cet espace (``None`` si absent) et
     champs d'espace écrits sur chaque chunk du lot.
     """
@@ -1780,10 +2019,21 @@ def process_chunks_for_embedding(chunks_batch, space=None):
             embeddings = _embed_with_cache(texts_to_embed, recode_cfg, model=space.model, space=space)
         else:
             embeddings = get_embeddings_batch(texts_to_embed, model=space.model, space=space)
-    elif recode_cfg.embed_cache_enabled:
-        embeddings = _embed_with_cache(texts_to_embed, recode_cfg)
     else:
-        embeddings = get_embeddings_batch(texts_to_embed)
+        # OpenAI : un texte vide ou blanc n'est jamais envoyé (refus 400 de l'API),
+        # son chunk reste sans vecteur, comme sur le chemin Albert.
+        positions = [i for i, text in enumerate(texts_to_embed) if isinstance(text, str) and text.strip()]
+        sent = [texts_to_embed[i] for i in positions]
+        if not sent:
+            results = []
+        elif recode_cfg.embed_cache_enabled:
+            results = _embed_with_cache(sent, recode_cfg)
+        else:
+            results = get_embeddings_batch(sent)
+        embeddings = [None] * len(texts_to_embed)
+        for j, i in enumerate(positions):
+            vec = results[j] if j < len(results) else None
+            embeddings[i] = vec if valid_dense_vector(vec) else None
 
     for i, embedding in enumerate(embeddings):
         if embedding is not None:
@@ -1798,9 +2048,11 @@ def process_chunks_for_embedding(chunks_batch, space=None):
 def save_processed_chunks_to_json_overwrite(all_chunks, json_file):
     """
     Sauvegarde la liste complète des chunks (avec embeddings) dans un fichier JSON, en écrasant le contenu existant.
+
+    Écriture atomique (``write_json_atomic``) : une interruption laisse l'ancien
+    fichier intact (audit A10).
     """
-    with open(json_file, 'w', encoding='utf-8') as f:
-        json.dump(all_chunks, f, ensure_ascii=False, indent=2)
+    write_json_atomic(all_chunks, json_file)
     print(f"Tous les chunks ({len(all_chunks)}) ont été sauvegardés dans {json_file}")
 
 def generate_and_save_embeddings(input_json_file, output_json_file=None):
@@ -1854,6 +2106,7 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
         return None
 
     albert_cfg = _start_albert_embeddings(space) if use_albert else None
+    reset_openai_embed_state()
 
     with open(input_json_file, 'r', encoding='utf-8') as f:
         all_chunks_from_file = json.load(f)
@@ -1885,7 +2138,8 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
 
     # Monitoring variables
     batch_start = time.time()
-    embeddings_generated = 0
+    embeddings_processed = 0   # chunks traités (progression)
+    embeddings_generated = 0   # vecteurs exploitables obtenus (audit A07 : seuls les vrais succès)
     rate_limit_hits = 0
     results = [None] * total_batches  # Pre-allocate results array
 
@@ -1896,47 +2150,70 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
         max_embedding_workers = min(DEFAULT_MAX_WORKERS, 4)
     logging.info(f"Using {max_embedding_workers} workers for embedding generation")
 
+    def _valid_for_run(vec):
+        """Vecteur exploitable dans l'espace du run (dimension contrôlée hors défaut)."""
+        return _valid_space_vector(vec, space) if use_albert else valid_dense_vector(vec)
+
+    # Fenêtre bornée de lots en vol (audit A10) : les futures ne sont plus
+    # soumises d'un coup pour tout le corpus.
+    max_in_flight = max(1, max_embedding_workers * EMBEDDING_FUTURES_PER_WORKER)
+    pending_batches = iter(enumerate(all_batches))
+    futures = {}
+
     with ThreadPoolExecutor(max_workers=max_embedding_workers) as executor:
-        if use_albert:
-            futures = {
-                executor.submit(process_chunks_for_embedding, batch, space): batch_idx
-                for batch_idx, batch in enumerate(all_batches)
-            }
-        else:
-            futures = {
-                executor.submit(process_chunks_for_embedding, batch): batch_idx
-                for batch_idx, batch in enumerate(all_batches)
-            }
-
-        for future in tqdm(as_completed(futures), total=total_batches, desc="Generating embeddings"):
-            batch_idx = futures[future]
+        def _submit_next():
+            """Soumet le lot suivant ; faux quand il n'en reste plus."""
             try:
-                batch_embeddings = future.result()
-                results[batch_idx] = batch_embeddings
-                embeddings_generated += len(batch_embeddings)
+                next_idx, next_batch = next(pending_batches)
+            except StopIteration:
+                return False
+            if use_albert:
+                futures[executor.submit(process_chunks_for_embedding, next_batch, space)] = next_idx
+            else:
+                futures[executor.submit(process_chunks_for_embedding, next_batch)] = next_idx
+            return True
 
-                # Emit chunk-level progress
-                print(f"PROGRESS|chunk|{embeddings_generated}/{total_chunks}|Chunk {embeddings_generated}/{total_chunks}", flush=True)
+        for _ in range(max_in_flight):
+            if not _submit_next():
+                break
 
-            except RateLimitError:
-                rate_limit_hits += 1
-                logging.error(f"Batch {batch_idx} failed after retries (rate limit)")
-                # Mark as failed - assign zero vectors (OpenAI only; never on Albert)
-                failed_batch = all_batches[batch_idx]
-                for chunk in failed_batch:
-                    chunk["embedding"] = _failed_batch_embedding(space)
-                    _apply_space_fields(chunk, space)
-                results[batch_idx] = failed_batch
-                embeddings_generated += len(failed_batch)
+        with tqdm(total=total_batches, desc="Generating embeddings") as progress_bar:
+            while futures:
+                done, _pending = wait(list(futures), return_when=FIRST_COMPLETED)
+                for future in sorted(done, key=lambda f: futures[f]):
+                    batch_idx = futures.pop(future)
+                    try:
+                        batch_embeddings = future.result()
+                        results[batch_idx] = batch_embeddings
+                        embeddings_processed += len(batch_embeddings)
+                        embeddings_generated += sum(
+                            1 for chunk in batch_embeddings if _valid_for_run(chunk.get("embedding"))
+                        )
 
-            except Exception as e:
-                logging.error(f"Batch {batch_idx} failed with error: {e}")
-                failed_batch = all_batches[batch_idx]
-                for chunk in failed_batch:
-                    chunk["embedding"] = _failed_batch_embedding(space)
-                    _apply_space_fields(chunk, space)
-                results[batch_idx] = failed_batch
-                embeddings_generated += len(failed_batch)
+                        # Emit chunk-level progress
+                        print(f"PROGRESS|chunk|{embeddings_processed}/{total_chunks}|Chunk {embeddings_processed}/{total_chunks}", flush=True)
+
+                    except RateLimitError:
+                        rate_limit_hits += 1
+                        logging.error(f"Batch {batch_idx} failed after retries (rate limit)")
+                        # Lot en échec : aucun vecteur (jamais de vecteur nul, audit A07)
+                        failed_batch = all_batches[batch_idx]
+                        for chunk in failed_batch:
+                            chunk["embedding"] = _failed_batch_embedding(space)
+                            _apply_space_fields(chunk, space)
+                        results[batch_idx] = failed_batch
+                        embeddings_processed += len(failed_batch)
+
+                    except Exception as e:
+                        logging.error(f"Batch {batch_idx} failed with error: {e}")
+                        failed_batch = all_batches[batch_idx]
+                        for chunk in failed_batch:
+                            chunk["embedding"] = _failed_batch_embedding(space)
+                            _apply_space_fields(chunk, space)
+                        results[batch_idx] = failed_batch
+                        embeddings_processed += len(failed_batch)
+                    progress_bar.update(1)
+                    _submit_next()
 
     # Flatten results maintaining order
     all_chunks_with_embeddings = []
@@ -1977,11 +2254,94 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
         except Exception:
             pass  # Don't fail on metrics errors
 
+    if not use_albert:
+        _enforce_uniform_openai_dimension(all_chunks_with_embeddings)
     save_processed_chunks_to_json_overwrite(all_chunks_with_embeddings, output_json_file)
     if use_albert:
         _finish_albert_embeddings(all_chunks_with_embeddings, output_json_file, albert_cfg, space)
+    else:
+        _finish_openai_embeddings(all_chunks_with_embeddings, output_json_file)
     print(f"Tous les embeddings denses ont été générés. Total {len(all_chunks_with_embeddings)} chunks sauvegardés dans '{output_json_file}'.")
     return output_json_file
+
+
+def _enforce_uniform_openai_dimension(chunks):
+    """Retire les vecteurs d'une autre dimension que la majorité du run (espace OpenAI).
+
+    Un modèle d'embeddings rend une dimension fixe : un vecteur d'une autre
+    longueur est une réponse anormale, jamais écrite comme succès (audit A07).
+    Aucune sortie quand tous les vecteurs ont la même dimension.
+
+    Args:
+        chunks: chunks du run (modifiés en place).
+
+    Returns:
+        Nombre de vecteurs retirés.
+    """
+    dims = Counter(len(chunk["embedding"]) for chunk in chunks
+                   if isinstance(chunk, dict) and valid_dense_vector(chunk.get("embedding")))
+    if len(dims) <= 1:
+        return 0
+    expected = dims.most_common(1)[0][0]
+    removed = 0
+    for chunk in chunks:
+        vec = chunk.get("embedding") if isinstance(chunk, dict) else None
+        if vec is not None and valid_dense_vector(vec) and len(vec) != expected:
+            chunk["embedding"] = None
+            removed += 1
+    print(f"Avertissement : {removed} embedding(s) OpenAI d'une dimension différente de {expected} retiré(s).")
+    return removed
+
+
+def _finish_openai_embeddings(chunks, output_json_file):
+    """Fin de la phase dense OpenAI, une fois le fichier écrit (audit A07).
+
+    Les chunks au texte vide ne sont jamais envoyés et ne comptent pas. Un chunk
+    au texte non vide sans vecteur exploitable est **manquant** (plus de vecteur
+    nul déguisé en succès) : une ligne en donne le nombre, et au-delà de
+    ``EMBED_MAX_MISSING_RATIO`` (défaut 0) la phase sort en 1, fichier écrit.
+    Aucune sortie quand tout est complet.
+
+    Args:
+        chunks: chunks écrits dans le fichier de sortie.
+        output_json_file: fichier de sortie.
+
+    Raises:
+        SystemExit: 1 quand la part d'embeddings manquants dépasse le seuil.
+    """
+    counted = [chunk for chunk in chunks if not _is_blank_chunk_text(chunk)]
+    missing = sum(1 for chunk in counted if not valid_dense_vector(chunk.get("embedding")))
+    if not missing:
+        return
+    total = len(counted)
+    ratio = missing / total if total else 0.0
+    threshold = _embed_max_missing_ratio()
+    abort = _OPENAI_EMBED_ABORT
+    cause = f" (erreur permanente : {type(abort).__name__})" if abort is not None else ""
+    print(f"Avertissement : {missing}/{total} embedding(s) OpenAI manquant(s){cause} ; "
+          f"chunk(s) sans vecteur, jamais envoyé(s) à la base vectorielle.")
+    if ratio > threshold:
+        message = (
+            f"Erreur : {missing}/{total} embedding(s) OpenAI manquant(s) (part {ratio:.4f}, "
+            f"au-delà du seuil EMBED_MAX_MISSING_RATIO={threshold:g}). "
+            f"Fichier écrit dans '{output_json_file}', phase dense en échec (code 1)."
+        )
+        print(message)
+        logging.error(message)
+        raise SystemExit(1)
+
+
+def _embed_max_missing_ratio():
+    """Part maximale d'embeddings OpenAI manquants tolérée (``EMBED_MAX_MISSING_RATIO``, défaut 0).
+
+    Valeur invalide ou hors de [0, 1] : 0 (le plus strict).
+    """
+    raw = os.getenv("EMBED_MAX_MISSING_RATIO", "")
+    try:
+        value = float(raw) if raw.strip() else 0.0
+    except ValueError:
+        return 0.0
+    return value if 0.0 <= value <= 1.0 else 0.0
 
 
 def _finish_albert_embeddings(chunks, output_json_file, albert_cfg, space):
@@ -2043,6 +2403,10 @@ def extract_sparse_features(text):
     """
     Extrait les lemmes des mots pertinents et crée une représentation sparse.
     Utilise le `nlp` global (modèle spaCy).
+
+    Encodage ``rad_sparse.SPARSE_ENCODING`` (audit A06) : indice stable
+    (blake2b, identique dans tout processus, contrairement à ``hash()`` salé par
+    processus), poids TF, poids **additionnés** en cas de collision, indices triés.
     """
     if nlp is None:
         print("Erreur: Modèle spaCy (nlp) non initialisé. Impossible d'extraire les features sparse.")
@@ -2066,20 +2430,9 @@ def extract_sparse_features(text):
         and len(token.lemma_) > 1 # Exclure les lemmes d'un seul caractère
     ]
     
-    counts = Counter(lemmas)
-    sparse_dict = {}
-    # Utiliser un simple hachage pour créer un indice unique, limité à 100k dimensions
-    # La normalisation (TF) est appliquée ici. IDF nécessiterait une connaissance globale du corpus.
-    total_lemmas_in_doc = sum(counts.values())
-    if total_lemmas_in_doc > 0:
-        for lemma, count in counts.items():
-            index = hash(lemma) % 100000  # Dimensionnalité de l'espace sparse
-            sparse_dict[str(index)] = count / total_lemmas_in_doc # TF (Term Frequency)
-
-    return {
-        "indices": list(sparse_dict.keys()), # Convertir les indices en string comme dans le master code
-        "values": list(sparse_dict.values())
-    }
+    # Hachage stable et versionné (rad_sparse), TF, collisions additionnées.
+    # IDF nécessiterait une connaissance globale du corpus.
+    return rad_sparse.sparse_vector_from_lemmas(lemmas)
 
 def generate_sparse_embeddings(input_json_file=DEFAULT_INPUT_JSON_WITH_EMBEDDINGS, 
                                output_json_file=DEFAULT_OUTPUT_JSON_SPARSE):

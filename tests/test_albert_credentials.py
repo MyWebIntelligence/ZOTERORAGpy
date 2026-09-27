@@ -147,6 +147,7 @@ SWITCH_VALUES_OFF = ("", " ", "0", "false", "no", "off", "2")
 FAKE_SERVER_SECRETS = {
     "FLOWER_PASSWORD": "fake-flower-password-0001",
     "JWT_SECRET_KEY": "fake-jwt-secret-0001",
+    "JWT_SECRET_KEY_PREVIOUS": "fake-jwt-previous-secret-0001",
     "RESEND_API_KEY": "fake-resend-key-0001",
 }
 

@@ -472,8 +472,8 @@ def test_openai_request_and_output_identical(case, enabled, provider, chunk_env,
     assert _usage_files(tmp_path) == []
 
 
-def test_openai_zero_fallback_unchanged(chunk_env, monkeypatch):
-    """Espace OpenAI : le repli historique en vecteurs nuls de 3072 dimensions est conservé."""
+def test_openai_failure_gives_no_zero_vector(chunk_env, monkeypatch):
+    """Espace OpenAI : un échec donne ``None`` (audit A07), plus jamais de vecteur nul, et aucun appel Albert."""
     fake = FakeAlbert()
     route_albert_to_fake(monkeypatch, fake, SleepRecorder())
     _albert_env(monkeypatch, enabled=True, provider="openai")
@@ -484,7 +484,7 @@ def test_openai_zero_fallback_unchanged(chunk_env, monkeypatch):
 
     monkeypatch.setattr(rc.client.embeddings, "create", failing_create)
     vectors = rc.get_embeddings_batch(["un", "deux"])
-    assert vectors == [[0.0] * 3072, [0.0] * 3072]
+    assert vectors == [None, None]
     assert fake.calls == []
 
 

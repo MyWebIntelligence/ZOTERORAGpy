@@ -17,8 +17,12 @@ qui travaillent sur un dossier de session le contrôlent avant tout travail
   avec les clés du collaborateur lui-même (argv, env, délai, arguments des
   aides) ; les cas ``member_keys`` des goldens G7 d'avant l'amendement
   (``b44e82c``) sont rejoués à l'octet quand il est collaborateur ;
-* dossier sans lien avec une ``PipelineSession`` (ancien flux
-  ``/upload_zip``) : comportement historique ;
+* import hors projet (``SessionOwner``, audit A02) : réservé à son auteur ;
+  dossier sans aucune ligne (import antérieur au contrôle, ou projet
+  supprimé) : réservé aux administrateurs ; lecteur (``viewer``) d'un
+  projet : lecture seule (403 sur toute route qui écrit ou arrête) ;
+* ``/stop_all_scripts`` : même contrôle (droit d'arrêt) et identifiant
+  canonique du dossier pour le registre des processus ;
 * dossier qui ne se résout pas strictement sous ``uploads/`` (``..``, chemin
   absolu, ``.``, lien symbolique sortant, octet NUL) : 400, pour tous.
 
@@ -57,7 +61,7 @@ import app.services.background_task_manager as background_task_module
 import app.utils.book_note_generator as book_note_generator
 import app.utils.llm_note_generator as llm_note_generator
 import app.utils.zotero_client as zotero_client
-from app.models.pipeline_session import PipelineSession
+from app.models.pipeline_session import PipelineSession, SessionOwner
 from app.models.project import ProjectMember, ProjectRole
 from scripts.rad_albert.errors import AlbertAuthError
 from tests import test_albert_off_golden_routes as golden
@@ -69,10 +73,19 @@ from tests.test_albert_off_golden_routes import _golden_env_hygiene, golden_app 
 # ======================================================================
 DENIED_MESSAGE = "Accès non autorisé à cette session : elle appartient à un projet auquel vous n'avez pas accès."
 INVALID_PATH_MESSAGE = "Chemin de session invalide : le dossier doit se trouver sous uploads/."
+READ_ONLY_MESSAGE = (
+    "Accès en lecture seule à cette session : seuls le propriétaire et les collaborateurs "
+    "du projet peuvent la modifier ou arrêter ses traitements."
+)
+OWNER_DENIED_MESSAGE = "Accès non autorisé à cette session : elle appartient à un autre utilisateur."
+UNOWNED_MESSAGE = (
+    "Session sans propriétaire enregistré (import antérieur au contrôle d'accès, ou projet supprimé) : "
+    "réservée aux administrateurs. Importez de nouveau le fichier pour continuer."
+)
 REGISTERED = "gsess-full"          # session enregistrée du projet de member_nokeys
 FOREIGN_PERSONA = "member_keys"    # ni propriétaire ni membre de ce projet
 OWNER_PERSONA = "member_nokeys"
-UNREGISTERED = "gsess-fresh-member-nokeys"  # dossier sans PipelineSession (flux historique)
+UNREGISTERED = "gsess-fresh-member-nokeys"  # import hors projet de member_nokeys (SessionOwner)
 USAGE_FILE = "albert_usage.jsonl"
 ALBERT_MODEL = "albert/gpt-oss-120b"
 SERVED_MODEL = "openai/gpt-oss-120b"
@@ -584,54 +597,200 @@ def test_owner_and_admin_launch_on_registered_session(golden_app):
 
 
 # ======================================================================
-# Dossier sans PipelineSession : comportement historique
+# Dossiers sans projet : propriétaire enregistré, sinon administrateurs seuls (audit A02)
 # ======================================================================
-def test_unregistered_folder_keeps_historical_behaviour(golden_app):
-    """Dossier non enregistré (ancien flux) : accessible par son chemin, réponses historiques."""
+def _add_owner(env, folder, persona):
+    """Enregistre ``persona`` comme propriétaire du dossier ``folder`` (import hors projet)."""
+    env.db.add(SessionOwner(session_folder=folder, user_id=env.users[persona].id, source_type="zip"))
+    env.db.commit()
+
+
+def test_owned_upload_reserved_to_its_uploader(golden_app):
+    """Import hors projet (``SessionOwner``) : son auteur et l'administrateur passent, un tiers reçoit 403."""
     env = golden_app
+    own = "gsess-fresh-member-keys"  # import de member_keys (qui a ses clés)
     for url in ("/process_dataframe", "/process_dataframe_sse"):
-        resp, errors, calls = _post(env, FOREIGN_PERSONA, url, {"path": UNREGISTERED})
+        resp, errors, calls = _post(env, "member_keys", url, {"path": own})
         assert resp.status_code == 200 and errors == [], (url, resp.text[:300])
-        assert [c["session_folder"] for c in calls] == [UNREGISTERED], url
-    resp, errors, calls = _post(env, FOREIGN_PERSONA, "/initial_text_chunking", {"path": "gsess-empty"})
+        assert [c["session_folder"] for c in calls] == [own], url
+        style = "sse" if url.endswith("_sse") else "json"
+        resp, errors, calls = _post(env, OWNER_PERSONA, url, {"path": own})
+        assert _is_refusal(resp, style, 403, OWNER_DENIED_MESSAGE), (url, resp.status_code, resp.text[:300])
+        assert errors == [] and calls == [], url
+    resp, errors, _calls = _post(env, "admin", "/process_dataframe", {"path": own})
+    assert resp.status_code == 200 and errors == []
+
+
+@pytest.mark.parametrize("url, field, extra, style", ROUTES, ids=ROUTE_IDS)
+def test_unowned_legacy_folder_reserved_to_admins(golden_app, no_zotero_tags, url, field, extra, style):
+    """Dossier sans aucune ligne (import antérieur au contrôle) : 403 pour un non-admin, sans aucun travail."""
+    env = golden_app
+    folder = env.uploads / "gsess-empty"
+    before = _snapshot(folder)
+    for persona in (FOREIGN_PERSONA, OWNER_PERSONA):
+        resp, errors, calls = _post(env, persona, url, _form(field, "gsess-empty", extra))
+        assert _is_refusal(resp, style, 403, UNOWNED_MESSAGE), (url, persona, resp.status_code, resp.text[:300])
+        assert errors == [] and calls == [] and no_zotero_tags == [], (url, persona)
+    assert _snapshot(folder) == before
+
+
+def test_unowned_legacy_folder_admin_keeps_access(golden_app):
+    """Administrateur sur un dossier sans ligne : réponses historiques (ici l'absence d'output.csv)."""
+    env = golden_app
+    resp, errors, calls = _post(env, "admin", "/initial_text_chunking", {"path": "gsess-empty"})
     assert resp.status_code == 400 and calls == [] and errors == []
     assert resp.json() == {"error": "output.csv not found. Please complete the extraction step first."}
-    resp, errors, calls = _post(env, FOREIGN_PERSONA, "/sparse_embedding_generation", {"path": "gsess-missing"})
+    resp, errors, calls = _post(env, "admin", "/sparse_embedding_generation", {"path": "gsess-missing"})
     assert resp.status_code == 400 and calls == [] and resp.json() == {"error": "Directory not found: gsess-missing"}
 
 
-def test_orphan_session_row_keeps_historical_behaviour(golden_app):
-    """Ligne PipelineSession dont le projet n'existe plus : pas de refus (comme stop_all_scripts)."""
+def test_missing_folder_is_refused_before_existence_for_non_admins(golden_app):
+    """Dossier absent pour un non-admin : 403 (pas d'owner), sans révéler s'il existe."""
+    env = golden_app
+    resp, errors, calls = _post(env, FOREIGN_PERSONA, "/sparse_embedding_generation", {"path": "gsess-missing"})
+    assert resp.status_code == 403 and calls == [] and resp.json() == {"error": UNOWNED_MESSAGE}
+
+
+def test_orphan_session_row_grants_nothing(golden_app):
+    """Ligne PipelineSession dont le projet n'existe plus : n'accorde rien, dossier réservé aux administrateurs."""
     env = golden_app
     env.db.add(PipelineSession(
-        project_id=987654, session_folder=UNREGISTERED, source_type="zip",
+        project_id=987654, session_folder="gsess-empty", source_type="zip",
         created_at=golden.FIXED_CREATED_AT, updated_at=golden.FIXED_CREATED_AT,
     ))
     env.db.commit()
-    resp, errors, calls = _post(env, FOREIGN_PERSONA, "/process_dataframe", {"path": UNREGISTERED})
+    resp, errors, calls = _post(env, FOREIGN_PERSONA, "/initial_text_chunking", {"path": "gsess-empty"})
+    assert resp.status_code == 403 and calls == [] and resp.json() == {"error": UNOWNED_MESSAGE}
+    resp, errors, calls = _post(env, "admin", "/initial_text_chunking", {"path": "gsess-empty"})
+    assert resp.status_code == 400 and calls == []
+
+
+def test_orphan_row_with_owner_keeps_owner_access(golden_app):
+    """Ligne orpheline + propriétaire enregistré : le propriétaire garde l'accès, un tiers est refusé."""
+    env = golden_app
+    own = "gsess-fresh-member-keys"
+    env.db.add(PipelineSession(
+        project_id=987654, session_folder=own, source_type="zip",
+        created_at=golden.FIXED_CREATED_AT, updated_at=golden.FIXED_CREATED_AT,
+    ))
+    env.db.commit()
+    resp, errors, calls = _post(env, "member_keys", "/process_dataframe", {"path": own})
     assert resp.status_code == 200 and errors == [] and len(calls) == 1
+    resp, errors, calls = _post(env, OWNER_PERSONA, "/process_dataframe", {"path": own})
+    assert resp.status_code == 403 and calls == []
 
 
 @pytest.mark.parametrize("folder", ["gsess-full-copy", "gsess-nest-other", "gsess_nest", "gsess-nes"])
-def test_unrelated_neighbour_folders_keep_historical_behaviour(golden_app, folder):
-    """Voisins par préfixe de caractères (pas de composant) ou jokers LIKE (``_``) : aucun refus."""
+def test_unrelated_neighbour_folders_follow_their_own_owner(golden_app, folder):
+    """Voisins par préfixe de caractères (pas de composant) ou jokers LIKE (``_``) : seul leur propre owner compte."""
     env = golden_app
     _related_layout(env)
     _garnish(env.uploads / folder)
+    _add_owner(env, folder, FOREIGN_PERSONA)
     resp, errors, calls = _post(env, FOREIGN_PERSONA, "/sparse_embedding_generation", {"path": folder})
     assert resp.status_code == 200 and errors == [], (folder, resp.text[:300])
     assert [c["session_folder"] for c in calls] == [folder]
 
 
 def test_nested_folder_under_uploads_is_accepted(golden_app):
-    """Un sous-dossier non enregistré reste strictement sous uploads/ : accepté."""
+    """Un sous-dossier reste strictement sous uploads/ : accepté pour son propriétaire et l'administrateur."""
     env = golden_app
     nested = env.uploads / "nested" / "sub"
     nested.mkdir(parents=True)
     golden._write_output_csv(str(nested / "output.csv"))
+    _add_owner(env, "nested/sub", FOREIGN_PERSONA)
     for persona in ("admin", FOREIGN_PERSONA):
         resp, errors, calls = _post(env, persona, "/initial_text_chunking", {"path": "nested/sub", "model": "gpt-4o-mini"})
         assert resp.status_code == 200 and errors == [] and [c["session_folder"] for c in calls] == ["nested/sub"]
+    resp, errors, calls = _post(env, OWNER_PERSONA, "/initial_text_chunking", {"path": "nested/sub", "model": "gpt-4o-mini"})
+    assert resp.status_code == 403 and calls == []
+    # Le dossier parent contient la session enregistrée : même propriétaire exigé.
+    resp, errors, calls = _post(env, OWNER_PERSONA, "/initial_text_chunking", {"path": "nested", "model": "gpt-4o-mini"})
+    assert resp.status_code == 403 and calls == []
+
+
+# ======================================================================
+# Lecteur d'un projet : lecture seule (audit A02)
+# ======================================================================
+def _add_viewer(env, persona):
+    """Ajoute ``persona`` comme lecteur (``viewer``) du projet de ``gsess-full``."""
+    env.db.add(ProjectMember(
+        project_id=env.project.id, user_id=env.users[persona].id, role=ProjectRole.VIEWER.value,
+        created_at=golden.FIXED_CREATED_AT, updated_at=golden.FIXED_CREATED_AT,
+    ))
+    env.db.commit()
+    env.db.refresh(env.project)
+
+
+@pytest.mark.parametrize("url, field, extra, style", ROUTES, ids=ROUTE_IDS)
+def test_viewer_cannot_modify_registered_session(golden_app, no_zotero_tags, url, field, extra, style):
+    """Lecteur du projet : 403 lecture seule sur toute route qui écrit, aucun lancement, dossier intact."""
+    env = golden_app
+    _add_viewer(env, FOREIGN_PERSONA)
+    folder = env.uploads / REGISTERED
+    before = _snapshot(folder)
+    resp, errors, calls = _post(env, FOREIGN_PERSONA, url, _form(field, REGISTERED, extra))
+    assert _is_refusal(resp, style, 403, READ_ONLY_MESSAGE), (url, resp.status_code, resp.text[:300])
+    assert errors == [] and calls == [] and no_zotero_tags == [], url
+    assert _snapshot(folder) == before
+
+
+def test_viewer_can_read_session_files(golden_app):
+    """Lecteur du projet : la lecture des fichiers de session reste permise."""
+    env = golden_app
+    _add_viewer(env, FOREIGN_PERSONA)
+    resp = env.client.get(f"/api/pipeline/sessions/{REGISTERED}/files", headers=env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 200 and resp.json()["session_folder"] == REGISTERED
+    resp = env.client.get(f"/api/pipeline/sessions/{REGISTERED}/verify", headers=env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 200 and resp.json()["can_edit"] is False
+
+
+def test_viewer_cannot_stop_or_change_status(golden_app, monkeypatch):
+    """Lecteur du projet : ni arrêt des traitements ni changement de statut."""
+    env = golden_app
+    _add_viewer(env, FOREIGN_PERSONA)
+    stopped = []
+    monkeypatch.setattr(processing_routes.process_manager, "stop_session", lambda key: stopped.append(key) or {})
+    resp, errors, _calls = _post(env, FOREIGN_PERSONA, "/stop_all_scripts", {"session": REGISTERED})
+    assert resp.status_code == 403 and resp.json() == {"error": READ_ONLY_MESSAGE} and stopped == []
+    session_id = env.db.query(PipelineSession).filter(PipelineSession.session_folder == REGISTERED).one().id
+    resp = env.client.patch(f"/api/pipeline/sessions/{session_id}/status", data={"status": "error"},
+                            headers=env.headers[FOREIGN_PERSONA])
+    assert resp.status_code == 403
+
+
+# ======================================================================
+# Arrêt : identifiant canonique et contrôle identique aux routes (audit A02)
+# ======================================================================
+@pytest.mark.parametrize("spelling", ["./gsess-full", "gsess-full/", "gsess-empty/../gsess-full"])
+def test_stop_other_spelling_refused_for_foreign_user(golden_app, monkeypatch, spelling):
+    """Tiers : une autre graphie du dossier enregistré reçoit le même 403, aucun arrêt."""
+    env = golden_app
+    stopped = []
+    monkeypatch.setattr(processing_routes.process_manager, "stop_session", lambda key: stopped.append(key) or {})
+    resp, errors, _calls = _post(env, FOREIGN_PERSONA, "/stop_all_scripts", {"session": spelling})
+    assert resp.status_code == 403 and resp.json() == {"error": DENIED_MESSAGE}
+    assert stopped == [] and errors == []
+
+
+@pytest.mark.parametrize("spelling", ["./gsess-full", "gsess-full/", "gsess-full"])
+def test_stop_uses_canonical_key(golden_app, monkeypatch, spelling):
+    """Propriétaire : toute graphie arrête le registre canonique ``gsess-full``."""
+    env = golden_app
+    stopped = []
+    monkeypatch.setattr(processing_routes.process_manager, "stop_session",
+                        lambda key: stopped.append(key) or {"status": "ok"})
+    resp, errors, _calls = _post(env, OWNER_PERSONA, "/stop_all_scripts", {"session": spelling})
+    assert resp.status_code == 200 and errors == []
+    assert stopped == [REGISTERED]
+
+
+def test_launch_registers_canonical_key(golden_app):
+    """Lancement avec ``./gsess-full`` : le processus est enregistré sous ``gsess-full``."""
+    env = golden_app
+    resp, errors, calls = _post(env, OWNER_PERSONA, "/sparse_embedding_generation", {"path": "./gsess-full"})
+    assert resp.status_code == 200 and errors == []
+    assert [c["session_folder"] for c in calls] == [REGISTERED]
 
 
 # ======================================================================

@@ -71,6 +71,9 @@ class ProjectListResponse(BaseModel):
     owned: List[ProjectResponse]
     collaborations: List[ProjectResponse]
     favorites: List[ProjectResponse]
+    # Totals before pagination (audit A11): a client can tell a page from the whole list
+    owned_total: int = 0
+    collaborations_total: int = 0
 
 
 class MemberCreate(BaseModel):
@@ -100,6 +103,8 @@ def get_client_ip(request: Request) -> str:
 
 @router.get("", response_model=ProjectListResponse)
 async def list_my_projects(
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -110,27 +115,45 @@ async def list_my_projects(
     - owned: Projets dont l'utilisateur est propriétaire
     - collaborations: Projets où l'utilisateur est collaborateur
     - favorites: Projets favoris (à implémenter)
+
+    Pagination (audit A11) : ``limit`` (défaut 200) et ``offset`` s'appliquent
+    à chaque liste ; ``owned_total`` et ``collaborations_total`` donnent leurs
+    tailles complètes. Les propriétaires sont chargés en une requête et les
+    rôles lus dans un dictionnaire : le nombre de requêtes ne dépend plus du
+    nombre de projets.
     """
     # Projets possédés
-    owned_projects = db.query(Project).filter(
+    owned_query = db.query(Project).filter(
         Project.owner_id == current_user.id,
         Project.is_archived == False
-    ).order_by(Project.updated_at.desc()).all()
+    )
+    owned_total = owned_query.count()
+    owned_projects = owned_query.order_by(Project.updated_at.desc()).offset(offset).limit(limit).all()
 
-    # Projets en collaboration
+    # Projets en collaboration (rôle par projet, sans recherche linéaire)
     collaboration_memberships = db.query(ProjectMember).filter(
         ProjectMember.user_id == current_user.id
     ).all()
+    role_by_project = {m.project_id: m.role for m in collaboration_memberships}
 
-    collaboration_project_ids = [m.project_id for m in collaboration_memberships]
-    collaboration_projects = db.query(Project).filter(
-        Project.id.in_(collaboration_project_ids),
-        Project.is_archived == False
-    ).all() if collaboration_project_ids else []
+    collaboration_projects = []
+    collaborations_total = 0
+    if role_by_project:
+        collab_query = db.query(Project).filter(
+            Project.id.in_(list(role_by_project)),
+            Project.is_archived == False
+        )
+        collaborations_total = collab_query.count()
+        collaboration_projects = collab_query.order_by(Project.updated_at.desc()).offset(offset).limit(limit).all()
+
+    # Propriétaires en une seule requête
+    owner_ids = {p.owner_id for p in owned_projects + collaboration_projects}
+    owners = {u.id: u for u in db.query(User).filter(User.id.in_(owner_ids)).all()} if owner_ids else {}
 
     # Convertir en réponse
     def to_response(project: Project, role: str = None) -> ProjectResponse:
-        owner = db.query(User).filter(User.id == project.owner_id).first()
+        """Réponse d'un projet, avec le nom de son propriétaire préchargé."""
+        owner = owners.get(project.owner_id)
         return ProjectResponse(
             id=project.id,
             name=project.name,
@@ -147,17 +170,17 @@ async def list_my_projects(
         )
 
     owned_responses = [to_response(p, ProjectRole.OWNER.value) for p in owned_projects]
-
-    collab_responses = []
-    for p in collaboration_projects:
-        membership = next((m for m in collaboration_memberships if m.project_id == p.id), None)
-        role = membership.role if membership else ProjectRole.VIEWER.value
-        collab_responses.append(to_response(p, role))
+    collab_responses = [
+        to_response(p, role_by_project.get(p.id) or ProjectRole.VIEWER.value)
+        for p in collaboration_projects
+    ]
 
     return ProjectListResponse(
         owned=owned_responses,
         collaborations=collab_responses,
-        favorites=[]  # À implémenter
+        favorites=[],  # À implémenter
+        owned_total=owned_total,
+        collaborations_total=collaborations_total,
     )
 
 

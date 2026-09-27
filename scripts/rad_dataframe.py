@@ -2905,11 +2905,25 @@ def _process_single_zotero_item(
                 })
                 continue
 
-            # Resolve attachment path
-            if os.path.isabs(path_from_json):
-                actual_path = path_from_json
-            else:
-                actual_path = os.path.join(pdf_base_dir, path_from_json)
+            # Resolve attachment path, confined to pdf_base_dir (audit A01: a
+            # crafted JSON never reads a file outside the session folder)
+            actual_path = _confined_attachment_path(pdf_base_dir, path_from_json)
+            if actual_path is None:
+                # Refused path: same trailing components (KEY/file) inside the session, never a fuzzy match
+                actual_path = _attachment_in_session_by_suffix(pdf_base_dir, path_from_json)
+                if actual_path is None:
+                    logger.warning(f"[{item_index}] Attachment path outside the base directory: {path_from_json}")
+                    errors.append({
+                        "itemKey": item_key,
+                        "title": metadata.get("title", ""),
+                        "error_type": "PATH_OUTSIDE_DIR",
+                        "error_message": ("Chemin de pièce jointe hors du dossier de la session, "
+                                          "introuvable dans la session (derniers composants du chemin)."),
+                        "path": path_from_json,
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                    continue
+                logger.info(f"[{item_index}] Attachment found in the session by its trailing path: {actual_path}")
 
             # Fuzzy search (PDF-only — non-PDF attachments rarely have renamed files)
             if not os.path.exists(actual_path):
@@ -3274,20 +3288,97 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
     return pd.DataFrame()
 
 
+def _path_within(base_dir: str, path: str) -> bool:
+    """Vrai si ``path`` se résout dans ``base_dir`` (liens symboliques suivis des deux côtés)."""
+    try:
+        root = os.path.realpath(base_dir)
+        target = os.path.realpath(path)
+        return os.path.commonpath([root, target]) == root
+    except (TypeError, ValueError):  # octet NUL, lecteurs différents (Windows)
+        return False
+
+
+# Pièces jointes hors de ``--dir`` : refusées par défaut (toujours pour l'application
+# web). La CLI peut les autoriser explicitement (``--allow-outside-dir``).
+ALLOW_ATTACHMENTS_OUTSIDE_DIR = False
+# Composants finaux minimaux d'un chemin refusé recherché dans la session
+# (``CLÉ/fichier``) : jamais le seul nom de fichier, souvent partagé
+# (« Full Text PDF.pdf » dans chaque dossier ``storage/<CLÉ>`` de Zotero).
+MIN_ATTACHMENT_SUFFIX_COMPONENTS = 2
+
+
+def _confined_attachment_path(pdf_base_dir: str, path_from_json: str) -> Optional[str]:
+    """
+    Chemin d'une pièce jointe du JSON Zotero, seulement s'il reste dans ``pdf_base_dir``.
+
+    Audit A01 : le JSON vient de l'archive envoyée par l'utilisateur ; un chemin
+    absolu ou des segments ``..`` qui sortent du dossier de la session ne sont
+    jamais suivis (lecture de fichiers du serveur ou d'autres sessions). Un
+    chemin absolu situé dans le dossier reste accepté ; hors du dossier, seulement
+    avec ``ALLOW_ATTACHMENTS_OUTSIDE_DIR`` (option CLI ``--allow-outside-dir``).
+
+    Args:
+        pdf_base_dir: dossier de base (``--dir``).
+        path_from_json: chemin tel qu'écrit dans le JSON.
+
+    Returns:
+        Le chemin à ouvrir, ou ``None`` s'il sort du dossier.
+    """
+    candidate = path_from_json if os.path.isabs(path_from_json) else os.path.join(pdf_base_dir, path_from_json)
+    if ALLOW_ATTACHMENTS_OUTSIDE_DIR or _path_within(pdf_base_dir, candidate):
+        return candidate
+    return None
+
+
+def _attachment_in_session_by_suffix(pdf_base_dir: str, path_from_json: str) -> Optional[str]:
+    """
+    Copie, dans la session, d'une pièce jointe dont le chemin du JSON a été refusé.
+
+    Un export Zotero (Better BibTeX) peut écrire des chemins absolus de la machine
+    d'origine (``/…/Zotero/storage/<CLÉ>/Full Text PDF.pdf``) alors que l'archive
+    contient ``storage/<CLÉ>/Full Text PDF.pdf``. On cherche sous ``pdf_base_dir``
+    les derniers composants du chemin, du plus long au plus court, sans jamais
+    descendre sous ``MIN_ATTACHMENT_SUFFIX_COMPONENTS`` (``CLÉ/fichier``) : un nom
+    de fichier seul, souvent partagé, n'est jamais retenu, et aucune recherche
+    approchée n'est faite (pas de texte d'un autre document).
+
+    Args:
+        pdf_base_dir: dossier de base (``--dir``).
+        path_from_json: chemin refusé, tel qu'écrit dans le JSON.
+
+    Returns:
+        Le fichier trouvé dans la session, ou ``None``.
+    """
+    parts = [part for part in re.split(r"[\\/]", path_from_json) if part not in ("", ".", "..")]
+    for count in range(len(parts), MIN_ATTACHMENT_SUFFIX_COMPONENTS - 1, -1):
+        candidate = os.path.join(pdf_base_dir, *parts[-count:])
+        if _path_within(pdf_base_dir, candidate) and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _find_pdf_fuzzy(actual_pdf_path: str, path_from_json: str, pdf_base_dir: str) -> Optional[str]:
     """
     Recherche fuzzy pour trouver un PDF avec différentes normalisations.
+
+    La recherche reste dans ``pdf_base_dir`` (audit A01) : un dossier désigné
+    par le JSON hors de la session n'est jamais parcouru (``None``), sauf avec
+    ``ALLOW_ATTACHMENTS_OUTSIDE_DIR`` (CLI).
 
     Returns:
         Le chemin du PDF trouvé, ou None si non trouvé
     """
     base_dir = os.path.dirname(actual_pdf_path)
+    if not ALLOW_ATTACHMENTS_OUTSIDE_DIR and not _path_within(pdf_base_dir, base_dir):
+        return None
     candidates = []
+    candidate_dirs = {}  # nom de fichier -> dossier réel (os.walk descend dans les sous-dossiers)
 
     if os.path.exists(base_dir):
         for root, dirs, files in os.walk(base_dir):
             for f in files:
                 candidates.append(f)
+                candidate_dirs.setdefault(f, root)
 
     if not candidates:
         return None
@@ -3318,7 +3409,7 @@ def _find_pdf_fuzzy(actual_pdf_path: str, path_from_json: str, pdf_base_dir: str
         fuzzy_match = lev <= 2 and min(len(t_alpha), len(f_alpha)) > 0
 
         if any(t == ff for t in target_names for ff in f_forms) or fuzzy_match:
-            found_path = os.path.join(base_dir, f)
+            found_path = os.path.join(candidate_dirs.get(f, base_dir), f)
             logger.info(f"Correspondance fuzzy trouvée: {path_from_json} -> {found_path}")
             return found_path
 
@@ -3380,11 +3471,13 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
                         logger.warning(f"Extension non supportée: {ext or '(none)'} pour {path_from_json}")
                         continue
 
-                    # Résoudre le chemin de la pièce jointe
-                    if os.path.isabs(path_from_json):
-                        actual_path = path_from_json
-                    else:
-                        actual_path = os.path.join(pdf_base_dir, path_from_json)
+                    # Résoudre le chemin de la pièce jointe, confiné au dossier de base
+                    actual_path = _confined_attachment_path(pdf_base_dir, path_from_json)
+                    if actual_path is None:
+                        actual_path = _attachment_in_session_by_suffix(pdf_base_dir, path_from_json)
+                        if actual_path is None:
+                            logger.warning(f"Chemin de pièce jointe hors du dossier de base, introuvable dans la session : {path_from_json}")
+                            continue
 
                     if not os.path.exists(actual_path):
                         if ext == ".pdf":
@@ -3540,8 +3633,11 @@ if __name__ == "__main__":
     parser.add_argument("--dir", required=True, help="Base directory for resolving relative PDF paths from the JSON.")
     parser.add_argument("--output", required=True, help="Path to save the output CSV file.")
     parser.add_argument("--batch", action="store_true", help="Use deprecated batch mode (not recommended)")
+    parser.add_argument("--allow-outside-dir", action="store_true",
+                        help="CLI only: follow attachment paths outside --dir (never used by the web application).")
 
     args = parser.parse_args()
+    ALLOW_ATTACHMENTS_OUTSIDE_DIR = bool(args.allow_outside_dir)
 
     logger.info(f"Starting Zotero data processing for JSON: {args.json} with PDF base directory: {args.dir}")
 

@@ -10,7 +10,14 @@ Key Features:
 - Session Isolation: Tracks PIDs associated with specific session IDs.
 - Thread Safety: Uses locks to ensure safe concurrent access.
 - Graceful Shutdown: Attempts SIGTERM before resorting to SIGKILL.
+- Process groups: a registered script that leads its own process group
+  (``start_new_session=True``, every web launcher since the audit A08) is
+  signalled as a group, so its children stop with it.
 - Cleanup: Automatically removes dead processes from the registry.
+
+Sessions are keyed by their canonical folder (``_session_key`` of
+``app/routes/processing.py``): a stop request reaches the processes whatever
+the spelling of the folder it receives.
 """
 
 import os
@@ -101,6 +108,31 @@ class ProcessManager:
         with self._lock:
             return list(self._processes.get(session_folder, set()))
 
+    def _signal(self, pid: int, sig: int) -> None:
+        """
+        Send ``sig`` to ``pid``, or to its whole group when it leads one.
+
+        Args:
+            pid: Registered PID.
+            sig: Signal to send.
+
+        Raises:
+            OSError: The process does not exist or cannot be signalled.
+        """
+        if pid < 2:
+            raise ProcessLookupError(pid)
+        if not (hasattr(os, "getpgid") and hasattr(os, "killpg")):  # pragma: no cover - non-POSIX
+            os.kill(pid, sig)
+            return
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            pgid = None  # leader gone (or zombie): its group may still hold children
+        if pgid == pid or pgid is None:
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
+
     def _is_process_alive(self, pid: int) -> bool:
         """Vérifie si un processus est toujours en vie."""
         try:
@@ -149,7 +181,7 @@ class ProcessManager:
                 self.unregister(session_folder, pid)
                 continue
             try:
-                os.kill(pid, signal.SIGTERM)
+                self._signal(pid, signal.SIGTERM)
                 logger.info(f"Sent SIGTERM to PID {pid}")
             except OSError as e:
                 logger.warning(f"Failed to send SIGTERM to PID {pid}: {e}")
@@ -174,7 +206,7 @@ class ProcessManager:
         for pid in remaining_pids:
             if self._is_process_alive(pid):
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    self._signal(pid, signal.SIGKILL)
                     killed.append(pid)
                     self.unregister(session_folder, pid)
                     logger.warning(f"Sent SIGKILL to PID {pid} (did not respond to SIGTERM)")
@@ -203,6 +235,46 @@ class ProcessManager:
 
         logger.info(f"Stop session result: {result}")
         return result
+
+    def stop_all(self, timeout: float = 5.0) -> Dict:
+        """
+        Stop every registered script (server shutdown), groups included.
+
+        The web launchers start each script in its own process group, so a
+        server stop would otherwise leave them running: SIGTERM to all, one
+        shared wait of ``timeout`` seconds, then SIGKILL for the survivors.
+
+        Args:
+            timeout: Seconds granted after SIGTERM.
+
+        Returns:
+            ``{"terminated": [...], "killed": [...]}`` (PIDs).
+        """
+        sessions = self.get_all_sessions()
+        pids = [(session, pid) for session, session_pids in sessions.items() for pid in session_pids]
+        for _session, pid in pids:
+            try:
+                self._signal(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        deadline = time.time() + timeout
+        remaining = [(s, p) for s, p in pids if self._is_process_alive(p)]
+        while remaining and time.time() < deadline:
+            time.sleep(0.2)
+            remaining = [(s, p) for s, p in remaining if self._is_process_alive(p)]
+        killed = []
+        for _session, pid in remaining:
+            try:
+                self._signal(pid, signal.SIGKILL)
+                killed.append(pid)
+            except OSError:
+                pass
+        for session, pid in pids:
+            self.unregister(session, pid)
+        terminated = [p for _s, p in pids if p not in killed]
+        if pids:
+            logger.info(f"Stopped {len(pids)} registered process(es) at shutdown ({len(killed)} killed)")
+        return {"terminated": terminated, "killed": killed}
 
     def cleanup_dead_processes(self) -> int:
         """

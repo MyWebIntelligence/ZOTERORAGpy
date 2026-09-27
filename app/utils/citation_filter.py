@@ -460,15 +460,20 @@ def _parse_llm_response(response_text: str) -> Union[Dict, str]:
         json_str = match.group(1)
         logger.debug("Extracted JSON from markdown code block")
     else:
-        # Try finding JSON object directly
-        json_obj_pattern = r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}'
-        match = re.search(json_obj_pattern, response_text, re.DOTALL)
-        if match:
-            json_str = match.group(0)
+        # Try finding a JSON object directly, at any nesting depth: the first
+        # "{" that starts a decodable object (the regex used before only
+        # handled one nested level and returned the inner zotero_item of an
+        # answer with creators, which then failed validation).
+        json_str = _first_json_object(response_text)
+        if json_str is not None:
             logger.debug("Extracted raw JSON object")
         else:
-            # No JSON found
-            raise ValueError(f"No valid JSON found in LLM response: {response_text[:200]}...")
+            start, end = response_text.find("{"), response_text.rfind("}")
+            if start == -1 or end <= start:
+                # No JSON found
+                raise ValueError(f"No valid JSON found in LLM response: {response_text[:200]}...")
+            # Braces but no decodable object: reported below as invalid JSON
+            json_str = response_text[start:end + 1]
 
     # Parse JSON
     try:
@@ -477,6 +482,27 @@ def _parse_llm_response(response_text: str) -> Union[Dict, str]:
         return data
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in LLM response: {str(e)}\nJSON string: {json_str[:200]}...")
+
+
+def _first_json_object(text: str) -> Optional[str]:
+    """
+    First complete JSON object found in ``text``, whatever its nesting depth.
+
+    Args:
+        text: Raw LLM response (prose around the JSON is allowed).
+
+    Returns:
+        The JSON text of the first decodable object, or None.
+    """
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            obj, end = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return text[match.start():end]
+    return None
 
 
 def _validate_filter_result(data: Dict) -> CitationFilterResult:

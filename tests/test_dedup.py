@@ -327,16 +327,26 @@ class TestLot0:
 class TestBackfill:
     def test_backfill_adds_fields_and_preserves_existing(self):
         chunks = [
-            {"id": "rand_1", "doc_id": "111", "chunk_index": 1, "text": "x" * 100},
-            {"id": "rand_2", "doc_id": "111", "chunk_index": 2, "text": "Réf"},
+            {"id": "rand_1", "doc_id": "111", "chunk_index": 1, "text": "x" * 100, "title": "Doc"},
+            {"id": "rand_2", "doc_id": "111", "chunk_index": 2, "text": "Réf", "title": "Doc"},
             {"id": "keep_3", "content_hash": "PRE", "chunk_index": 3, "text": "y" * 100},
+            {"id": "rand_4", "doc_id": "222", "chunk_index": 1, "text": "x" * 100},  # sans titre
         ]
         n = d.backfill_chunk_dedup_fields(chunks)
-        assert n == 2
+        assert n == 3
         assert chunks[0]["dedup_eligible"] is True
-        assert chunks[0]["id"] == d.content_id(chunks[0]["content_hash"], 1)
+        # Audit A05 : id v2 (contenu + source), sans la position.
+        assert chunks[0]["id"] == d.source_content_id(chunks[0]["content_hash"], d.source_key(chunks[0]))
         assert chunks[1]["dedup_eligible"] is False and chunks[1]["id"] == "rand_2"
         assert chunks[2]["content_hash"] == "PRE" and chunks[2]["id"] == "keep_3"
+        # Sans source stable : inéligible, id inchangé (jamais fusionné avec un autre document).
+        assert chunks[3]["dedup_eligible"] is False and chunks[3]["id"] == "rand_4"
+
+    def test_backfill_legacy_v1_ids_on_request(self):
+        """``meta_fields=None`` garde l'id v1 historique ``{hash}_{index}``."""
+        chunks = [{"id": "rand_1", "chunk_index": 1, "text": "x" * 100}]
+        assert d.backfill_chunk_dedup_fields(chunks, meta_fields=None) == 1
+        assert chunks[0]["id"] == d.content_id(chunks[0]["content_hash"], 1)
 
 
 # ======================================================================

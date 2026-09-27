@@ -9,6 +9,14 @@ Tasks:
     cleanup_sessions_task: Remove expired session files and DB records
     cleanup_orphaned_processes_task: Terminate orphaned background processes
 
+Ownership of the jobs (audit A04, 2026-09-27): the expired-session cleanup
+belongs to the web application (APScheduler); ``cleanup_sessions_task`` is
+not scheduled by Beat and, when run on demand, calls the same service
+(``app.services.session_cleanup.cleanup_expired_sessions``: confined
+deletions, archives included). ``cleanup_orphaned_processes_task`` only
+kills a pipeline script older than every time limit a task may legitimately
+use (``orphan_max_runtime``), so a long Albert job is never interrupted.
+
 Features:
     - Periodic execution via Celery Beat
     - Safe file deletion with error handling
@@ -16,7 +24,6 @@ Features:
     - Prometheus metrics for monitoring
 """
 import os
-import shutil
 import logging
 from datetime import datetime, timedelta
 from celery import Task
@@ -59,69 +66,68 @@ def cleanup_sessions_task(self) -> dict:
         }
     """
     start_time = datetime.utcnow()
-    cleaned_count = 0
-    error_count = 0
-
     try:
-        from app.database.session import SessionLocal
-        from app.models.pipeline_session import PipelineSession
-        from app.core.config import UPLOAD_DIR
+        from app.services.session_cleanup import cleanup_expired_sessions
 
-        db = SessionLocal()
-        try:
-            # Find expired sessions not yet cleaned
-            now = datetime.utcnow()
-            expired_sessions = db.query(PipelineSession).filter(
-                PipelineSession.expires_at <= now,
-                PipelineSession.cleaned_up == False,
-                PipelineSession.expires_at.isnot(None)
-            ).all()
-
-            logger.info(f"Found {len(expired_sessions)} expired sessions to clean")
-
-            for session in expired_sessions:
-                try:
-                    # Delete session folder
-                    session_path = os.path.join(UPLOAD_DIR, session.session_folder)
-                    if os.path.exists(session_path):
-                        shutil.rmtree(session_path)
-                        logger.info(f"Deleted session folder: {session_path}")
-
-                    # Mark as cleaned
-                    session.mark_cleaned_up()
-                    cleaned_count += 1
-
-                except Exception as e:
-                    logger.error(f"Failed to cleanup session {session.id}: {e}")
-                    error_count += 1
-
-            db.commit()
-
-        finally:
-            db.close()
-
-        # Update metrics
+        result = cleanup_expired_sessions()
+        # Keys of the service result: sessions_cleaned, sessions_failed, error
+        cleaned_count = int(result.get("sessions_cleaned", 0) or 0)
+        error_count = int(result.get("sessions_failed", 0) or 0) + (1 if result.get("error") else 0)
         _update_cleanup_metrics(cleaned_count, 'expired')
-
         duration = (datetime.utcnow() - start_time).total_seconds()
         logger.info(
             f"Session cleanup completed: {cleaned_count} cleaned, "
             f"{error_count} errors in {duration:.1f}s"
         )
-
-        return {
+        response = {
             "cleaned_count": cleaned_count,
             "errors": error_count,
             "duration_seconds": duration
         }
+        if result.get("error"):
+            response["error"] = result["error"]
+        return response
 
     except Exception as e:
         logger.error(f"Session cleanup task failed: {e}", exc_info=True)
         return {
-            "cleaned_count": cleaned_count,
-            "errors": error_count + 1,
+            "cleaned_count": 0,
+            "errors": 1,
             "error": str(e)
         }
+
+
+# Seconds added to the longest legitimate script runtime before a process is orphaned.
+ORPHAN_RUNTIME_MARGIN = 600
+
+
+def orphan_max_runtime() -> int:
+    """
+    Runtime (seconds) above which a pipeline script of the worker is considered orphaned.
+
+    ``ORPHAN_PROCESS_MAX_RUNTIME`` when set; otherwise the longest hard
+    time limit a task may use (the global ``task_time_limit`` or the Albert
+    limit of ``runner.albert_time_limits``, whichever is larger) plus
+    ``ORPHAN_RUNTIME_MARGIN``: a script still inside its task's limits is
+    never killed.
+
+    Returns:
+        The threshold in seconds.
+    """
+    raw = os.getenv("ORPHAN_PROCESS_MAX_RUNTIME")
+    if raw:
+        try:
+            return max(60, int(raw))
+        except ValueError:
+            logger.warning(f"Invalid ORPHAN_PROCESS_MAX_RUNTIME={raw!r}; using the computed threshold")
+    limits = [int(celery_app.conf.task_time_limit or 7200)]
+    try:
+        from app.tasks.runner import albert_time_limits
+
+        limits.append(int(albert_time_limits()["time_limit"]))
+    except Exception as e:  # configuration unreadable: global limit only
+        logger.debug(f"Albert time limits unavailable: {e}")
+    return max(limits) + ORPHAN_RUNTIME_MARGIN
 
 
 @celery_app.task(
@@ -136,8 +142,9 @@ def cleanup_orphaned_processes_task(self) -> dict:
 
     This task finds and terminates processes that:
     1. Were started by RAGpy (rad_*.py scripts)
-    2. Have been running longer than expected
-    3. Are not associated with active sessions
+    2. Have been running longer than every task time limit
+       (``orphan_max_runtime``: a task killed by its hard limit leaves its
+       script, which runs in its own process group, behind)
 
     Returns:
         dict: {
@@ -158,8 +165,8 @@ def cleanup_orphaned_processes_task(self) -> dict:
             'rad_vectordb.py'
         ]
 
-        # Max runtime before considering orphaned (2 hours)
-        max_runtime = 7200
+        # Max runtime before considering orphaned: above every task time limit
+        max_runtime = orphan_max_runtime()
 
         now = datetime.utcnow()
 

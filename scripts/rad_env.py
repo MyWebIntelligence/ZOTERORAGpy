@@ -57,7 +57,7 @@ SECRET_ENV_SUFFIX = "_API_KEY"
 # les retire de l'environnement non-admin (même tuple que
 # ``credentials.SERVER_SECRET_ENV_VARS`` ; un test le vérifie). Protégés dès que
 # ``RAGPY_DOTENV_DENY`` est présent, pour qu'un ``.env`` ne les réinjecte pas.
-SERVER_SECRET_ENV_VARS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "RESEND_API_KEY")
+SERVER_SECRET_ENV_VARS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "JWT_SECRET_KEY_PREVIOUS", "RESEND_API_KEY")
 
 
 def parse_deny_list(value: Optional[str]) -> FrozenSet[str]:

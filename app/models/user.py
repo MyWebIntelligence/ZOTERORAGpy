@@ -86,6 +86,12 @@ class User(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="desc(BackgroundTask.created_at)"
     )
+    # Uploads made outside any project (audit A02): removed with the user, so a
+    # later account that reuses the SQLite id never inherits them.
+    session_owner_records = relationship(
+        "SessionOwner",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self):
         return f"<User {self.email}>"

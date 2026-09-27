@@ -52,6 +52,10 @@ def run_migrations():
     if "pipeline_sessions" in inspector.get_table_names():
         _migrate_pipeline_sessions_indexes(inspector)
 
+    # Migration: index des adhésions aux projets (audit A11)
+    if "project_members" in inspector.get_table_names():
+        _migrate_project_members_indexes(inspector)
+
 
 def _migrate_pipeline_sessions_indexes(inspector):
     """
@@ -82,6 +86,32 @@ def _migrate_pipeline_sessions_indexes(inspector):
                     ))
                     conn.commit()
                     logger.info(f"Migration completed: {index_name} created")
+                except Exception as e:
+                    logger.warning(f"Could not create index {index_name}: {e}")
+
+
+def _migrate_project_members_indexes(inspector):
+    """
+    Add the membership indexes of project_members (audit A11).
+
+    Creates ``ix_project_members_user_id`` (projects of a user) and
+    ``ix_project_members_project_id`` (members of a project) when missing;
+    new databases get them from ``create_all``.
+    """
+    existing_indexes = {idx["name"] for idx in inspector.get_indexes("project_members")}
+    indexes_to_create = [
+        ("ix_project_members_user_id", "user_id"),
+        ("ix_project_members_project_id", "project_id"),
+    ]
+    with engine.connect() as conn:
+        for index_name, columns in indexes_to_create:
+            if index_name not in existing_indexes:
+                logger.info(f"Migration: Creating index {index_name} on project_members({columns})")
+                try:
+                    conn.execute(text(
+                        f"CREATE INDEX IF NOT EXISTS {index_name} ON project_members ({columns})"
+                    ))
+                    conn.commit()
                 except Exception as e:
                     logger.warning(f"Could not create index {index_name}: {e}")
 

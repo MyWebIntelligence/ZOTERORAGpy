@@ -12,7 +12,6 @@ Key Features:
 - Session Management: View and delete pipeline sessions.
 """
 import os
-import shutil
 from datetime import datetime, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -21,6 +20,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_
 from pydantic import BaseModel
 
+from app.core.upload_safety import remove_session_files
 from app.database.session import get_db
 from app.models.user import User
 from app.models.project import Project
@@ -743,30 +743,9 @@ async def admin_delete_session(
     # Get project for audit
     project = db.query(Project).filter(Project.id == session.project_id).first()
 
-    # Delete session folder and associated files
-    session_folder_name = session.session_folder.split("/")[0] if "/" in session.session_folder else session.session_folder
-    session_path = os.path.join(UPLOAD_DIR, session.session_folder)
-
-    # Delete the session directory
-    if os.path.exists(session_path):
-        shutil.rmtree(session_path)
-
-    # Also delete the parent folder if session_folder contained a subdirectory
-    if "/" in session.session_folder:
-        parent_path = os.path.join(UPLOAD_DIR, session_folder_name)
-        if os.path.exists(parent_path) and os.path.isdir(parent_path):
-            try:
-                remaining = os.listdir(parent_path)
-                if not remaining:
-                    os.rmdir(parent_path)
-            except OSError:
-                pass
-
-    # Delete the original ZIP file if it exists (uploaded archives)
-    for ext in [".zip", ".ZIP", ".tar.gz", ".tgz"]:
-        zip_file_path = os.path.join(UPLOAD_DIR, f"{session_folder_name}{ext}")
-        if os.path.exists(zip_file_path):
-            os.remove(zip_file_path)
+    # Delete session folder, empty parent and uploaded archive, confined to
+    # UPLOAD_DIR (a legacy row with an unsafe folder name removes nothing)
+    remove_session_files(session.session_folder, UPLOAD_DIR)
 
     # Update project if this was the active session
     if project and project.session_folder == session.session_folder:

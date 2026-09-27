@@ -22,8 +22,22 @@ Environment Variables:
     CELERY_RESULT_BACKEND: Redis result backend URL (default: redis://localhost:6379/0)
     ENABLE_CELERY: Feature flag to enable/disable Celery (default: false)
 
+Queues and schedule (audit A04, 2026-09-27):
+    Every task declares its queue in its decorator; ``CELERY_QUEUES`` lists
+    them all in ``task_queues``, so a worker started without ``-Q`` consumes
+    every one of them (``default`` included). ``task_routes`` and the Beat
+    schedule use the explicit task names (``chunking.initial_chunking``,
+    ``cleanup.cleanup_orphaned_processes``...), checked against the registry
+    by ``tests/test_celery_tasks.py``.
+
+    The expired-session cleanup belongs to the web application (APScheduler,
+    ``app/core/scheduler.py``, ``CLEANUP_ENABLED``): Beat does not schedule
+    it, and ``cleanup.cleanup_sessions`` (on demand) runs the same service.
+    Beat schedules the worker-side jobs only: orphaned script processes of
+    the worker container and the metrics refresh.
+
 Usage:
-    # Start worker
+    # Start worker (consumes every queue of CELERY_QUEUES)
     celery -A app.celery_app worker --loglevel=info --concurrency=4
 
     # Start beat scheduler
@@ -35,6 +49,7 @@ Usage:
 import os
 import logging
 from celery import Celery
+from kombu import Queue
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +59,19 @@ CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:63
 
 # Feature flag for dual mode (subprocess vs Celery)
 CELERY_ENABLED = os.getenv('ENABLE_CELERY', 'false').lower() in ('true', '1', 'yes')
+
+# Every queue a task of app/tasks/ publishes to (decorator ``queue=``), plus the
+# default one: a worker started without -Q consumes all of them.
+CELERY_DEFAULT_QUEUE = 'default'
+CELERY_QUEUES = (
+    CELERY_DEFAULT_QUEUE,
+    'extraction',
+    'chunking',
+    'embeddings',
+    'vectordb',
+    'cleanup',
+    'monitoring',
+)
 
 # Create Celery instance
 celery_app = Celery(
@@ -90,40 +118,39 @@ celery_app.conf.update(
     worker_send_task_events=True,
     task_send_sent_event=True,
 
-    # Task routing (optional - for future scaling)
+    # Queues consumed by a worker started without -Q (all of them)
+    task_queues=tuple(Queue(name) for name in CELERY_QUEUES),
+
+    # Task routing by explicit task name (same queues as the decorators)
     task_routes={
-        'app.tasks.extraction.*': {'queue': 'extraction'},
-        'app.tasks.chunking.*': {'queue': 'chunking'},
-        'app.tasks.embeddings.*': {'queue': 'embeddings'},
-        'app.tasks.vectordb.*': {'queue': 'vectordb'},
-        'app.tasks.cleanup.*': {'queue': 'cleanup'},
-        'app.tasks.monitoring.*': {'queue': 'monitoring'},
+        'extraction.*': {'queue': 'extraction'},
+        'chunking.*': {'queue': 'chunking'},
+        'embeddings.*': {'queue': 'embeddings'},
+        'vectordb.*': {'queue': 'vectordb'},
+        'cleanup.*': {'queue': 'cleanup'},
+        'monitoring.*': {'queue': 'monitoring'},
     },
 
     # Default queue for unspecified tasks
-    task_default_queue='default',
+    task_default_queue=CELERY_DEFAULT_QUEUE,
 
     # Task track started state (for progress monitoring)
     task_track_started=True,
 )
 
-# Beat schedule for periodic tasks
+# Beat schedule for periodic tasks (explicit task names of the registry).
+# The expired-session cleanup is scheduled by the web application
+# (APScheduler), never here: one owner for that job.
 celery_app.conf.beat_schedule = {
-    # Cleanup expired sessions every 6 hours
-    'cleanup-expired-sessions': {
-        'task': 'app.tasks.cleanup.cleanup_sessions_task',
-        'schedule': 21600.0,  # 6 hours in seconds
-        'options': {'queue': 'cleanup'}
-    },
     # Update system metrics every minute
     'update-system-metrics': {
-        'task': 'app.tasks.monitoring.update_metrics_task',
+        'task': 'monitoring.update_metrics',
         'schedule': 60.0,  # 1 minute
         'options': {'queue': 'monitoring'}
     },
-    # Cleanup orphaned processes every hour
+    # Cleanup orphaned processes of the worker container every hour
     'cleanup-orphaned-processes': {
-        'task': 'app.tasks.cleanup.cleanup_orphaned_processes_task',
+        'task': 'cleanup.cleanup_orphaned_processes',
         'schedule': 3600.0,  # 1 hour
         'options': {'queue': 'cleanup'}
     },

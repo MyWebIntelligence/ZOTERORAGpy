@@ -22,6 +22,24 @@ Invariant porteur : le hash et la clé d'existence **ne touchent JAMAIS** ``doc_
 traçabilité seulement. Un refus exige **toujours** une corroboration métadonnée ;
 ``chunk_index`` est un corroborateur **souple** en Tier 2 (loggé, non bloquant) et
 une **garde dure** en Tier 3.
+
+Unicité métier (audit A05, 2026-09-27) : un chunk est **un passage d'une source
+stable**. Son identité sépare trois choses :
+
+* le contenu : ``content_hash`` du texte brut normalisé ;
+* la source : ``source_key``, empreinte des valeurs normalisées des
+  ``DEDUP_META_FIELDS`` (titre par défaut) ; sans valeur pour l'un de ces champs,
+  la source n'est pas stable et le chunk n'est jamais dédupliqué (id aléatoire) ;
+* la position : ``chunk_index``, simple métadonnée, hors de l'identité.
+
+L'identifiant adressé par contenu v2 vaut ``{hash[:16]}_s{source[:12]}``
+(``source_content_id``) : un même texte dans deux sources garde deux vecteurs et
+deux provenances ; un même texte de la même source, même décalé d'index, garde
+un seul vecteur. Le Tier 1 refuse un doublon seulement pour le même couple
+(contenu, source). Migration : l'existence Tier 2 interroge l'id du chunk, l'id
+v2 et l'id v1 historique ``{hash[:16]}_{chunk_index}`` (``dedup_candidate_ids``),
+de sorte que les vecteurs déjà indexés en v1 restent reconnus ; ``content_id``
+garde le format v1 (clé d'idempotence des collections Albert, par document).
 """
 
 from __future__ import annotations
@@ -73,12 +91,83 @@ def content_hash(text: Any) -> str:
 
 
 def content_id(chash: str, chunk_index: Any) -> str:
-    """Identifiant **adressé par contenu** : ``"{hash[:16]}_{chunk_index}"``.
+    """Identifiant adressé par contenu **v1** : ``"{hash[:16]}_{chunk_index}"``.
 
-    Rend l'``upsert`` idempotent (Pinecone) et le ``uuid5`` stable (Weaviate/Qdrant)
-    à travers les runs malgré le ``doc_id`` aléatoire.
+    Format historique (vecteurs indexés avant l'audit A05, clé d'idempotence des
+    collections Albert). Il ignore la source : deux documents au même texte et au
+    même index le partagent. Les nouveaux chunks dédupliqués portent l'id v2
+    (``source_content_id``) ; ce format reste interrogé en Tier 2 (migration).
     """
     return f"{chash[:16]}_{chunk_index}"
+
+
+SOURCE_KEY_SEPARATOR = "\x1f"
+
+
+def source_key(meta: Any, meta_fields=("title",)) -> str:
+    """Empreinte de la **source** d'un chunk : SHA-256 des ``meta_fields`` normalisés.
+
+    Même normalisation que la corroboration (``_norm_meta`` : ``strip`` +
+    minuscules). Une valeur vide pour l'un des champs rend la source instable :
+    chaîne vide, et le chunk n'est jamais dédupliqué (on ne peut pas corroborer).
+
+    Args:
+        meta: chunk ou métadonnée (mapping).
+        meta_fields: champs qui identifient la source (``DEDUP_META_FIELDS``).
+
+    Returns:
+        L'empreinte hexadécimale, ou ``""`` sans source stable.
+    """
+    if not isinstance(meta, dict):
+        return ""
+    parts = []
+    for field_name in meta_fields or ():
+        value = _norm_meta(meta.get(field_name))
+        if not value:
+            return ""
+        parts.append(f"{field_name}={value}")
+    if not parts:
+        return ""
+    return hashlib.sha256(SOURCE_KEY_SEPARATOR.join(parts).encode("utf-8")).hexdigest()
+
+
+def source_content_id(chash: str, skey: str) -> str:
+    """Identifiant adressé par contenu **v2** : ``"{hash[:16]}_s{source[:12]}"``.
+
+    Contenu et source, sans la position : idempotent d'un run à l'autre, même si
+    le découpage décale l'index ; distinct pour chaque source qui contient le
+    même texte (provenances conservées).
+    """
+    return f"{chash[:16]}_s{skey[:12]}"
+
+
+def dedup_candidate_ids(chunk: Dict[str, Any], meta_fields=("title",)) -> List[str]:
+    """Identifiants sous lesquels un chunk peut déjà exister dans la base (Tier 2).
+
+    Dans l'ordre, sans doublon : l'``id`` du chunk, l'id v2
+    (``source_content_id``) et l'id v1 historique (``content_id``), ces deux
+    derniers seulement si le chunk porte un ``content_hash``. Un vecteur trouvé
+    sous l'un d'eux n'est refusé qu'après corroboration des métadonnées.
+
+    Args:
+        chunk: chunk du lot.
+        meta_fields: champs de source (``DEDUP_META_FIELDS``).
+
+    Returns:
+        La liste des identifiants candidats.
+    """
+    ids: List[str] = []
+    current = chunk.get("id")
+    if current not in (None, ""):
+        ids.append(str(current))
+    chash = chunk.get("content_hash")
+    if chash:
+        skey = source_key(chunk, meta_fields)
+        for candidate in (source_content_id(chash, skey) if skey else None,
+                          content_id(chash, chunk.get("chunk_index"))):
+            if candidate and candidate not in ids:
+                ids.append(candidate)
+    return ids
 
 
 def is_dedup_eligible(normalized: str, min_chars: int = DEFAULT_MIN_CHARS) -> bool:
@@ -90,19 +179,29 @@ def is_dedup_eligible(normalized: str, min_chars: int = DEFAULT_MIN_CHARS) -> bo
 
 
 def compute_dedup_fields(
-    raw_text: Any, chunk_index: Any, min_chars: int = DEFAULT_MIN_CHARS
+    raw_text: Any, chunk_index: Any, min_chars: int = DEFAULT_MIN_CHARS, source: Optional[str] = None
 ) -> Tuple[str, bool, str]:
     """Helper write-path : renvoie ``(content_hash, dedup_eligible, content_id)``
     en ne normalisant **qu'une fois** le texte brut pré-recodage.
+
+    ``source`` (empreinte ``source_key`` du chunk) : l'identifiant est l'id v2
+    ``source_content_id`` et un chunk sans source stable (``""``) est inéligible.
+    ``None`` : comportement v1 historique (id ``content_id``, éligibilité à la
+    seule longueur), gardé pour les appelants qui ne connaissent pas la source.
     """
     norm = normalize_text_for_hash(raw_text)
     chash = hashlib.sha256(norm.encode("utf-8")).hexdigest()
     eligible = is_dedup_eligible(norm, min_chars)
-    return chash, eligible, content_id(chash, chunk_index)
+    if source is None:
+        return chash, eligible, content_id(chash, chunk_index)
+    if not source:
+        return chash, False, content_id(chash, chunk_index)
+    return chash, eligible, source_content_id(chash, source)
 
 
 def backfill_chunk_dedup_fields(
-    chunks: List[Dict[str, Any]], min_chars: int = DEFAULT_MIN_CHARS, text_key: str = "text"
+    chunks: List[Dict[str, Any]], min_chars: int = DEFAULT_MIN_CHARS, text_key: str = "text",
+    meta_fields: Optional[Tuple[str, ...]] = ("title",),
 ) -> int:
     """Lot 5 (back-fill) — dote des chunks EXISTANTS (sans ``content_hash``) des
     champs ``content_hash`` / ``dedup_eligible`` et d'un ``id`` adressé par contenu,
@@ -115,7 +214,13 @@ def backfill_chunk_dedup_fields(
     matchera **pas** un ré-ingest frais (qui, lui, hache le brut). Le back-fill protège
     l'existant ; la protection pleine vient d'un ré-run du pipeline avec
     ``DEDUP_ENABLED=1``. Les chunks portant déjà un ``content_hash`` sont laissés tels
-    quels (write-path raw préservé)."""
+    quels (write-path raw préservé).
+
+    Identité (audit A05) : avec ``meta_fields`` (défaut ``("title",)``), l'id
+    attribué est l'id v2 ``source_content_id`` et un chunk sans source stable
+    reste inéligible (id inchangé) : deux vecteurs au même texte mais de sources
+    différentes ne fusionnent jamais sous un même id. ``meta_fields=None`` garde
+    l'id v1 historique."""
     modified = 0
     for c in chunks:
         if c.get("content_hash"):
@@ -123,10 +228,15 @@ def backfill_chunk_dedup_fields(
         norm = normalize_text_for_hash(c.get(text_key, ""))
         chash = hashlib.sha256(norm.encode("utf-8")).hexdigest()
         eligible = is_dedup_eligible(norm, min_chars)
+        new_id = content_id(chash, c.get("chunk_index", 0))
+        if meta_fields is not None:
+            skey = source_key(c, meta_fields)
+            eligible = eligible and bool(skey)
+            new_id = source_content_id(chash, skey) if skey else None
         c["content_hash"] = chash
         c["dedup_eligible"] = eligible
-        if eligible:
-            c["id"] = content_id(chash, c.get("chunk_index", 0))
+        if eligible and new_id:
+            c["id"] = new_id
         modified += 1
     return modified
 
@@ -220,8 +330,9 @@ class DedupAdapter(Protocol):
             Existence serveur-side batchée. Clé de retour = ``content_hash`` du
             chunk. ``meta_dict`` porte au minimum les ``DEDUP_META_FIELDS`` + ``id``
             + ``content_hash`` + ``chunk_index``. Pinecone résout par
-            ``index.fetch(content_id)`` ; Weaviate/Qdrant par UUID adressé par
-            contenu (``fetch_objects`` / ``retrieve``) ; Albert répond en mémoire,
+            ``index.fetch`` des ``dedup_candidate_ids`` (id du chunk, id v2, id v1) ;
+            Weaviate/Qdrant par les UUID de ces mêmes ids
+            (``fetch_objects`` / ``retrieve``) ; Albert répond en mémoire,
             sans appel HTTP, depuis l'index construit par ``preload()``, et
             réhydrate les ``DEDUP_META_FIELDS`` assainis à l'envoi (titre tronqué
             à 255 caractères…) pour que la corroboration reste possible. La
@@ -517,8 +628,9 @@ def dedup_filter(
     rejections: List[Dict[str, Any]] = []
     rejected_ids = set()  # id() des objets chunk refusés (préserve l'ordre)
 
-    # --- Tier 1 : seen-set mémoire (in-batch) ---------------------------------
-    seen: Dict[str, Dict[str, Any]] = {}
+    # --- Tier 1 : seen-set mémoire (in-batch), par couple (contenu, source) ----
+    # Même texte, sources différentes : deux provenances, toutes deux conservées.
+    seen: Dict[Tuple[str, str], Dict[str, Any]] = {}
     tier1_survivors: List[Dict[str, Any]] = []
     for chunk in all_chunks:
         chash = chunk.get("content_hash")
@@ -527,13 +639,17 @@ def dedup_filter(
             eligible = bool(chash)  # éligibilité inconnue → dérivée de la présence du hash
         if not chash or not eligible:
             continue  # toujours conservé (filtre final préservant l'ordre)
-        if chash in seen:
+        skey = source_key(chunk, config.meta_fields)
+        if not skey:
+            continue  # source instable : jamais corroborable, toujours conservé
+        key = (chash, skey)
+        if key in seen:
             rejections.append(
-                _build_rejection(chunk, "in_batch_duplicate", [seen[chash]], adapter, config, target_desc)
+                _build_rejection(chunk, "in_batch_duplicate", [seen[key]], adapter, config, target_desc)
             )
             rejected_ids.add(id(chunk))
             continue
-        seen[chash] = chunk
+        seen[key] = chunk
         tier1_survivors.append(chunk)
 
     # --- Tier 2 : existence serveur-side batchée ------------------------------

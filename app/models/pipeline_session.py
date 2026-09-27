@@ -9,6 +9,7 @@ associated with a project.
 Key Components:
 - `SessionStatus`: Enumeration of all possible pipeline states (e.g., EXTRACTING, CHUNKING).
 - `PipelineSession`: The SQLAlchemy model tracking status, counts, and errors.
+- `SessionOwner`: The uploader of a session folder created outside any project.
 - TTL (Time-To-Live) support for automatic session cleanup.
 """
 import os
@@ -149,3 +150,31 @@ class PipelineSession(Base):
             "cleaned_up": self.cleaned_up,
             "is_expired": self.is_expired()
         }
+
+
+class SessionOwner(Base):
+    """
+    Uploader of a session folder created outside any project.
+
+    ``/upload_zip`` and ``/upload_csv`` without ``project_id`` record one row
+    per upload (audit A02 of 2026-09-27): the uploader is then the only
+    non-administrator allowed to work on the folder
+    (``app.core.session_access``). A session of a project is owned by that
+    project through its ``PipelineSession`` row, never through this table.
+
+    The table is new: ``create_all`` creates it on existing databases, no
+    ``ALTER TABLE`` is needed.
+    """
+    __tablename__ = "session_owners"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Canonical folder, relative to uploads/ (same value as the response ``path``)
+    session_folder = Column(String(255), unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_type = Column(String(50), nullable=True)        # 'zip', 'csv'
+    original_filename = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        """Short representation: folder and owner id."""
+        return f"<SessionOwner(folder={self.session_folder}, user_id={self.user_id})>"

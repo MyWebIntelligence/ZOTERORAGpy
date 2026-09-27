@@ -15,11 +15,15 @@ routes, les utilitaires web et les scripts CLI, qu'Albert soit activé ou non.
   par défaut garde exactement les paramètres de cache d'aujourd'hui.
 * ``check_uniform_space`` / ``target_mismatch_message`` : gardes d'espace
   (fichier mélangé, dimension de la cible), sans aucun appel réseau.
+* ``valid_dense_vector`` : validation commune d'un vecteur dense (audit A07),
+  partagée par la phase dense (avant cache et écriture) et les connecteurs
+  (avant insertion), quel que soit le fournisseur.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import numbers
 import os
 from dataclasses import dataclass, replace
@@ -299,6 +303,35 @@ class EmbeddingConfig:
 # ---------------------------------------------------------------------------
 # Gardes d'espace
 # ---------------------------------------------------------------------------
+def valid_dense_vector(vec: Any, dim: Optional[int] = None) -> bool:
+    """Vrai si ``vec`` est un vecteur dense exploitable (audit A07).
+
+    Liste (ou tuple) non vide de nombres **finis** (ni NaN ni infini), de norme
+    non nulle, et de longueur ``dim`` quand elle est donnée. Un vecteur nul
+    (ancien repli d'échec OpenAI), vide, de mauvaise dimension ou contenant une
+    valeur non numérique n'est jamais mis en cache, écrit comme succès ni inséré.
+
+    Args:
+        vec: vecteur candidat.
+        dim: dimension attendue, ou ``None`` pour ne pas la contrôler.
+
+    Returns:
+        ``True`` si le vecteur est exploitable.
+    """
+    if isinstance(vec, (str, bytes)) or not isinstance(vec, (list, tuple)) or not vec:
+        return False
+    if dim is not None and len(vec) != dim:
+        return False
+    # Boucles C (sum, any) plutôt qu'une boucle Python sur 3072 valeurs : la somme
+    # propage NaN et l'infini (inf - inf donne NaN), déborde vers l'infini et refuse
+    # un non-nombre (TypeError).
+    try:
+        total = sum(vec)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(total) and any(vec)
+
+
 def _real_vector(vec: Any) -> bool:
     """Vrai si ``vec`` est une liste de nombres non vide et non entièrement nulle."""
     if not isinstance(vec, (list, tuple)) or not vec:

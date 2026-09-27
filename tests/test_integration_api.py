@@ -4,7 +4,9 @@ Integration tests for a few public API routes (home page, settings, CSV upload).
 ``/get_credentials`` is ADMIN only and ``/upload_csv`` requires an
 authenticated user: the fake admin is injected with ``app.dependency_overrides``
 and the settings ``.env`` is a temporary file holding fake values, so the host
-``.env`` is never read. CSV uploads land in a temporary uploads directory.
+``.env`` is never read. CSV uploads land in a temporary uploads directory and
+the database is a temporary SQLite file with the full schema (the upload
+records its owner): the developer's ``data/ragpy.db`` is never touched.
 """
 
 import os
@@ -21,8 +23,14 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 RAGPY_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(RAGPY_ROOT))
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from app.main import app
+from app.database.base import Base
+from app.database.session import get_db
 from app.middleware.auth import get_current_active_user, require_admin
+from app.models import audit, background_task, pipeline_session, project  # noqa: F401  (tables)
 from app.models.user import User
 from app.routes import ingestion as ingestion_routes
 from app.routes import settings as settings_routes
@@ -65,6 +73,19 @@ class TestIntegrationAPI(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
+        # Temporary database with the full schema, the fake admin stored as user 1.
+        engine = create_engine(
+            f"sqlite:///{os.path.join(self._tmp.name, 'test.db')}",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=engine)
+        self.addCleanup(engine.dispose)
+        self.db = sessionmaker(autocommit=False, autoflush=False, bind=engine)()
+        self.addCleanup(self.db.close)
+        self.db.add(_fake_admin())
+        self.db.commit()
+        app.dependency_overrides[get_db] = lambda: self.db
+        self.addCleanup(app.dependency_overrides.pop, get_db, None)
         self.addCleanup(app.dependency_overrides.pop, require_admin, None)
         self.addCleanup(app.dependency_overrides.pop, get_current_active_user, None)
         self.client = TestClient(app)
@@ -112,7 +133,7 @@ class TestIntegrationAPI(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
 
     def _as_user(self):
-        """Authenticate upload requests as the fake admin (no project_id: no database access)."""
+        """Authenticate upload requests as the fake admin (its upload owner row goes to the temporary database)."""
         app.dependency_overrides[get_current_active_user] = _fake_admin
 
     def test_upload_csv_requires_authentication(self):

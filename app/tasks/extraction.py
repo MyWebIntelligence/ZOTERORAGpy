@@ -114,6 +114,7 @@ def process_dataframe_task(
         result = runner.run_script(
             cmd,
             env,
+            session_dir=base_dir,  # session lock (audit A12)
             on_progress=runner.make_progress_reporter(self, 'Processing document'),
             # Albert OCR link active for the user: Albert timeout (route rule)
             timeout=runner.task_timeout(runner.EXTRACTION_TIMEOUT, runner.ocr_albert_active(user))

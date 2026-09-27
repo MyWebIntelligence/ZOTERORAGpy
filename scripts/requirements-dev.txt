@@ -1,0 +1,4 @@
+# Dépendances de développement et de CI (audit A13) : l'exécution de l'application
+# n'utilise que requirements.txt ; pytest y reste pour les tests dans le conteneur.
+-r requirements.txt
+ruff==0.6.9

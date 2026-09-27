@@ -12,7 +12,7 @@ Key Components:
 - `ProjectMember`: Association table for many-to-many user-project relationships.
 """
 from typing import Optional
-from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.database.base import Base, TimestampMixin
@@ -120,8 +120,16 @@ class Project(Base, TimestampMixin):
 class ProjectMember(Base, TimestampMixin):
     """
     Association entre utilisateurs et projets pour les collaborations.
+
+    Index sur ``user_id`` (projets d'un utilisateur) et ``project_id``
+    (membres d'un projet) : audit A11 ; créés sur les bases existantes par
+    ``run_migrations``.
     """
     __tablename__ = "project_members"
+    __table_args__ = (
+        Index("ix_project_members_user_id", "user_id"),
+        Index("ix_project_members_project_id", "project_id"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)

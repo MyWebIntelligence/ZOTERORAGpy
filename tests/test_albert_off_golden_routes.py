@@ -72,7 +72,7 @@ from app.models import audit as _audit_models, pipeline_session as _ps_models  #
 from app.models import background_task as _bg_models  # noqa: E402,F401
 from app.models.user import User  # noqa: E402
 from app.models.project import Project  # noqa: E402
-from app.models.pipeline_session import PipelineSession  # noqa: E402
+from app.models.pipeline_session import PipelineSession, SessionOwner  # noqa: E402
 from app.core.security import create_access_token  # noqa: E402
 from app.core.credentials import encrypt_credentials, mask_credential  # noqa: E402
 import app.config as app_settings_module  # noqa: E402
@@ -898,6 +898,13 @@ def golden_app(tmp_path, monkeypatch):
         created_at=FIXED_CREATED_AT, updated_at=FIXED_CREATED_AT,
     )
     db.add(pipeline_session)
+    # Each fresh folder stands for that persona's own upload outside any project:
+    # /upload_zip records its uploader (SessionOwner, audit A02 of 2026-09-27).
+    for persona in PERSONAS:
+        db.add(SessionOwner(
+            session_folder="gsess-fresh-" + persona.replace("_", "-"), user_id=users[persona].id,
+            source_type="zip", original_filename="biblio.zip", created_at=FIXED_CREATED_AT,
+        ))
     db.commit()
 
     recorder = _Recorder()

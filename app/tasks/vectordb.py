@@ -166,6 +166,7 @@ def upload_to_vectordb_task(
         result = runner.run_script(
             cmd,
             env,
+            session_dir=os.path.dirname(os.path.abspath(input_file)),  # session lock (audit A12)
             on_progress=runner.make_progress_reporter(self, 'Uploading batch'),
             timeout=runner.VECTORDB_TIMEOUT
         )
@@ -356,6 +357,7 @@ def _upload_to_albert(
         result = runner.run_script(
             cmd,
             env,
+            session_dir=os.path.dirname(os.path.abspath(input_file)),  # session lock (audit A12)
             on_progress=runner.make_progress_reporter(task, 'Uploading batch'),
             timeout=runner.task_timeout(runner.VECTORDB_TIMEOUT, True)
         )

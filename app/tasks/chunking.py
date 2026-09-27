@@ -115,6 +115,7 @@ def initial_chunking_task(
         result = runner.run_script(
             cmd,
             env,
+            session_dir=output_dir,  # session lock (audit A12)
             on_progress=runner.make_progress_reporter(self, 'Chunking document'),
             # albert/<id> model: Albert timeout (route rule)
             timeout=runner.task_timeout(runner.CHUNKING_TIMEOUT, runner.chunking_selects_albert(model))

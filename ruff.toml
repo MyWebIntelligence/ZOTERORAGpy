@@ -1,0 +1,9 @@
+# Contrôle statique minimal (audit A13, 2026-09-27) : erreurs de syntaxe (E9),
+# comparaisons invalides (F63), instructions mal placées (F7) et noms indéfinis
+# (F82). Aucun avertissement de style : élargir règle par règle, une fois le
+# dépôt au propre pour la règle ajoutée.
+target-version = "py311"
+extend-exclude = ["uploads", "sources", "data", "logs"]
+
+[lint]
+select = ["E9", "F63", "F7", "F82"]

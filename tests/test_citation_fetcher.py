@@ -34,13 +34,18 @@ MOCK_PDF_BYTES = b'%PDF-1.4\n%Test PDF\n'  # Minimal valid PDF header
 
 
 class TestFetchCitationContent:
-    """Test suite for main fetch_citation_content function."""
+    """Test suite for main fetch_citation_content function.
 
-    @pytest.mark.asyncio
+    Contents shorter than 100 characters count as a failed fetch (see
+    ``test_short_content_triggers_fallback``): the success cases use longer
+    contents. These async tests run with the anyio plugin (``conftest.py``).
+    """
+
+    @pytest.mark.anyio
     async def test_fetch_pdf_success(self):
         """Test successful PDF content fetching."""
         with patch('app.utils.citation_fetcher._fetch_pdf_content') as mock_pdf:
-            mock_pdf.return_value = "This is PDF content from the paper."
+            mock_pdf.return_value = "This is PDF content from the paper." + " " + "x" * 100
 
             content, source = await fetch_citation_content(
                 article_url=None,
@@ -51,11 +56,11 @@ class TestFetchCitationContent:
             assert "PDF content" in content
             assert len(content) > 0
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_fetch_html_success(self):
         """Test successful HTML content fetching."""
         with patch('app.utils.citation_fetcher._fetch_html_content') as mock_html:
-            mock_html.return_value = "This is HTML content from the article."
+            mock_html.return_value = "This is HTML content from the article." + " " + "x" * 100
 
             content, source = await fetch_citation_content(
                 article_url="https://example.com/article",
@@ -66,7 +71,7 @@ class TestFetchCitationContent:
             assert "HTML content" in content
             assert len(content) > 0
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_fallback_pdf_to_html(self):
         """Test fallback from failed PDF to successful HTML."""
         with patch('app.utils.citation_fetcher._fetch_pdf_content') as mock_pdf, \
@@ -75,7 +80,7 @@ class TestFetchCitationContent:
             # PDF fails
             mock_pdf.side_effect = ContentFetchError("PDF not found")
             # HTML succeeds
-            mock_html.return_value = "HTML fallback content successfully fetched."
+            mock_html.return_value = "HTML fallback content successfully fetched." + " " + "x" * 100
 
             content, source = await fetch_citation_content(
                 article_url="https://example.com/article",
@@ -85,7 +90,7 @@ class TestFetchCitationContent:
             assert source == "html"
             assert "HTML fallback" in content
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_fallback_to_none(self):
         """Test fallback to empty content when both PDF and HTML fail."""
         with patch('app.utils.citation_fetcher._fetch_pdf_content') as mock_pdf, \
@@ -104,7 +109,7 @@ class TestFetchCitationContent:
             assert source == "none"
             assert content == ""
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_no_urls_provided(self):
         """Test behavior when no URLs are provided."""
         content, source = await fetch_citation_content(
@@ -116,7 +121,7 @@ class TestFetchCitationContent:
         assert source == "none"
         assert content == ""
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_content_truncation(self):
         """Test content is truncated to max_chars."""
         long_content = "A" * 20000  # 20k characters
@@ -133,7 +138,7 @@ class TestFetchCitationContent:
             assert len(content) == 5000
             assert content == "A" * 5000
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_retry_mechanism(self):
         """Test retry logic attempts fetching multiple times."""
         with patch('app.utils.citation_fetcher._fetch_pdf_content') as mock_pdf:
@@ -141,7 +146,7 @@ class TestFetchCitationContent:
             mock_pdf.side_effect = [
                 ContentFetchError("Timeout"),
                 ContentFetchError("Timeout"),
-                "Success after retries"
+                "Success after retries" + " " + "x" * 100
             ]
 
             content, source = await fetch_citation_content(
@@ -155,7 +160,7 @@ class TestFetchCitationContent:
             assert "Success" in content
             assert mock_pdf.call_count == 3
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_short_content_triggers_fallback(self):
         """Test that content shorter than 100 chars triggers fallback."""
         with patch('app.utils.citation_fetcher._fetch_pdf_content') as mock_pdf, \
@@ -179,7 +184,7 @@ class TestFetchCitationContent:
 class TestFetchPdfContent:
     """Test suite for PDF content fetching."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_pdf_fetch_success(self):
         """Test successful PDF text extraction."""
         # Create a mock PDF document
@@ -205,7 +210,7 @@ class TestFetchPdfContent:
 
             assert "PDF text content" in content
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_pdf_fetch_http_error(self):
         """Test PDF fetch handles HTTP errors."""
         with patch('aiohttp.ClientSession.get') as mock_get:
@@ -219,7 +224,7 @@ class TestFetchPdfContent:
 
             assert "HTTP 404" in str(exc_info.value)
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_pdf_fetch_invalid_pdf(self):
         """Test PDF fetch handles invalid PDF files."""
         with patch('aiohttp.ClientSession.get') as mock_get, \
@@ -241,7 +246,7 @@ class TestFetchPdfContent:
 class TestFetchHtmlContent:
     """Test suite for HTML content fetching."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_html_fetch_success(self):
         """Test successful HTML text extraction."""
         html_content = """
@@ -266,7 +271,7 @@ class TestFetchHtmlContent:
             assert len(content) > 0
             assert "Article Title" in content or "article content" in content.lower()
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_html_fetch_http_error(self):
         """Test HTML fetch handles HTTP errors."""
         with patch('aiohttp.ClientSession.get') as mock_get:
@@ -279,7 +284,7 @@ class TestFetchHtmlContent:
 
             assert "HTTP 403" in str(exc_info.value)
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_html_removes_unwanted_elements(self):
         """Test HTML extraction removes scripts, styles, etc."""
         html_content = """
@@ -348,7 +353,7 @@ class TestCleanText:
 class TestFetchMultipleCitations:
     """Test suite for concurrent multiple citation fetching."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_fetch_multiple_success(self):
         """Test fetching multiple citations concurrently."""
         citations = [
@@ -372,7 +377,7 @@ class TestFetchMultipleCitations:
             assert results[1] == ("Content 2", "pdf")
             assert results[2] == ("Content 3", "html")
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_fetch_multiple_handles_exceptions(self):
         """Test handling of exceptions in concurrent fetching."""
         citations = [

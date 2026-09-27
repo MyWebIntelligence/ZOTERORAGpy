@@ -15,7 +15,10 @@ through `run_tracked_subprocess`, with an environment built by
   reach a non-admin subprocess);
 - replace `run_tracked_subprocess` with an `AsyncMock` (no process is started)
   and check the command line, the environment and how the CLI output is parsed;
-- work in a temporary uploads directory.
+- work in a temporary uploads directory and a temporary SQLite database with
+  the full schema (audit A13: no pre-existing ``data/ragpy.db`` is needed, and
+  the developer's database is never touched); the session folder is recorded
+  as an upload of the test user (``SessionOwner``, audit A02).
 
 Key Tests:
 - Pinecone upload success and error handling.
@@ -31,6 +34,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 # Add the 'ragpy' directory (parent of app/ and scripts/) to sys.path so that
 # 'from app.main import app' works when this file is run on its own.
@@ -42,7 +47,11 @@ if ragpy_dir not in sys.path:
 from app.main import app
 from app.core.config import RAGPY_DIR
 from app.core.credentials import encrypt_credentials
+from app.database.base import Base
+from app.database.session import get_db
 from app.middleware.auth import get_current_active_user
+from app.models import audit, background_task, pipeline_session, project  # noqa: F401  (tables)
+from app.models.pipeline_session import SessionOwner
 from app.models.user import User
 from app.routes import processing as processing_routes
 
@@ -123,6 +132,21 @@ class TestMainApp(unittest.TestCase):
         run_patcher = patch.object(processing_routes, "run_tracked_subprocess", self.run_subprocess)
         run_patcher.start()
         self.addCleanup(run_patcher.stop)
+
+        # Temporary database with the full schema; the session folder is the
+        # test user's own upload (SessionOwner), as /upload_zip records it.
+        engine = create_engine(
+            f"sqlite:///{os.path.join(self.uploads, 'test.db')}",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=engine)
+        self.addCleanup(engine.dispose)
+        self.db = sessionmaker(autocommit=False, autoflush=False, bind=engine)()
+        self.addCleanup(self.db.close)
+        self.db.add(SessionOwner(session_folder=SESSION, user_id=4242, source_type="zip"))
+        self.db.commit()
+        app.dependency_overrides[get_db] = lambda: self.db
+        self.addCleanup(app.dependency_overrides.pop, get_db, None)
 
         self.user = _make_user(FAKE_CREDENTIALS)
         app.dependency_overrides[get_current_active_user] = lambda: self.user
@@ -208,7 +232,17 @@ class TestMainApp(unittest.TestCase):
         self.assertIn("--index is required for Pinecone", response.json()["details"])
 
     def test_upload_db_chunks_file_not_found(self):
-        # Unknown session folder
+        # Unknown folder without any owner record: refused before any lookup (audit A02)
+        response = client.post("/upload_db", data={
+            "path": "non_existent_session",
+            "db_choice": "pinecone",
+            "pinecone_index_name": "test_index"
+        })
+        self.assertEqual(response.status_code, 403)
+
+        # Recorded upload of the user whose folder no longer exists
+        self.db.add(SessionOwner(session_folder="non_existent_session", user_id=4242, source_type="zip"))
+        self.db.commit()
         response = client.post("/upload_db", data={
             "path": "non_existent_session",
             "db_choice": "pinecone",

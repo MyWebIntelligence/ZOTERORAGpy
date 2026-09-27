@@ -11,19 +11,44 @@ Key Features:
 - File Uploads: Handle ZIP archives and CSV files for ingestion.
 - Status Tracking: Update and retrieve the status of processing sessions.
 - File Verification: Check for the existence of intermediate files (chunks, embeddings).
+
+Access rights (audit A01/A02, 2026-09-27):
+- Reading a session (``/verify``, ``/files``, the session list) needs the
+  membership of its project; changing it (``PATCH .../status``, Celery
+  submissions) needs the edit right (owner or collaborator), like the
+  pipeline routes (``app.core.session_access``). Deleting stays reserved to
+  the project owner and the administrators.
+- Uploads use server-generated storage names, bounded sizes and the shared
+  ZIP extraction of ``app.core.upload_safety``; the ``PipelineSession`` row
+  is written before the response, and a failed write removes the upload.
+  Every removal is confined to ``UPLOAD_DIR``.
 """
+import asyncio
 import os
-import shutil
-import uuid
 import zipfile
 from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, Query, status
+from fastapi import status as http_status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.core.upload_safety import (
+    UnsafePathError,
+    UploadTooLargeError,
+    confined_path,
+    extract_zip_with_encoding_fix,
+    filename_extension,
+    max_upload_bytes,
+    new_session_folder_name,
+    remove_session_files,
+    safe_remove_file,
+    safe_remove_tree,
+    save_upload,
+    split_processing_path,
+)
 from app.database.session import get_db
 from app.models.user import User
 from app.models.project import Project
@@ -137,7 +162,31 @@ def verify_project_access(db: Session, project_id: int, user: User) -> Project:
     return project
 
 
-def verify_session_access(db: Session, session_folder: str, user: User) -> PipelineSession:
+SESSION_EDIT_DENIED_MESSAGE = (
+    "Accès en lecture seule à cette session : seuls le propriétaire et les collaborateurs "
+    "du projet peuvent la modifier."
+)
+
+
+def verify_project_edit(project: Project, user: User, detail: str = SESSION_EDIT_DENIED_MESSAGE) -> None:
+    """
+    Require the edit right on ``project`` (owner, collaborator or administrator).
+
+    Args:
+        project: Project already checked by ``verify_project_access``.
+        user: The user object to verify.
+        detail: Message of the 403 refusal.
+
+    Raises:
+        HTTPException: 403 when the user may only read the project (viewer).
+    """
+    if not project.can_edit(user.id) and not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def verify_session_access(
+    db: Session, session_folder: str, user: User, write: bool = False
+) -> PipelineSession:
     """
     Verifies that a user has access to a specific pipeline session.
 
@@ -148,13 +197,17 @@ def verify_session_access(db: Session, session_folder: str, user: User) -> Pipel
         db (Session): The database session.
         session_folder (str): The unique folder name of the pipeline session.
         user (User): The user object to verify access for.
+        write (bool): Require the edit right (owner, collaborator or
+            administrator) instead of the membership only (audit A02: a
+            viewer reads, never modifies).
 
     Returns:
         PipelineSession: The session object if the user has access.
 
     Raises:
         HTTPException: If the session is not found (404) or if the user does
-                       not have access to the parent project (403).
+                       not have access to the parent project, or only reads
+                       it when ``write`` is set (403).
     """
     session = db.query(PipelineSession).filter(
         PipelineSession.session_folder == session_folder
@@ -167,9 +220,34 @@ def verify_session_access(db: Session, session_folder: str, user: User) -> Pipel
         )
 
     # Verify project access
-    verify_project_access(db, session.project_id, user)
+    project = verify_project_access(db, session.project_id, user)
+    if write:
+        verify_project_edit(project, user)
 
     return session
+
+
+def _session_directory_path(session_folder: str) -> str:
+    """
+    Absolute path of a recorded session folder, confined to ``UPLOAD_DIR``.
+
+    Args:
+        session_folder: Folder of a ``PipelineSession`` row.
+
+    Returns:
+        The absolute folder path.
+
+    Raises:
+        HTTPException: 400 when the stored folder does not resolve strictly
+            under ``UPLOAD_DIR`` (a legacy row with an unsafe name).
+    """
+    try:
+        return os.path.abspath(confined_path(UPLOAD_DIR, session_folder))
+    except UnsafePathError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Chemin de session invalide : le dossier doit se trouver sous uploads/."
+        )
 
 
 # --- Routes ---
@@ -284,45 +362,38 @@ async def upload_zip_to_project(
             detail="Vous n'avez pas les droits pour ajouter des fichiers à ce projet"
         )
 
-    # Generate unique session folder
-    unique_id = str(uuid.uuid4().hex)[:8]
-    original_filename, file_extension = os.path.splitext(file.filename)
-    session_folder = f"{unique_id}_{original_filename}"
-
-    zip_path = os.path.join(UPLOAD_DIR, f"{session_folder}{file_extension}")
-    dst_dir = os.path.join(UPLOAD_DIR, session_folder)
-
+    # Server-generated storage names (audit A01): the client name is metadata only
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    session_folder = new_session_folder_name(file.filename)
+    zip_path = confined_path(UPLOAD_DIR, f"{session_folder}.zip")
+    dst_dir = confined_path(UPLOAD_DIR, session_folder)
 
     try:
-        # Save ZIP file
-        with open(zip_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        await asyncio.to_thread(save_upload, file.file, zip_path, max_upload_bytes())
+    except UploadTooLargeError as e:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e))
+    except OSError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de l'enregistrement: {str(e)}"
+        )
 
-        # Extract ZIP
+    try:
+        # Extract ZIP (same checks as /upload_zip: members, sizes, encoding fix)
         if os.path.exists(dst_dir):
-            shutil.rmtree(dst_dir)
+            safe_remove_tree(dst_dir, UPLOAD_DIR)
         os.makedirs(dst_dir, exist_ok=True)
-
-        with zipfile.ZipFile(zip_path, 'r') as z:
-            z.extractall(dst_dir)
+        await asyncio.to_thread(extract_zip_with_encoding_fix, zip_path, dst_dir)
 
         # Handle single root directory case
-        extracted_items = os.listdir(dst_dir)
-        processing_path = dst_dir
-
-        if len(extracted_items) == 1:
-            single_item_path = os.path.join(dst_dir, extracted_items[0])
-            if os.path.isdir(single_item_path):
-                processing_path = single_item_path
-
+        processing_path, tree = await asyncio.to_thread(split_processing_path, dst_dir)
         relative_path = os.path.relpath(processing_path, UPLOAD_DIR)
 
         # Create pipeline session record
         pipeline_session = PipelineSession(
             project_id=project_id,
             session_folder=relative_path,
-            original_filename=file.filename,
+            original_filename=(file.filename or "")[:255] or None,
             source_type="zip",
             status=SessionStatus.CREATED
         )
@@ -334,14 +405,6 @@ async def upload_zip_to_project(
         db.commit()
         db.refresh(pipeline_session)
 
-        # Build file tree
-        tree = []
-        for root, dirs, files in os.walk(processing_path):
-            for d in dirs:
-                tree.append(os.path.relpath(os.path.join(root, d), processing_path) + '/')
-            for fname in files:
-                tree.append(os.path.relpath(os.path.join(root, fname), processing_path))
-
         return JSONResponse({
             "path": relative_path,
             "tree": tree,
@@ -349,20 +412,40 @@ async def upload_zip_to_project(
             "project_id": project_id
         })
 
+    except UploadTooLargeError as e:
+        _discard_upload(db, dst_dir, zip_path)
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e))
     except zipfile.BadZipFile:
-        if os.path.exists(dst_dir):
-            shutil.rmtree(dst_dir)
+        _discard_upload(db, dst_dir, zip_path)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Le fichier n'est pas une archive ZIP valide"
         )
     except Exception as e:
-        if os.path.exists(dst_dir):
-            shutil.rmtree(dst_dir)
+        _discard_upload(db, dst_dir, zip_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de l'extraction: {str(e)}"
         )
+
+
+def _discard_upload(db: Session, dst_dir: Optional[str], archive_path: Optional[str] = None) -> None:
+    """
+    Roll back and remove a failed project upload (folder and archive), confined to ``UPLOAD_DIR``.
+
+    Args:
+        db: Database session (rolled back: no row is left for a removed folder).
+        dst_dir: Session folder created for the upload, or None.
+        archive_path: Uploaded archive, or None.
+    """
+    try:
+        db.rollback()
+    except Exception:
+        pass
+    if dst_dir:
+        safe_remove_tree(dst_dir, UPLOAD_DIR)
+    if archive_path:
+        safe_remove_file(archive_path, UPLOAD_DIR)
 
 
 @router.post("/projects/{project_id}/upload_csv")
@@ -409,25 +492,23 @@ async def upload_csv_to_project(
         )
 
     # Validate extension
-    original_filename, file_extension = os.path.splitext(file.filename)
-    if file_extension.lower() != ".csv":
+    if filename_extension(file.filename) != ".csv":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Seuls les fichiers .csv sont acceptés"
         )
 
-    # Generate unique session folder
-    unique_id = str(uuid.uuid4().hex)[:8]
-    session_folder = f"{unique_id}_{original_filename}"
-    dst_dir = os.path.join(UPLOAD_DIR, session_folder)
+    # Server-generated storage names (audit A01): the client name is metadata only
+    session_folder = new_session_folder_name(file.filename)
+    dst_dir = confined_path(UPLOAD_DIR, session_folder)
+    temp_csv_path = confined_path(dst_dir, "_source_upload.csv")
+    output_csv_path = confined_path(dst_dir, "output.csv")
 
     os.makedirs(dst_dir, exist_ok=True)
 
     try:
         # Save CSV temporarily
-        temp_csv_path = os.path.join(dst_dir, f"{original_filename}.csv")
-        with open(temp_csv_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        await asyncio.to_thread(save_upload, file.file, temp_csv_path, max_upload_bytes())
 
         # Import and process with ingestion module
         import sys
@@ -435,17 +516,14 @@ async def upload_csv_to_project(
             sys.path.insert(0, RAGPY_DIR)
 
         from ingestion import ingest_csv_to_dataframe
-        import pandas as pd
 
-        df = ingest_csv_to_dataframe(temp_csv_path)
+        df = await asyncio.to_thread(ingest_csv_to_dataframe, temp_csv_path)
 
         # Save as output.csv
-        output_csv_path = os.path.join(dst_dir, "output.csv")
-        df.to_csv(output_csv_path, index=False, encoding="utf-8-sig")
+        await asyncio.to_thread(df.to_csv, output_csv_path, index=False, encoding="utf-8-sig")
 
-        # Clean up temp file if different
-        if os.path.abspath(temp_csv_path) != os.path.abspath(output_csv_path):
-            os.remove(temp_csv_path)
+        # Clean up the uploaded copy
+        safe_remove_file(temp_csv_path, UPLOAD_DIR)
 
         relative_path = os.path.relpath(dst_dir, UPLOAD_DIR)
 
@@ -453,7 +531,7 @@ async def upload_csv_to_project(
         pipeline_session = PipelineSession(
             project_id=project_id,
             session_folder=relative_path,
-            original_filename=file.filename,
+            original_filename=(file.filename or "")[:255] or None,
             source_type="csv",
             status=SessionStatus.EXTRACTED,  # CSV skips extraction
             row_count=len(df)
@@ -474,9 +552,11 @@ async def upload_csv_to_project(
             "message": f"CSV importé avec succès: {len(df)} lignes"
         })
 
+    except UploadTooLargeError as e:
+        _discard_upload(db, dst_dir)
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e))
     except Exception as e:
-        if os.path.exists(dst_dir):
-            shutil.rmtree(dst_dir)
+        _discard_upload(db, dst_dir)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors du traitement CSV: {str(e)}"
@@ -503,19 +583,24 @@ async def verify_session(
 
     Returns:
         JSONResponse: A response indicating that access is authorized, along
-                      with the session and project IDs.
+                      with the session and project IDs and ``can_edit``
+                      (False for a read-only member: the pipeline routes
+                      refuse its modifications with 403).
 
     Raises:
         HTTPException: If the session is not found (404) or if the user
                        lacks access permissions (403).
     """
     session = verify_session_access(db, session_folder, current_user)
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+    can_edit = bool(current_user.is_admin or (project is not None and project.can_edit(current_user.id)))
 
     return JSONResponse({
         "authorized": True,
         "session_id": session.id,
         "project_id": session.project_id,
-        "status": session.status.value if session.status else "unknown"
+        "status": session.status.value if session.status else "unknown",
+        "can_edit": can_edit
     })
 
 
@@ -551,25 +636,27 @@ async def update_session_status(
 
     Raises:
         HTTPException: If the session is not found (404), the user lacks
-                       access (403), or the status value is invalid (400).
+                       access or may only read the project (403), or the
+                       status value is invalid (400).
     """
     session = db.query(PipelineSession).filter(PipelineSession.id == session_id).first()
 
     if not session:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Session non trouvée"
         )
 
-    # Verify project access
-    verify_project_access(db, session.project_id, current_user)
+    # Verify project access, then the edit right (audit A02: a viewer never modifies)
+    project = verify_project_access(db, session.project_id, current_user)
+    verify_project_edit(project, current_user)
 
     # Update status
     try:
         session.status = SessionStatus(status)
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=f"Statut invalide: {status}"
         )
 
@@ -621,43 +708,21 @@ async def delete_session(
             detail="Session non trouvée"
         )
 
-    # Get project and verify ownership
+    # Get project and verify ownership (a row of a deleted project: administrators only)
     project = db.query(Project).filter(Project.id == session.project_id).first()
 
-    if project.owner_id != current_user.id and not current_user.is_admin:
+    if not current_user.is_admin and (project is None or project.owner_id != current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Seul le propriétaire peut supprimer une session"
         )
 
-    # Delete session folder and associated files
-    session_folder_name = session.session_folder.split("/")[0] if "/" in session.session_folder else session.session_folder
-    session_path = os.path.join(UPLOAD_DIR, session.session_folder)
-
-    # Delete the session directory
-    if os.path.exists(session_path):
-        shutil.rmtree(session_path)
-
-    # Also delete the parent folder if session_folder contained a subdirectory
-    if "/" in session.session_folder:
-        parent_path = os.path.join(UPLOAD_DIR, session_folder_name)
-        if os.path.exists(parent_path) and os.path.isdir(parent_path):
-            # Check if directory is empty or only contains session-related files
-            try:
-                remaining = os.listdir(parent_path)
-                if not remaining:
-                    os.rmdir(parent_path)
-            except OSError:
-                pass
-
-    # Delete the original ZIP file if it exists (uploaded archives)
-    for ext in [".zip", ".ZIP", ".tar.gz", ".tgz"]:
-        zip_file_path = os.path.join(UPLOAD_DIR, f"{session_folder_name}{ext}")
-        if os.path.exists(zip_file_path):
-            os.remove(zip_file_path)
+    # Delete session folder, empty parent and uploaded archive, confined to
+    # UPLOAD_DIR (a legacy row with an unsafe folder name removes nothing)
+    remove_session_files(session.session_folder, UPLOAD_DIR)
 
     # Update project if this was the active session
-    if project.session_folder == session.session_folder:
+    if project is not None and project.session_folder == session.session_folder:
         project.session_folder = None
 
     db.delete(session)
@@ -692,7 +757,7 @@ async def get_session_files(
     # Verify session access
     session = verify_session_access(db, session_folder, current_user)
 
-    session_path = os.path.join(UPLOAD_DIR, session_folder)
+    session_path = _session_directory_path(session_folder)
 
     if not os.path.exists(session_path):
         raise HTTPException(

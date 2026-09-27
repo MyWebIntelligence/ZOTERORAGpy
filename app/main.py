@@ -18,6 +18,14 @@ Key Features:
 - Registration of all application routers (Auth, Users, Admin, Projects, Pipeline, etc.).
 - Health check endpoints for monitoring.
 - Static file mounting and template configuration.
+
+Deployment safety (audit A09/A11, 2026-09-27):
+- ``enforce_secure_settings`` runs first at startup: with
+  ``RAGPY_ENV=production`` the placeholder JWT secret stops the start.
+- CORS uses ``CORS_ORIGINS`` (explicit origins, credentials allowed); a
+  ``*`` entry allows any origin without credentials.
+- ``/health/detailed`` collects its metrics in a worker thread, without the
+  100 ms CPU sampling pause on the event loop.
 """
 
 # Increase CSV field size limit
@@ -38,6 +46,7 @@ from contextlib import asynccontextmanager
 from app.utils import zotero_client, llm_note_generator, zotero_parser
 
 # Import authentication and database modules
+from app.config import enforce_secure_settings, settings
 from app.database.init_db import init_database
 from app.database.session import get_db
 
@@ -112,7 +121,8 @@ async def lifespan(app: FastAPI):
     Args:
         app (FastAPI): The FastAPI application instance.
     """
-    # Startup: Initialize database
+    # Startup: refuse insecure production settings (audit A09), then the database
+    enforce_secure_settings()
     logger.info("Initializing database...")
     init_database()
     logger.info("Database initialized successfully")
@@ -123,7 +133,11 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown: stop scheduler and cleanup
+    # Shutdown: stop the scripts still running (each in its own process group,
+    # audit A08), then the scheduler
+    from app.services.process_manager import process_manager
+    import asyncio
+    await asyncio.to_thread(process_manager.stop_all)
     logger.info("Stopping cleanup scheduler...")
     cleanup_scheduler.stop()
     logger.info("Application shutting down...")
@@ -136,11 +150,14 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
+# CORS middleware: configured origins only (audit A09). The pages are served by
+# this application (same origin); a "*" entry never carries credentials.
+_cors_origins = list(settings.CORS_ORIGINS)
+_cors_wildcard = "*" in _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
-    allow_credentials=True,
+    allow_origins=["*"] if _cors_wildcard else _cors_origins,
+    allow_credentials=not _cors_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -198,38 +215,32 @@ async def health_check():
     return {"status": "healthy"}
 
 
-@app.get("/health/detailed")
-async def health_detailed():
+def _collect_health_data() -> tuple:
     """
-    Health check détaillé avec métriques système.
+    Collect the system, database and session metrics of ``/health/detailed``.
 
-    Retourne des informations sur:
-    - CPU et mémoire
-    - Espace disque
-    - Connectivité base de données
-    - Sessions actives
-    - Configuration workers
+    Runs in a worker thread: psutil, SQLite and the SQL count never block
+    the event loop. ``cpu_percent(interval=None)`` returns the usage since
+    the previous call (no sampling pause).
 
     Returns:
-        JSONResponse: Métriques système avec status code 200 (healthy) ou 503 (degraded)
+        ``(health_data, status_code)``: the JSON body and 200 (healthy) or
+        503 (degraded).
     """
     import psutil
-    import sqlite3
     from datetime import datetime, timezone
-    from fastapi.responses import JSONResponse
-    from sqlalchemy import or_
+    from sqlalchemy import or_, text
 
     # CPU et RAM
-    cpu_percent = psutil.cpu_percent(interval=0.1)
+    cpu_percent = psutil.cpu_percent(interval=None)
     mem = psutil.virtual_memory()
 
-    # Database connectivity
+    # Database connectivity (the configured database, whatever DATABASE_URL)
     db_status = "unknown"
     try:
-        db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ragpy.db")
-        conn = sqlite3.connect(db_path, timeout=5)
-        conn.execute("SELECT 1")
-        conn.close()
+        from app.database.session import engine
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
         db_status = "healthy"
     except Exception as e:
         db_status = f"unhealthy: {str(e)}"
@@ -248,23 +259,26 @@ async def health_detailed():
     try:
         from app.models.pipeline_session import PipelineSession, SessionStatus
         db = next(get_db())
-        # Count sessions in active processing states
-        active_statuses = [
-            SessionStatus.EXTRACTING,
-            SessionStatus.CHUNKING,
-            SessionStatus.EMBEDDING,
-            SessionStatus.UPLOADING
-        ]
-        active_sessions = db.query(PipelineSession).filter(
-            or_(*[PipelineSession.status == s for s in active_statuses])
-        ).count()
-        db.close()
+        try:
+            # Count sessions in active processing states
+            active_statuses = [
+                SessionStatus.EXTRACTING,
+                SessionStatus.CHUNKING,
+                SessionStatus.EMBEDDING,
+                SessionStatus.UPLOADING
+            ]
+            active_sessions = db.query(PipelineSession).filter(
+                or_(*[PipelineSession.status == s for s in active_statuses])
+            ).count()
+        finally:
+            db.close()
     except Exception:
         pass
 
     # Build health data
     is_healthy = db_status == "healthy" and cpu_percent < 90 and mem.percent < 90
 
+    broker_url = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
     health_data = {
         "status": "healthy" if is_healthy else "degraded",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -286,11 +300,36 @@ async def health_detailed():
         },
         "celery": {
             "enabled": os.getenv('ENABLE_CELERY', 'false').lower() in ('true', '1', 'yes'),
-            "broker_url": os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0').split('@')[-1] if '@' in os.getenv('CELERY_BROKER_URL', '') else os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+            # Credentials of the broker URL never leave the server
+            "broker_url": broker_url.split('@')[-1] if '@' in broker_url else broker_url
         }
     }
 
-    status_code = 200 if is_healthy else 503
+    return health_data, (200 if is_healthy else 503)
+
+
+@app.get("/health/detailed")
+async def health_detailed():
+    """
+    Health check détaillé avec métriques système.
+
+    Retourne des informations sur:
+    - CPU et mémoire
+    - Espace disque
+    - Connectivité base de données
+    - Sessions actives
+    - Configuration workers
+
+    Les mesures sont collectées dans un thread (``_collect_health_data``) :
+    aucune attente sur la boucle événementielle (audit A11).
+
+    Returns:
+        JSONResponse: Métriques système avec status code 200 (healthy) ou 503 (degraded)
+    """
+    import asyncio
+    from fastapi.responses import JSONResponse
+
+    health_data, status_code = await asyncio.to_thread(_collect_health_data)
     return JSONResponse(content=health_data, status_code=status_code)
 
 

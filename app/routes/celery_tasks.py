@@ -14,8 +14,9 @@ Features:
 
 Security:
     - Every endpoint requires an authenticated, active user.
-    - Submission checks access to the pipeline session (``path`` must be a
-      session of a project the user can access, and ``session_id`` its id).
+    - Submission checks the edit right on the pipeline session (``path``
+      must be a session of a project the user owns or collaborates on, and
+      ``session_id`` its id): a read-only member is refused (audit A02).
     - Missing credentials are refused at submission with the same 403 body
       as the HTTP routes (``error``, ``credential_required``,
       ``configure_url``).
@@ -65,6 +66,8 @@ from app.celery_app import (
 )
 from app.core.config import UPLOAD_DIR
 from app.core.credentials import CredentialMissingError, albert_enabled
+from app.core.upload_safety import UnsafePathError, confined_path
+from app.services import job_control
 from app.database.session import get_db
 from app.middleware.auth import get_current_active_user, require_admin
 from app.models.user import User
@@ -134,16 +137,33 @@ def _session_directory(db: Session, path: str, session_id: int, user: User) -> s
         Absolute path of the session directory
 
     Raises:
-        HTTPException: 404 unknown session, 403 no access to its project,
-            400 when ``session_id`` is not the id of that session
+        HTTPException: 404 unknown session, 403 no access to its project or
+            read-only access (a queued stage writes into the session, audit
+            A02), 400 when ``session_id`` is not the id of that session or
+            when the folder is not strictly under uploads/, 409 while a
+            pipeline stage runs on the session (audit A12)
     """
-    session = verify_session_access(db, path, user)
+    session = verify_session_access(db, path, user, write=True)
     if session.id != session_id:
         raise HTTPException(
             status_code=400,
             detail="session_id ne correspond pas à la session indiquée par path"
         )
-    return os.path.abspath(os.path.join(UPLOAD_DIR, path))
+    try:
+        directory = os.path.abspath(confined_path(UPLOAD_DIR, path))
+    except UnsafePathError:
+        raise HTTPException(
+            status_code=400,
+            detail="Chemin de session invalide : le dossier doit se trouver sous uploads/."
+        )
+    # A stage already running on the session (web route or task): refused now
+    # rather than failing in the worker (audit A12; the worker holds the lock too).
+    if job_control.session_busy(_runner().session_lock_key(directory), job_control.GROUP_PIPELINE):
+        raise HTTPException(
+            status_code=409,
+            detail=job_control.SESSION_BUSY_MESSAGE.format(label=job_control.GROUP_LABELS[job_control.GROUP_PIPELINE]),
+        )
+    return directory
 
 
 def _credential_error(error: CredentialMissingError) -> JSONResponse:

@@ -88,7 +88,8 @@ def prepare_vectors_for_pinecone(chunks, include_sparse=True):
     """
     Prépare les vecteurs au format attendu par Pinecone, incluant les données de vecteurs sparse si disponibles.
     Chaque 'chunk' d'entrée est supposé être un dictionnaire.
-    - 'embedding': contient le vecteur dense (liste de flottants).
+    - 'embedding': contient le vecteur dense (liste de flottants). Un vecteur
+      absent, nul ou non fini (``valid_dense_vector``) n'est jamais préparé.
     - 'sparse_embedding': (optionnel) contient les données du vecteur sparse
       sous la forme d'un dictionnaire {"indices": [...], "values": [...]}.
     - 'id': l'identifiant unique du vecteur.
@@ -103,9 +104,15 @@ def prepare_vectors_for_pinecone(chunks, include_sparse=True):
             upsert dense uniquement sur ces index. Défaut True (rétro-compatibilité).
     """
     vectors = []
+    valid = _providers_module().valid_dense_vector
     for chunk in chunks:
         # Vérifier que l'embedding dense existe et n'est pas None
         dense_embedding = chunk.get("embedding")
+        if dense_embedding is not None and not valid(dense_embedding):
+            # Audit A07 : vecteur nul ou non fini (ancien repli d'échec) jamais inséré.
+            print(f"Avertissement: Embedding dense invalide (nul ou non fini) pour le chunk ID "
+                  f"{chunk.get('id', 'N/A')}. Chunk ignoré.")
+            continue
 
         if dense_embedding is not None:
             # Construction dynamique des métadonnées
@@ -466,7 +473,9 @@ QDRANT_BATCH_SIZE = get_env_int('QDRANT_BATCH_SIZE', 100)  # Taille de lot pour 
 #
 # Choix d'implémentation : l'existence Tier 2 se fait par **ID adressé par contenu**
 # pour les 3 bases (Pinecone `fetch`, Weaviate `fetch_objects(by_id)`, Qdrant
-# `retrieve`) — l'ID/UUID encode déjà (content_hash, chunk_index). C'est uniforme,
+# `retrieve`) — sur les ids candidats de `rad_dedup.dedup_candidate_ids` : l'id du
+# chunk, l'id v2 (contenu + source, audit A05) et l'id v1 historique (contenu +
+# index), de sorte que les vecteurs indexés avant la migration restent reconnus. C'est uniforme,
 # métrique-indépendant, schéma-agnostique (robuste à un schéma Weaviate Article figé,
 # pas besoin que content_hash soit une propriété filtrable) et sans risque de
 # starvation de `limit` qu'aurait un filtre `content_hash` contains_any/MatchAny sur
@@ -474,8 +483,23 @@ QDRANT_BATCH_SIZE = get_env_int('QDRANT_BATCH_SIZE', 100)  # Taille de lot pour 
 # serverless → present-set incomplet → fuite de doublons). Le refus exige toujours
 # une corroboration métadonnée (titre) côté rad_dedup.dedup_filter.
 
+def _dedup_meta_fields():
+    """Champs de source de la dédup (``DEDUP_META_FIELDS``), lus à l'appel."""
+    return rad_dedup.DedupConfig.from_env().meta_fields
+
+
+def _candidate_id_map(chunks_batch):
+    """``{id candidat: content_hash}`` des chunks d'un lot (``rad_dedup.dedup_candidate_ids``)."""
+    meta_fields = _dedup_meta_fields()
+    out = {}
+    for chunk in chunks_batch:
+        for candidate in rad_dedup.dedup_candidate_ids(chunk, meta_fields):
+            out.setdefault(candidate, chunk["content_hash"])
+    return out
+
+
 class _PineconeDedupAdapter:
-    """Existence via ``index.fetch(ids=content_ids, namespace=ns)`` (lookup-clé,
+    """Existence via ``index.fetch(ids=candidats, namespace=ns)`` (lookup-clé,
     pas de query+$in). ``nearest`` (Tier 3) via ``index.query`` filtré titre."""
 
     db_name = "pinecone"
@@ -488,13 +512,10 @@ class _PineconeDedupAdapter:
         self.metric = metric
 
     def existing(self, chunks_batch):
-        """Tier 2 : ``index.fetch`` des IDs adressés par contenu du lot. Renvoie
-        ``{content_hash: [meta, ...]}`` pour les vecteurs déjà présents (``id`` et
-        ``content_hash`` ajoutés à la métadonnée s'ils manquent)."""
-        id_to_hash = {
-            rad_dedup.content_id(c["content_hash"], c["chunk_index"]): c["content_hash"]
-            for c in chunks_batch
-        }
+        """Tier 2 : ``index.fetch`` des ids candidats du lot (id du chunk, v2, v1).
+        Renvoie ``{content_hash: [meta, ...]}`` pour les vecteurs déjà présents
+        (``id`` et ``content_hash`` ajoutés à la métadonnée s'ils manquent)."""
+        id_to_hash = _candidate_id_map(chunks_batch)
         kwargs = {"ids": list(id_to_hash.keys())}
         if self._namespace:
             kwargs["namespace"] = self._namespace
@@ -554,10 +575,11 @@ class _WeaviateDedupAdapter:
         self._col = collection_with_tenant
 
     def existing(self, chunks_batch):
-        """Tier 2 : ``fetch_objects`` filtré sur les UUID (``generate_uuid(id)``) du
-        lot, sans la propriété ``text``. Renvoie ``{content_hash: [props, ...]}`` pour
-        les objets déjà présents."""
-        uuid_to_hash = {generate_uuid(c["id"]): c["content_hash"] for c in chunks_batch}
+        """Tier 2 : ``fetch_objects`` filtré sur les UUID des ids candidats du lot
+        (``generate_uuid`` de l'id du chunk, de l'id v2 et de l'id v1), sans la
+        propriété ``text``. Renvoie ``{content_hash: [props, ...]}`` pour les objets
+        déjà présents."""
+        uuid_to_hash = {generate_uuid(cid): chash for cid, chash in _candidate_id_map(chunks_batch).items()}
         resp = self._col.query.fetch_objects(
             filters=WeaviateFilter.by_id().contains_any(list(uuid_to_hash.keys())),
             return_properties=["content_hash", "title", "authors", "chunk_index"],
@@ -607,10 +629,10 @@ class _QdrantDedupAdapter:
         self._collection = collection_name
 
     def existing(self, chunks_batch):
-        """Tier 2 : ``client.retrieve`` des UUID (``generate_uuid(id)``) du lot, payload
-        restreint et sans vecteurs. Renvoie ``{content_hash: [payload, ...]}`` pour les
-        points déjà présents."""
-        id_to_hash = {generate_uuid(c["id"]): c["content_hash"] for c in chunks_batch}
+        """Tier 2 : ``client.retrieve`` des UUID des ids candidats du lot (id du chunk,
+        v2, v1), payload restreint et sans vecteurs. Renvoie
+        ``{content_hash: [payload, ...]}`` pour les points déjà présents."""
+        id_to_hash = {generate_uuid(cid): chash for cid, chash in _candidate_id_map(chunks_batch).items()}
         points = self._client.retrieve(
             collection_name=self._collection,
             ids=list(id_to_hash.keys()),
@@ -1004,13 +1026,10 @@ def _skip_blank_chunks(chunks, space):
 
 
 def _usable_space_vector(vec, space):
-    """Vrai si ``vec`` est un vecteur exploitable de ``space`` (bonne dimension, non entièrement nul)."""
-    if space is None or not isinstance(vec, (list, tuple)) or len(vec) != space.dim:
+    """Vrai si ``vec`` est un vecteur exploitable de ``space`` (bonne dimension, valeurs finies, norme non nulle)."""
+    if space is None:
         return False
-    try:
-        return any(float(x) != 0.0 for x in vec)
-    except (TypeError, ValueError):
-        return False
+    return _providers_module().valid_dense_vector(vec, space.dim)
 
 
 def _chunk_declares_non_default_space(chunk):
@@ -1094,32 +1113,43 @@ def _missing_vectors_error(chunks, space, target_desc=None):
 
 
 def _drop_foreign_vectors(chunks, space):
-    """Retire les vecteurs étrangers à l'espace du fichier ; renvoie leur nombre.
+    """Retire les vecteurs inexploitables ou étrangers à l'espace du fichier ; renvoie leur nombre.
 
     ``check_uniform_space`` ignore les vecteurs nuls ou vides : un vecteur nul
     d'un autre espace (repli OpenAI à 3072 dimensions dans un fichier bge-m3)
     ou tout vecteur d'une autre longueur serait sinon envoyé, et la cible
     refuserait le lot entier. Un tel vecteur est remplacé par ``None`` (chunk
     non envoyé, comme un embedding manquant) et un avertissement donne leur
-    nombre. Les vecteurs nuls de la bonne dimension (repli OpenAI historique)
-    sont conservés tels quels. Sans espace connu, rien n'est modifié.
+    nombre.
+
+    Audit A07 : les vecteurs nuls de la bonne dimension (ancien repli d'échec
+    OpenAI) et ceux qui contiennent NaN ou l'infini sont retirés de même (ligne
+    distincte) : un faux succès n'est jamais inséré. Sans vecteur exploitable
+    dans le fichier (espace inconnu), seuls ces vecteurs invalides sont retirés.
     """
-    if space is None:
-        return 0
+    valid = _providers_module().valid_dense_vector
     dropped = 0
+    invalid = 0
     for chunk in chunks or ():
         if not isinstance(chunk, dict):
             continue
         vec = chunk.get("embedding")
-        if vec is None or (isinstance(vec, (list, tuple)) and len(vec) == space.dim):
+        if vec is None:
             continue
-        chunk["embedding"] = None
-        dropped += 1
+        if space is not None and not (isinstance(vec, (list, tuple)) and len(vec) == space.dim):
+            chunk["embedding"] = None
+            dropped += 1
+        elif not valid(vec):
+            chunk["embedding"] = None
+            invalid += 1
     if dropped:
         print(f"Avertissement: {dropped} chunk(s) portent un vecteur étranger à l'espace "
               f"{space.provider}/{space.model} ({space.dim} dimensions : vecteur vide, illisible ou "
               f"d'une autre longueur) ; vecteur retiré, chunk(s) non envoyé(s).")
-    return dropped
+    if invalid:
+        print(f"Avertissement: {invalid} chunk(s) portent un vecteur nul ou non fini (échec d'embedding "
+              f"d'une ancienne version) ; vecteur retiré, chunk(s) non envoyé(s). Relancer la phase dense.")
+    return dropped + invalid
 
 
 def _space_refusal(reason, target_desc=None):

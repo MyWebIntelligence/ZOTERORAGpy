@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import logging
 import os
 import sqlite3
@@ -220,11 +221,40 @@ def get_embed(cfg: RecodeConfig, key):
         return None
 
 
+def _storable_vector(vector) -> bool:
+    """Vrai pour un vecteur à mettre en cache : liste non vide de nombres finis, de norme non nulle.
+
+    Audit A07 : un vecteur nul (ancien repli d'échec OpenAI), vide ou contenant
+    NaN/infini n'est jamais mis en cache.
+    """
+    if not isinstance(vector, (list, tuple)) or not vector:
+        return False
+    try:
+        total = sum(vector)  # propage NaN/infini (inf - inf = NaN), refuse un non-nombre
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(total) and any(vector)
+
+
+def delete_embed(cfg: RecodeConfig, key) -> None:
+    """Supprime l'entrée ``key`` du cache d'embeddings (entrée invalide purgée). Advisory."""
+    if not key:
+        return
+    try:
+        with _CACHE_LOCK:
+            conn = _get_conn(cfg.cache_path)
+            conn.execute("DELETE FROM embed_cache WHERE key=?", (key,))
+            conn.commit()
+    except Exception as exc:  # advisory
+        logger.debug("embed cache DELETE failed: %s", exc)
+
+
 def put_embed(cfg: RecodeConfig, key, vector):
     """Stocke ``vector`` (sérialisé JSON) par ``INSERT OR IGNORE`` puis relit la
     valeur canonique, comme ``put_recode``. Renvoie le vecteur canonique, ou
-    ``vector`` tel quel si la clé est vide, le vecteur ``None`` ou en cas d'erreur."""
-    if not key or vector is None:
+    ``vector`` tel quel si la clé est vide, le vecteur ``None`` ou invalide
+    (jamais stocké, audit A07) ou en cas d'erreur."""
+    if not key or vector is None or not _storable_vector(vector):
         return vector
     try:
         payload = json.dumps(vector)
