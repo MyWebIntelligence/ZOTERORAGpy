@@ -25,6 +25,12 @@ Albert (sovereign provider, OFF by default):
   one attempt only; the limiter is acquired and the backoff slept outside them.
 - Account errors (``AlbertAuthError``, ``AlbertQuotaExhausted``) always reach the
   caller; a transient error that exhausted its retries falls back to the template.
+- Usage ledger of the web side: the public entry points accept a trailing
+  keyword argument ``albert_usage_ledger`` (a ``UsageLedger`` created by the
+  route for an Albert request only). On the Albert path it is handed to every
+  ``AlbertClient`` built for the request (``ledger=``), so each Albert call is
+  recorded into it (pinned model id sent, ``response.model``, tokens, cost,
+  impacts); ``None`` or an OpenAI/OpenRouter path changes nothing.
 """
 
 import os
@@ -38,9 +44,12 @@ import importlib
 import html as html_module
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Callable, Dict, List, Tuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Optional
 from openai import OpenAI
 from dotenv import load_dotenv, dotenv_values, find_dotenv
+
+if TYPE_CHECKING:  # annotations only: the usage module is never imported here at runtime
+    from scripts.rad_albert.usage import UsageLedger
 
 try:
     from scripts.rad_albert.config import AlbertConfig
@@ -415,7 +424,12 @@ def albert_wire_id(wire_model: Optional[str]) -> Optional[str]:
     return _albert_module("catalog").canonical_id(wire_model)
 
 
-def _get_albert_client(albert_api_key: Optional[str], *, use_limiter: bool = True):
+def _get_albert_client(
+    albert_api_key: Optional[str],
+    *,
+    use_limiter: bool = True,
+    ledger: Optional["UsageLedger"] = None,
+):
     """
     Build an Albert client from the key passed by the caller (never from the environment).
 
@@ -428,6 +442,10 @@ def _get_albert_client(albert_api_key: Optional[str], *, use_limiter: bool = Tru
         albert_api_key: The caller's Albert key; ``None`` or empty raises.
         use_limiter: ``False`` when the proactive limiter is acquired by the
             caller (``run_llm_slot``), outside the semaphores.
+        ledger: Usage ledger of the request (``UsageLedger``), shared by every
+            client of the request so that each Albert call is recorded into
+            it; ``None`` keeps the historical construction (the client then
+            owns a private ledger, never written).
 
     Returns:
         An ``AlbertClient`` configured from ``AlbertConfig.from_env()``.
@@ -437,10 +455,13 @@ def _get_albert_client(albert_api_key: Optional[str], *, use_limiter: bool = Tru
             ``credential_required = albert_api_key``).
     """
     AlbertClient = _albert_module("client").AlbertClient
+    options: Dict[str, Any] = {"use_limiter": use_limiter}
+    if ledger is not None:
+        options["ledger"] = ledger
     return AlbertClient(
         AlbertConfig.from_env(),
         albert_api_key if albert_api_key is not None else "",
-        use_limiter=use_limiter,
+        **options,
     )
 
 
@@ -727,6 +748,7 @@ def _generate_with_albert(
     albert_api_key: Optional[str],
     role: str = ALBERT_NOTES_ROLE,
     response_format: Optional[Dict[str, Any]] = None,
+    albert_usage_ledger: Optional["UsageLedger"] = None,
 ) -> str:
     """
     Generate note content with Albert, synchronously (single retry layer: the client's).
@@ -745,6 +767,8 @@ def _generate_with_albert(
         albert_api_key: The caller's Albert key.
         role: Albert role.
         response_format: Structured output format, or ``None``.
+        albert_usage_ledger: Usage ledger of the request, given to the client
+            (every call, retries included, is recorded into it), or ``None``.
 
     Returns:
         The generated content.
@@ -759,7 +783,7 @@ def _generate_with_albert(
     request = albert_chat_request(
         prompt, wire_model, mode=mode, temperature=temperature, role=role, response_format=response_format
     )
-    client = _get_albert_client(albert_api_key)
+    client = _get_albert_client(albert_api_key, ledger=albert_usage_ledger)
     logger.info(f"Using Albert with model: {request.model or '(role ' + request.role + ')'}")
     try:
         def call(max_tokens: int, reasoning_effort: Optional[str]) -> Any:
@@ -856,6 +880,7 @@ async def agenerate_with_albert(
     albert_api_key: Optional[str],
     role: str = ALBERT_NOTES_ROLE,
     response_format: Optional[Dict[str, Any]] = None,
+    albert_usage_ledger: Optional["UsageLedger"] = None,
 ) -> str:
     """
     Generate note content with Albert from the event loop (``run_llm_slot``).
@@ -873,6 +898,9 @@ async def agenerate_with_albert(
         albert_api_key: The caller's Albert key.
         role: Albert role (``notes``, ``book_structure``…).
         response_format: Structured output format, or ``None``.
+        albert_usage_ledger: Usage ledger of the request, given to the client
+            (every send, retries and chain fallbacks included, is recorded
+            into it), or ``None``.
 
     Returns:
         The generated content.
@@ -886,7 +914,7 @@ async def agenerate_with_albert(
     request = albert_chat_request(
         prompt, wire_model, mode=mode, temperature=temperature, role=role, response_format=response_format
     )
-    client = _get_albert_client(albert_api_key, use_limiter=False)
+    client = _get_albert_client(albert_api_key, use_limiter=False, ledger=albert_usage_ledger)
     logger.info(f"Using Albert with model: {request.model or '(role ' + request.role + ')'}")
     try:
         try:
@@ -1126,7 +1154,9 @@ def _generate_with_llm(
     mode: str = "extended",
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> str:
     """
     Generate note content using LLM.
@@ -1148,6 +1178,10 @@ def _generate_with_llm(
                             client (no environment fallback).
         albert_api_key: Optional Albert key, used only for an ``albert/…``
                         model (never read from the environment).
+        albert_usage_ledger: Optional usage ledger of the request
+                        (``UsageLedger``): on the Albert path every Albert
+                        call is recorded into it; ignored on the
+                        OpenAI/OpenRouter path.
 
     Returns:
         Generated HTML content
@@ -1163,7 +1197,8 @@ def _generate_with_llm(
     resolution = resolve_llm_route(model) if model else None
     if resolution is not None and resolution.provider == PROVIDER_ALBERT:
         return _generate_with_albert(
-            prompt, resolution.wire_model, temperature=temperature, mode=mode, albert_api_key=albert_api_key
+            prompt, resolution.wire_model, temperature=temperature, mode=mode, albert_api_key=albert_api_key,
+            albert_usage_ledger=albert_usage_ledger,
         )
 
     # Get clients from the credentials passed by the caller (no env fallback)
@@ -1179,7 +1214,8 @@ def _generate_with_llm(
         resolution = resolve_llm_route(model)
         if resolution.provider == PROVIDER_ALBERT:
             return _generate_with_albert(
-                prompt, resolution.wire_model, temperature=temperature, mode=mode, albert_api_key=albert_api_key
+                prompt, resolution.wire_model, temperature=temperature, mode=mode, albert_api_key=albert_api_key,
+                albert_usage_ledger=albert_usage_ledger,
             )
 
     # Detect which client to use (OpenRouter models have format "provider/model")
@@ -1340,7 +1376,9 @@ def build_note_html(
     mode: str = "extended",
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> Tuple[str, str]:
     """
     Build a reading note in HTML format with a unique sentinel.
@@ -1365,6 +1403,9 @@ def build_note_html(
         albert_api_key: Optional Albert key, used only for an ``albert/…`` model.
                         Albert account errors are raised (never replaced by the
                         template); other Albert failures fall back to the template.
+        albert_usage_ledger: Optional usage ledger of the request
+                        (``UsageLedger``), filled by the Albert calls only;
+                        ``None`` or an OpenAI/OpenRouter model changes nothing.
 
     Returns:
         Tuple of (sentinel, note_html):
@@ -1427,7 +1468,8 @@ def build_note_html(
                     mode=mode,
                     openai_api_key=openai_api_key,
                     openrouter_api_key=openrouter_api_key,
-                    albert_api_key=albert_api_key
+                    albert_api_key=albert_api_key,
+                    albert_usage_ledger=albert_usage_ledger
                 )
                 # Add mode prefix to first h2 heading
                 body_html = _add_note_prefix(body_html, mode)
@@ -1456,7 +1498,9 @@ def build_abstract_text(
     model: Optional[str] = None,
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> str:
     """
     Build an abstract/summary text to enrich Zotero's abstractNote field.
@@ -1473,6 +1517,9 @@ def build_abstract_text(
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
                            If None, no OpenRouter client (no environment fallback).
         albert_api_key: Optional Albert key, used only for an ``albert/…`` model.
+        albert_usage_ledger: Optional usage ledger of the request
+                        (``UsageLedger``), filled by the Albert calls only;
+                        ``None`` or an OpenAI/OpenRouter model changes nothing.
 
     Returns:
         Plain text summary string (200-350 words)
@@ -1530,7 +1577,8 @@ def build_abstract_text(
             mode="short",
             openai_api_key=openai_api_key,
             openrouter_api_key=openrouter_api_key,
-            albert_api_key=albert_api_key
+            albert_api_key=albert_api_key,
+            albert_usage_ledger=albert_usage_ledger
         )
 
         # Clean up the response - remove any HTML tags that might have slipped through
@@ -1595,7 +1643,9 @@ async def build_note_html_async(
     mode: str = "extended",
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> Tuple[str, str]:
     """
     Async version of build_note_html with global concurrency control.
@@ -1617,6 +1667,11 @@ async def build_note_html_async(
         openai_api_key: Optional OpenAI API key for secure credential passing.
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
         albert_api_key: Optional Albert key, used only for an ``albert/…`` model.
+        albert_usage_ledger: Optional usage ledger of the request
+                        (``UsageLedger``), handed to the Albert branch only;
+                        the executor path below is the OpenAI/OpenRouter one
+                        (``albert_route_async`` already routed any Albert
+                        model), so it never receives the ledger.
     """
     semaphore = get_llm_semaphore()
 
@@ -1626,7 +1681,8 @@ async def build_note_html_async(
         albert, model = await albert_route_async(model)
     if albert is not None:
         return await _build_note_html_albert_async(
-            metadata, text_content, albert, mode=mode, albert_api_key=albert_api_key, semaphore=semaphore
+            metadata, text_content, albert, mode=mode, albert_api_key=albert_api_key, semaphore=semaphore,
+            albert_usage_ledger=albert_usage_ledger,
         )
 
     async with semaphore:
@@ -1659,7 +1715,9 @@ async def build_abstract_text_async(
     model: Optional[str] = None,
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> str:
     """
     Async version of build_abstract_text with global concurrency control.
@@ -1672,6 +1730,9 @@ async def build_abstract_text_async(
         openai_api_key: Optional OpenAI API key for secure credential passing.
         openrouter_api_key: Optional OpenRouter API key for secure credential passing.
         albert_api_key: Optional Albert key, used only for an ``albert/…`` model.
+        albert_usage_ledger: Optional usage ledger of the request
+                        (``UsageLedger``), handed to the Albert branch only
+                        (the executor path is the OpenAI/OpenRouter one).
     """
     semaphore = get_llm_semaphore()
 
@@ -1679,7 +1740,8 @@ async def build_abstract_text_async(
     albert, model = await albert_route_async(model)
     if albert is not None:
         return await _build_abstract_text_albert_async(
-            metadata, text_content, albert, albert_api_key=albert_api_key, semaphore=semaphore
+            metadata, text_content, albert, albert_api_key=albert_api_key, semaphore=semaphore,
+            albert_usage_ledger=albert_usage_ledger,
         )
 
     async with semaphore:
@@ -1712,6 +1774,7 @@ async def _build_note_html_albert_async(
     mode: str,
     albert_api_key: Optional[str],
     semaphore: Any,
+    albert_usage_ledger: Optional["UsageLedger"] = None,
 ) -> Tuple[str, str]:
     """
     Albert branch of ``build_note_html_async`` (same contract as ``build_note_html``).
@@ -1728,6 +1791,7 @@ async def _build_note_html_albert_async(
         mode: Note generation mode.
         albert_api_key: The caller's Albert key.
         semaphore: The global LLM semaphore.
+        albert_usage_ledger: Usage ledger of the request, or ``None``.
 
     Returns:
         ``(sentinel, note_html)``.
@@ -1757,6 +1821,7 @@ async def _build_note_html_albert_async(
                 temperature=0.2,
                 mode=mode,
                 albert_api_key=albert_api_key,
+                albert_usage_ledger=albert_usage_ledger,
             )
             body_html = _add_note_prefix(body_html, mode)
     except ALBERT_JOB_ABORT_ERRORS:
@@ -1778,6 +1843,7 @@ async def _build_abstract_text_albert_async(
     *,
     albert_api_key: Optional[str],
     semaphore: Any,
+    albert_usage_ledger: Optional["UsageLedger"] = None,
 ) -> str:
     """
     Albert branch of ``build_abstract_text_async`` (same contract as ``build_abstract_text``).
@@ -1788,6 +1854,7 @@ async def _build_abstract_text_albert_async(
         albert: Albert resolution of the model.
         albert_api_key: The caller's Albert key.
         semaphore: The global LLM semaphore.
+        albert_usage_ledger: Usage ledger of the request, or ``None``.
 
     Returns:
         The plain text summary.
@@ -1817,6 +1884,7 @@ async def _build_abstract_text_albert_async(
             temperature=0.2,
             mode="short",
             albert_api_key=albert_api_key,
+            albert_usage_ledger=albert_usage_ledger,
         )
         summary = re.sub(r'<[^>]+>', '', summary).strip()
         logger.info(f"Generated abstract summary (length: {len(summary)} chars)")

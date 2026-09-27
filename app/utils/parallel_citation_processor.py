@@ -38,15 +38,21 @@ Albert (modèle ``albert/<id>``, optionnel) :
     - le délai de garde de 120 s n'arrête pas la boucle tant qu'une tâche
       Albert tourne (réessais longs), et un signal d'arrêt resté dans la file
       après la boucle est relancé : une erreur de compte n'est jamais perdue ;
-    - aucune acquisition imbriquée du sémaphore LLM global sur la branche Albert.
+    - aucune acquisition imbriquée du sémaphore LLM global sur la branche Albert ;
+    - le journal d'usage ``albert_usage_ledger`` (``UsageLedger`` créé par la
+      route pour une requête Albert seulement) est transmis au pré-filtre et au
+      filtrage complet : chaque appel Albert y est inscrit ; ``None`` ne change rien.
 """
 
 import asyncio
 import contextlib
 import logging
 import os
-from typing import List, Dict, Tuple, AsyncGenerator, Optional, Any
+from typing import TYPE_CHECKING, List, Dict, Tuple, AsyncGenerator, Optional, Any
 from dataclasses import dataclass, field
+
+if TYPE_CHECKING:  # annotations seulement : le module d'usage n'est jamais importé ici à l'exécution
+    from scripts.rad_albert.usage import UsageLedger
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +204,9 @@ async def process_citations_parallel(
     openrouter_api_key: Optional[str],
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_concurrent_fetches: int = MAX_CONCURRENT_FETCHES,
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> AsyncGenerator[Tuple[str, Dict[str, Any]], None]:
     """
     Traite les citations en parallèle avec streaming SSE immédiat.
@@ -216,6 +224,9 @@ async def process_citations_parallel(
         batch_size: Nombre de citations traitées en parallèle (défaut: 10)
         max_concurrent_fetches: Max fetches web simultanés (défaut: 10)
         albert_api_key: Clé API Albert (optionnelle, modèle ``albert/<id>`` seulement)
+        albert_usage_ledger: Journal d'usage de la requête (``UsageLedger``),
+            transmis au pré-filtre et au filtrage complet ; seuls les appels
+            Albert y sont inscrits (``None`` : aucun effet)
 
     Yields:
         Tuples (event_type, event_data):
@@ -291,7 +302,8 @@ async def process_citations_parallel(
                 model=config.get("model", DEFAULT_LLM_MODEL),
                 openai_api_key=openai_api_key,
                 openrouter_api_key=openrouter_api_key,
-                albert_api_key=albert_api_key
+                albert_api_key=albert_api_key,
+                albert_usage_ledger=albert_usage_ledger
             )
 
             if not is_relevant:
@@ -325,7 +337,8 @@ async def process_citations_parallel(
                     model=config.get("model", DEFAULT_LLM_MODEL),
                     openai_api_key=openai_api_key,
                     openrouter_api_key=openrouter_api_key,
-                    albert_api_key=albert_api_key
+                    albert_api_key=albert_api_key,
+                    albert_usage_ledger=albert_usage_ledger
                 )
 
                 if isinstance(result, dict):
@@ -521,7 +534,9 @@ async def _filter_batch_parallel(
     start_idx: int,
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> List[CitationProcessingResult]:
     """
     Filter un batch de citations avec LLM en parallèle.
@@ -539,6 +554,8 @@ async def _filter_batch_parallel(
         openai_api_key: Clé API OpenAI
         openrouter_api_key: Clé API OpenRouter
         albert_api_key: Clé API Albert (modèle ``albert/<id>`` seulement)
+        albert_usage_ledger: Journal d'usage de la requête, transmis au
+            filtrage complet (``None`` : aucun effet)
 
     Returns:
         Liste de CitationProcessingResult dans le même ordre
@@ -586,7 +603,8 @@ async def _filter_batch_parallel(
                     model=config.get("model", "gpt-4o-mini"),
                     openai_api_key=openai_api_key,
                     openrouter_api_key=openrouter_api_key,
-                    albert_api_key=albert_api_key
+                    albert_api_key=albert_api_key,
+                    albert_usage_ledger=albert_usage_ledger
                 )
 
                 # Déterminer le statut basé sur le résultat

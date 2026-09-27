@@ -27,6 +27,12 @@ semaphores are held during each send only and the backoff is slept outside.
 Albert account errors (`AlbertAuthError`, `AlbertQuotaExhausted`) are never
 swallowed by the best-effort `except Exception` of the phases: they abort the
 whole book note and reach the route.
+
+Usage ledger: `build_book_note_async` accepts a trailing keyword argument
+`albert_usage_ledger` (a `UsageLedger` created by the route for an Albert
+request only), passed to the three phases and, on the Albert path, to every
+Albert client, so each call of the book note is recorded into it. `None` or an
+OpenAI/OpenRouter model changes nothing.
 """
 
 from __future__ import annotations
@@ -40,7 +46,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.utils.llm_note_generator import (
     ALBERT_JOB_ABORT_ERRORS,
@@ -52,6 +58,9 @@ from app.utils.llm_note_generator import (
     get_llm_semaphore,
     run_llm_slot,
 )
+
+if TYPE_CHECKING:  # annotations only: the usage module is never imported here at runtime
+    from scripts.rad_albert.usage import UsageLedger
 
 logger = logging.getLogger(__name__)
 
@@ -892,6 +901,7 @@ async def _book_llm_call(
     albert_api_key: Optional[str],
     albert_role: str,
     albert_response_format: Optional[Dict] = None,
+    albert_usage_ledger: Optional["UsageLedger"] = None,
 ) -> str:
     """
     Run one book-note LLM call in a slot of the global semaphore (`run_llm_slot`).
@@ -911,6 +921,8 @@ async def _book_llm_call(
         albert_api_key: Per-user Albert key (used only for an Albert model).
         albert_role: Albert role of the phase (`book_structure` or `notes`).
         albert_response_format: Structured output format on Albert, or None.
+        albert_usage_ledger: Usage ledger of the request, given to the Albert
+            client only (the OpenAI/OpenRouter slot never receives it).
 
     Returns:
         The raw LLM answer.
@@ -934,6 +946,7 @@ async def _book_llm_call(
             albert_api_key=albert_api_key,
             role=albert_role,
             response_format=albert_response_format,
+            albert_usage_ledger=albert_usage_ledger,
         )
     return await run_llm_slot(
         semaphore,
@@ -963,6 +976,7 @@ async def _phase1_detect_structure(
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
     albert_api_key: Optional[str] = None,
+    albert_usage_ledger: Optional["UsageLedger"] = None,
 ) -> Optional[Dict]:
     """
     Run Phase 1 LLM call. Returns parsed JSON or None on failure.
@@ -974,7 +988,8 @@ async def _phase1_detect_structure(
     back to a char-based excerpt of the front of `full_text`.
 
     On Albert, the call uses the `book_structure` role and the JSON schema of
-    `ALBERT_BOOK_STRUCTURE_RESPONSE_FORMAT` (D10).
+    `ALBERT_BOOK_STRUCTURE_RESPONSE_FORMAT` (D10), and is recorded into
+    `albert_usage_ledger` when one is given.
     Albert account errors are raised (never turned into None).
     """
     if pages:
@@ -1012,6 +1027,7 @@ async def _phase1_detect_structure(
             albert_api_key=albert_api_key,
             albert_role=ALBERT_BOOK_STRUCTURE_ROLE,
             albert_response_format=ALBERT_BOOK_STRUCTURE_RESPONSE_FORMAT,
+            albert_usage_ledger=albert_usage_ledger,
         )
     except ALBERT_JOB_ABORT_ERRORS:
         raise
@@ -1338,11 +1354,13 @@ async def _phase2_analyse_chapter(
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
     albert_api_key: Optional[str] = None,
+    albert_usage_ledger: Optional["UsageLedger"] = None,
 ) -> Tuple[str, str]:
     """
     Run one Phase 2 LLM call. Returns (html_block, short_summary).
 
-    On Albert, the call uses the `notes` role; errors propagate to
+    On Albert, the call uses the `notes` role and is recorded into
+    `albert_usage_ledger` when one is given; errors propagate to
     `build_book_note_async`, which aborts on Albert account errors.
     """
     if not chapter.text or len(chapter.text.strip()) < 50:
@@ -1383,6 +1401,7 @@ async def _phase2_analyse_chapter(
         openrouter_api_key=openrouter_api_key,
         albert_api_key=albert_api_key,
         albert_role=ALBERT_BOOK_NOTE_ROLE,
+        albert_usage_ledger=albert_usage_ledger,
     )
 
     # Split HTML block from "SUMMARY:" line.
@@ -1436,11 +1455,13 @@ async def _phase3_synthesise(
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
     albert_api_key: Optional[str] = None,
+    albert_usage_ledger: Optional["UsageLedger"] = None,
 ) -> Tuple[str, str]:
     """
     Run Phase 3 LLM call. Returns (section_a_html, section_b_html).
 
-    On Albert, the call uses the `notes` role; errors propagate to
+    On Albert, the call uses the `notes` role and is recorded into
+    `albert_usage_ledger` when one is given; errors propagate to
     `build_book_note_async`, which aborts on Albert account errors.
     """
     prompt = _fill_placeholders(phase3_template, {
@@ -1466,6 +1487,7 @@ async def _phase3_synthesise(
         openrouter_api_key=openrouter_api_key,
         albert_api_key=albert_api_key,
         albert_role=ALBERT_BOOK_NOTE_ROLE,
+        albert_usage_ledger=albert_usage_ledger,
     )
 
     # Expected delimiters: ===SECTION_A=== ... ===SECTION_B=== ... ===END===
@@ -1623,6 +1645,7 @@ async def build_book_note_async(
     openrouter_api_key: Optional[str] = None,
     progress_cb: Optional[Callable[[str, int, int, str], Awaitable[None]]] = None,
     albert_api_key: Optional[str] = None,
+    albert_usage_ledger: Optional["UsageLedger"] = None,
 ) -> Tuple[str, str]:
     """
     Generate a complete [LIVRE] reading note for a book.
@@ -1637,6 +1660,9 @@ async def build_book_note_async(
         openrouter_api_key: per-user OpenRouter key.
         progress_cb: async callable(stage, current, total, label) for SSE updates.
         albert_api_key: per-user Albert key, used only for an Albert model.
+        albert_usage_ledger: usage ledger of the request (`UsageLedger`), passed
+            to the three phases; on the Albert path every call is recorded into
+            it. `None` or an OpenAI/OpenRouter model changes nothing.
 
     Returns:
         (sentinel, note_html) tuple matching the build_note_html_async contract.
@@ -1705,6 +1731,7 @@ async def build_book_note_async(
         openai_api_key=openai_api_key,
         openrouter_api_key=openrouter_api_key,
         albert_api_key=albert_api_key,
+        albert_usage_ledger=albert_usage_ledger,
     )
     if llm_payload:
         structure = _merge_llm_structure(initial_structure, llm_payload, text_content)
@@ -1850,6 +1877,7 @@ async def build_book_note_async(
                 openai_api_key=openai_api_key,
                 openrouter_api_key=openrouter_api_key,
                 albert_api_key=albert_api_key,
+                albert_usage_ledger=albert_usage_ledger,
             )
         except ALBERT_JOB_ABORT_ERRORS:
             raise
@@ -1875,6 +1903,7 @@ async def build_book_note_async(
             openai_api_key=openai_api_key,
             openrouter_api_key=openrouter_api_key,
             albert_api_key=albert_api_key,
+            albert_usage_ledger=albert_usage_ledger,
         )
     except ALBERT_JOB_ABORT_ERRORS:
         raise

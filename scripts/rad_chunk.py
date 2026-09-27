@@ -1531,6 +1531,17 @@ def _valid_space_vector(vec, space):
         return False
 
 
+def _is_blank_chunk_text(chunk):
+    """Vrai si le texte du chunk (champ ``text``) est absent, vide ou blanc.
+
+    Même règle que ``_albert_embed_batch`` : un tel texte n'est jamais envoyé
+    aux embeddings Albert. ``rad_vectordb._is_blank_chunk_text`` applique la
+    même règle côté envoi.
+    """
+    text = chunk.get("text") if isinstance(chunk, dict) else None
+    return not (isinstance(text, str) and text.strip())
+
+
 def _albert_embed_batch(texts, space):
     """Embeddings Albert d'un lot de textes : un vecteur par texte, ``None`` sinon.
 
@@ -1794,8 +1805,9 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
       lots de ``min(DEFAULT_EMBEDDING_BATCH_SIZE, 64)`` textes, jamais de vecteur
       nul (``None`` si absent), champs d'espace sur chaque chunk, journal d'usage
       si Albert a été appelé. Au-delà de ``ALBERT_EMBED_MAX_MISSING_RATIO``
-      embeddings manquants, le fichier est écrit puis la phase sort en 1 ; une
-      erreur de compte la fait sortir en 2.
+      embeddings manquants (part calculée sur les chunks au texte non vide, les
+      chunks vides n'étant jamais envoyés), le fichier est écrit puis la phase
+      sort en 1 ; une erreur de compte la fait sortir en 2.
 
     ``albert`` avec Albert désactivé, ou une valeur inconnue : message français
     et sortie en 2, avant toute lecture.
@@ -1965,6 +1977,12 @@ def _finish_albert_embeddings(chunks, output_json_file, albert_cfg, space):
     part d'embeddings manquants au-delà de ``ALBERT_EMBED_MAX_MISSING_RATIO`` →
     ``exit 1`` avec un message français (jamais d'index silencieusement incomplet).
 
+    Les chunks au texte vide ou blanc (``_is_blank_chunk_text``) ne sont jamais
+    envoyés aux embeddings : ils ne comptent pas comme manquants, la part est
+    calculée sur les seuls chunks non vides, et une ligne unique donne le nombre
+    de chunks vides sans vecteur (ignorés ensuite par les connecteurs). Aucune
+    ligne s'il n'y en a pas.
+
     Args:
         chunks: chunks écrits dans le fichier de sortie.
         output_json_file: fichier de sortie (son dossier reçoit le journal d'usage).
@@ -1982,8 +2000,14 @@ def _finish_albert_embeddings(chunks, output_json_file, albert_cfg, space):
         logging.error(message)
         print(albert_abort_marker(abort))
         raise SystemExit(2)
-    total = len(chunks)
-    missing = sum(1 for chunk in chunks if not _valid_space_vector(chunk.get("embedding"), space))
+    counted = [chunk for chunk in chunks if not _is_blank_chunk_text(chunk)]
+    blank_skipped = sum(1 for chunk in chunks
+                        if _is_blank_chunk_text(chunk) and not _valid_space_vector(chunk.get("embedding"), space))
+    if blank_skipped:
+        print(f"Albert : {blank_skipped} chunk(s) au texte vide ignoré(s) (jamais envoyé(s) aux embeddings, "
+              f"non compté(s) comme manquant(s), non envoyé(s) à la base vectorielle).")
+    total = len(counted)
+    missing = sum(1 for chunk in counted if not _valid_space_vector(chunk.get("embedding"), space))
     ratio = (missing / total) if total else 0.0
     threshold = float(albert_cfg.embed_max_missing_ratio)
     if missing and ratio > threshold:

@@ -36,6 +36,11 @@ Albert (opt-in, ``albert/<id>`` model):
   the role fallback on repeated 503 answers (``citation`` role chain).
 - Pre-filter answers are read as an exact token (first word in {RELEVANT, NA},
   otherwise the citation is kept); account errors are raised, never fail-open.
+- Usage ledger: ``_call_llm_api``, ``pre_filter_citation`` and
+  ``filter_citation_with_llm`` accept a trailing keyword argument
+  ``albert_usage_ledger`` (a ``UsageLedger`` created by the route for an Albert
+  request only), handed to every Albert client so that each call is recorded
+  into it; ``None`` or an OpenAI/OpenRouter model changes nothing.
 
 Author: RAGpy Team
 Date: 2025-12-05
@@ -47,7 +52,7 @@ import re
 import asyncio
 import logging
 import unicodedata
-from typing import Dict, Union, List, Optional, Tuple, Any
+from typing import TYPE_CHECKING, Dict, Union, List, Optional, Tuple, Any
 from pathlib import Path
 from pydantic import BaseModel, field_validator
 from openai import OpenAI
@@ -66,6 +71,9 @@ from app.utils.llm_note_generator import (
     get_llm_semaphore,
     resolve_llm_route,
 )
+
+if TYPE_CHECKING:  # annotations only: the usage module is never imported here at runtime
+    from scripts.rad_albert.usage import UsageLedger
 
 # Load environment variables
 load_dotenv()
@@ -496,7 +504,9 @@ def _call_llm_api(
     temperature: float = 0.2,
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> str:
     """
     Call LLM API (synchronous wrapper for OpenAI/OpenRouter/Albert).
@@ -509,6 +519,9 @@ def _call_llm_api(
         openrouter_api_key: Optional OpenRouter API key (falls back to env for admin users)
         albert_api_key: Optional Albert key, used only for an Albert model
             (single send: the retries belong to ``run_llm_slot``)
+        albert_usage_ledger: Optional usage ledger of the request
+            (``UsageLedger``): the Albert call is recorded into it; ignored on
+            the OpenAI/OpenRouter path
 
     Returns:
         Raw LLM response text
@@ -522,7 +535,8 @@ def _call_llm_api(
     resolution = resolve_llm_route(model)
     if resolution.provider == PROVIDER_ALBERT:
         return _call_albert_api(
-            prompt, resolution.wire_model, temperature=temperature, albert_api_key=albert_api_key
+            prompt, resolution.wire_model, temperature=temperature, albert_api_key=albert_api_key,
+            albert_usage_ledger=albert_usage_ledger
         )
 
     openai_client, openrouter_client, default_model = _get_llm_clients(
@@ -565,7 +579,8 @@ def _call_albert_api(
     wire_model: str,
     *,
     temperature: float,
-    albert_api_key: Optional[str]
+    albert_api_key: Optional[str],
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> str:
     """
     Albert branch of ``_call_llm_api``: one single send, no retry, no limiter.
@@ -581,6 +596,8 @@ def _call_albert_api(
         wire_model: Model name without the ``albert/`` prefix
         temperature: Sampling temperature
         albert_api_key: The caller's Albert key
+        albert_usage_ledger: Usage ledger of the request, given to the client,
+            or ``None``
 
     Returns:
         The stripped answer text
@@ -590,7 +607,7 @@ def _call_albert_api(
         AlbertAuthError: Account error, including a missing key
         AlbertError: Other classified errors (single attempt)
     """
-    client = _get_albert_client(albert_api_key, use_limiter=False)
+    client = _get_albert_client(albert_api_key, use_limiter=False, ledger=albert_usage_ledger)
     try:
         result = client.chat(
             [{"role": "user", "content": prompt}],
@@ -640,7 +657,8 @@ async def _albert_citation_call(
     model: str,
     *,
     temperature: float,
-    albert_api_key: Optional[str]
+    albert_api_key: Optional[str],
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> str:
     """
     One Albert citation-filter call from the event loop, with the role fallback on 503.
@@ -660,6 +678,9 @@ async def _albert_citation_call(
         model: ``albert/<id>`` model
         temperature: Sampling temperature
         albert_api_key: The caller's Albert key
+        albert_usage_ledger: Usage ledger of the request, given to the client
+            (every send, retries and chain fallbacks included, is recorded
+            into it), or ``None``
 
     Returns:
         The stripped answer text
@@ -678,7 +699,7 @@ async def _albert_citation_call(
         max_tokens=ALBERT_CITATION_MAX_TOKENS,
         temperature=temperature,
     )
-    client = _get_albert_client(albert_api_key, use_limiter=False)
+    client = _get_albert_client(albert_api_key, use_limiter=False, ledger=albert_usage_ledger)
     try:
         result = await _albert_slot_chat(
             client,
@@ -722,7 +743,9 @@ async def pre_filter_citation(
     model: str = DEFAULT_LLM_MODEL,
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> bool:
     """
     Pré-filtrage rapide basé uniquement sur titre/abstract/source.
@@ -740,6 +763,9 @@ async def pre_filter_citation(
         openai_api_key: Clé API OpenAI
         openrouter_api_key: Clé API OpenRouter
         albert_api_key: Clé API Albert (utilisée seulement pour un modèle Albert)
+        albert_usage_ledger: Journal d'usage de la requête (``UsageLedger``),
+            alimenté par l'appel Albert seulement ; ``None`` ou un modèle
+            OpenAI/OpenRouter ne change rien
 
     Returns:
         True si la citation semble pertinente, False sinon
@@ -795,7 +821,8 @@ RÉPONSE:"""
             model=model,
             openai_api_key=openai_api_key,
             openrouter_api_key=openrouter_api_key,
-            albert_api_key=albert_api_key
+            albert_api_key=albert_api_key,
+            albert_usage_ledger=albert_usage_ledger
         )
 
     # Acquérir le semaphore global
@@ -839,7 +866,8 @@ async def _pre_filter_citation_albert(
     model: str,
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
-    albert_api_key: Optional[str]
+    albert_api_key: Optional[str],
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> bool:
     """
     Branche Albert du pré-filtre : ``run_llm_slot`` et lecture par jeton exact.
@@ -859,6 +887,7 @@ async def _pre_filter_citation_albert(
         openai_api_key: Clé API OpenAI (jamais utilisée sur cette branche)
         openrouter_api_key: Clé API OpenRouter (jamais utilisée sur cette branche)
         albert_api_key: Clé API Albert
+        albert_usage_ledger: Journal d'usage de la requête, ou ``None``
 
     Returns:
         True si la citation est gardée, False si la réponse est exactement NA
@@ -871,7 +900,8 @@ async def _pre_filter_citation_albert(
             prompt,
             model,
             temperature=0.1,  # Très déterministe
-            albert_api_key=albert_api_key
+            albert_api_key=albert_api_key,
+            albert_usage_ledger=albert_usage_ledger
         )
     except ALBERT_ACCOUNT_ERRORS:
         raise
@@ -901,7 +931,9 @@ async def filter_citation_with_llm(
     max_retries: int = 1,
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    albert_api_key: Optional[str] = None
+    albert_api_key: Optional[str] = None,
+    *,
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> Union[Dict, str]:
     """
     Filter citation using LLM with global concurrency control.
@@ -930,6 +962,9 @@ async def filter_citation_with_llm(
         openai_api_key: Optional OpenAI API key (for non-admin users)
         openrouter_api_key: Optional OpenRouter API key (for non-admin users)
         albert_api_key: Optional Albert key, used only for an Albert model
+        albert_usage_ledger: Optional usage ledger of the request
+            (``UsageLedger``), filled by the Albert calls only; ``None`` or an
+            OpenAI/OpenRouter model changes nothing
 
     Returns:
         If relevant: Dictionary with keys:
@@ -978,7 +1013,8 @@ async def filter_citation_with_llm(
             model=model,
             openai_api_key=openai_api_key,
             openrouter_api_key=openrouter_api_key,
-            albert_api_key=albert_api_key
+            albert_api_key=albert_api_key,
+            albert_usage_ledger=albert_usage_ledger
         )
 
     # Get global semaphore
@@ -1105,7 +1141,8 @@ async def _filter_citation_with_albert(
     model: str,
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
-    albert_api_key: Optional[str]
+    albert_api_key: Optional[str],
+    albert_usage_ledger: Optional["UsageLedger"] = None
 ) -> Union[Dict, str]:
     """
     Albert branch of ``filter_citation_with_llm`` (``run_llm_slot``, no outer loop).
@@ -1125,6 +1162,7 @@ async def _filter_citation_with_albert(
         openai_api_key: OpenAI key (never used on this branch)
         openrouter_api_key: OpenRouter key (never used on this branch)
         albert_api_key: The caller's Albert key
+        albert_usage_ledger: Usage ledger of the request, or ``None``
 
     Returns:
         Structured result, or "NA"
@@ -1138,7 +1176,8 @@ async def _filter_citation_with_albert(
             prompt,
             model,
             temperature=0.2,
-            albert_api_key=albert_api_key
+            albert_api_key=albert_api_key,
+            albert_usage_ledger=albert_usage_ledger
         )
         parsed = _parse_llm_response(response_text)
         if parsed == "NA":

@@ -911,20 +911,24 @@ def _check_vector_space(chunks, target_dim=None, target_desc=None, *, drop_forei
     1. fichier qui mélange des espaces (dimensions ou modèles différents,
        ``embedding_dim`` incohérent) : refus ;
     2. fichier d'un espace déclaré hors défaut (champs ``embedding_provider`` /
-       ``embedding_model``, ex. Albert) dont la part de chunks sans vecteur
-       exploitable dépasse ``ALBERT_EMBED_MAX_MISSING_RATIO`` (phase dense
-       incomplète) : refus (voir ``_missing_vectors_error``) ;
+       ``embedding_model``, ex. Albert) dont la part de chunks au texte non vide
+       sans vecteur exploitable dépasse ``ALBERT_EMBED_MAX_MISSING_RATIO`` (phase
+       dense incomplète) : refus (voir ``_missing_vectors_error``) ;
     3. cible dont la dimension entière ne correspond pas à l'espace du fichier :
        refus. Une dimension qui n'est pas un entier (inconnue, objet factice)
        est ignorée ;
     4. vecteurs étrangers à l'espace (nuls, vides ou d'une autre longueur, que
        ``check_uniform_space`` ignore) : retirés des chunks (``embedding=None``,
-       chunk non envoyé) avec un avertissement, si ``drop_foreign`` est vrai.
+       chunk non envoyé) avec un avertissement, si ``drop_foreign`` est vrai ;
+    5. chunks d'un espace hors défaut au texte vide et sans vecteur exploitable
+       (jamais envoyés aux embeddings) : retirés de la liste avec une ligne
+       unique donnant leur nombre (``_skip_blank_chunks``), si ``drop_foreign``
+       est vrai.
 
     Fichier de l'espace par défaut sans vecteur étranger : aucune sortie en plus.
 
     Args:
-        chunks: chunks du fichier d'embeddings (modifiés en place à l'étape 4).
+        chunks: chunks du fichier d'embeddings (modifiés en place aux étapes 4 et 5).
         target_dim: dimension de la cible (index, collection) ou ``None``.
         target_desc: description de la cible pour le message.
         drop_foreign: faux pour un contrôle préalable sur une copie jetable
@@ -942,7 +946,61 @@ def _check_vector_space(chunks, target_dim=None, target_desc=None, *, drop_forei
         error = _target_space_error(space, target_dim, target_desc)
     if error is None and drop_foreign:
         _drop_foreign_vectors(chunks, space)
+        _skip_blank_chunks(chunks, space)
     return space, error
+
+
+def _is_blank_chunk_text(chunk):
+    """Vrai si le texte du chunk (champ ``text``) est absent, vide ou blanc.
+
+    Même règle que la phase dense (``rad_chunk._is_blank_chunk_text``) : un tel
+    texte n'est jamais envoyé aux embeddings Albert, son absence de vecteur
+    n'est donc pas un embedding manquant.
+    """
+    text = chunk.get("text") if isinstance(chunk, dict) else None
+    return not (isinstance(text, str) and text.strip())
+
+
+def _is_skippable_blank_chunk(chunk, space):
+    """Vrai pour un chunk d'un espace hors défaut, au texte vide et sans vecteur exploitable de ``space``.
+
+    Un chunk de l'espace par défaut (fichier historique OpenAI) n'est jamais
+    concerné ; un chunk vide portant un vecteur exploitable est conservé.
+    """
+    return (_is_blank_chunk_text(chunk) and _chunk_declares_non_default_space(chunk)
+            and not _usable_space_vector(chunk.get("embedding"), space))
+
+
+def _skip_blank_chunks(chunks, space):
+    """Retire les chunks au texte vide sans vecteur d'un espace hors défaut ; renvoie leur nombre.
+
+    Ces chunks ne sont jamais envoyés aux embeddings (phase dense Albert) : ils
+    ne sont ni envoyés à la cible ni comptés comme invalides ou manquants. Une
+    ligne unique donne leur nombre, seulement s'il y en a ; un fichier de
+    l'espace par défaut n'est jamais modifié et rien n'est affiché.
+
+    Args:
+        chunks: liste des chunks (modifiée en place).
+        space: espace du fichier (``check_uniform_space``), ``None`` si aucun vecteur.
+
+    Returns:
+        Nombre de chunks retirés.
+    """
+    if not isinstance(chunks, list):
+        return 0
+    kept = [chunk for chunk in chunks if not _is_skippable_blank_chunk(chunk, space)]
+    skipped = len(chunks) - len(kept)
+    if not skipped:
+        return 0
+    if space is not None:
+        label = f"{space.provider}/{space.model}"
+    else:
+        first = next(chunk for chunk in chunks if _is_skippable_blank_chunk(chunk, space))
+        label = f"{first.get('embedding_provider') or '?'}/{first.get('embedding_model') or '?'}"
+    chunks[:] = kept
+    print(f"Avertissement: {skipped} chunk(s) au texte vide de l'espace {label} ignoré(s) "
+          f"(jamais envoyé(s) aux embeddings) : non envoyé(s), non compté(s) comme manquant(s).")
+    return skipped
 
 
 def _usable_space_vector(vec, space):
@@ -991,11 +1049,15 @@ def _missing_vectors_error(chunks, space, target_desc=None):
     """Refus d'un fichier d'espace hors défaut issu d'une phase dense incomplète.
 
     Seuls les chunks qui déclarent un espace hors défaut (ex. Albert bge-m3)
-    sont comptés : un chunk sans vecteur exploitable de l'espace du fichier
-    (``None``, vide, nul ou d'une autre longueur) est manquant. Au-delà de
-    ``ALBERT_EMBED_MAX_MISSING_RATIO``, l'envoi est refusé : les connecteurs
-    ignoreraient ces chunks et l'index serait silencieusement incomplet. Un
-    fichier de l'espace par défaut n'est jamais concerné.
+    et dont le texte n'est pas vide sont comptés : un tel chunk sans vecteur
+    exploitable de l'espace du fichier (``None``, vide, nul ou d'une autre
+    longueur) est manquant. Les chunks au texte vide ou blanc, jamais envoyés
+    aux embeddings, sont exclus du calcul (ignorés ensuite par
+    ``_skip_blank_chunks``). Au-delà de ``ALBERT_EMBED_MAX_MISSING_RATIO``,
+    l'envoi est refusé : les connecteurs ignoreraient ces chunks et l'index
+    serait silencieusement incomplet. Un fichier de l'espace par défaut n'est
+    jamais concerné. Aucune sortie (contrôle pur, aussi utilisé par
+    ``rebuild_pinecone_index``).
 
     Args:
         chunks: chunks du fichier d'embeddings.
@@ -1005,7 +1067,8 @@ def _missing_vectors_error(chunks, space, target_desc=None):
     Returns:
         Le message de refus, ou ``None``.
     """
-    declared = [c for c in chunks or () if _chunk_declares_non_default_space(c)]
+    declared = [c for c in chunks or ()
+                if _chunk_declares_non_default_space(c) and not _is_blank_chunk_text(c)]
     if not declared:
         return None
     missing = sum(1 for c in declared if not _usable_space_vector(c.get("embedding"), space))
@@ -1457,6 +1520,7 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
             if client: client.close()
             return _vectordb_result("error", space_error)
         _drop_foreign_vectors(all_chunks, file_space)
+        _skip_blank_chunks(all_chunks, file_space)
 
         # Déduplication (Lot 2/3) — requête la cible EXACTE (tenant résolu), avant la
         # boucle d'insertion. No-op si DEDUP_ENABLED=0.

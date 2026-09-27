@@ -344,7 +344,10 @@ def test_albert_api_key_is_last_kwarg_default_none():
     for func in (lng.build_note_html, lng.build_abstract_text, lng.build_note_html_async,
                  lng.build_abstract_text_async):
         params = list(inspect.signature(func).parameters.values())
-        assert params[-1].name == "albert_api_key", func.__name__
+        assert params[-2].name == "albert_api_key", func.__name__
+        assert params[-2].default is None, func.__name__
+        assert params[-1].name == "albert_usage_ledger", func.__name__
+        assert params[-1].kind is inspect.Parameter.KEYWORD_ONLY, func.__name__
         assert params[-1].default is None, func.__name__
     params = inspect.signature(lng._generate_with_llm).parameters
     assert params["albert_api_key"].default is None

@@ -348,7 +348,10 @@ def test_parallel_positional_call_without_key_still_works(openai_calls, monkeypa
     _albert_env(monkeypatch, enabled=False)
     for func in (cfilter.pre_filter_citation, cfilter.filter_citation_with_llm, pcp.process_citations_parallel):
         params = list(inspect.signature(func).parameters.values())
-        assert params[-1].name == "albert_api_key", func.__name__
+        assert params[-2].name == "albert_api_key", func.__name__
+        assert params[-2].default is None, func.__name__
+        assert params[-1].name == "albert_usage_ledger", func.__name__
+        assert params[-1].kind is inspect.Parameter.KEYWORD_ONLY, func.__name__
         assert params[-1].default is None, func.__name__
     assert inspect.signature(cfilter._call_llm_api).parameters["albert_api_key"].default is None
     config = dict(PROJECT, model="gpt-4o-mini")
