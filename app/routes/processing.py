@@ -34,6 +34,25 @@ Albert (DINUM, opt-in, ``ALBERT_ENABLED=1``):
   ``ALBERT_SUBPROCESS_TIMEOUT`` only when the request selects Albert.
 - While Albert is disabled every response, argv, environment and timeout is
   the historical one.
+
+Session folders (decision of 2026-09-27, lot 9):
+- Every pipeline route that works on a session folder checks it first,
+  before reading, writing or launching anything
+  (``_pipeline_session_refusal``): a folder that does not resolve strictly
+  under ``UPLOAD_DIR`` gives a 400, and a registered session
+  (``PipelineSession`` row) of a project the non-admin user can neither
+  own nor join gives a 403 (a single SSE error event with the same status
+  on the SSE routes, a JSON body on ``/cluster_documents_sse`` whose page
+  handler reads JSON on a refusal status). The folder is matched whatever
+  its spelling (``sess/``, ``./sess``, another case or Unicode form on a
+  case- or normalisation-insensitive filesystem), and so are the folders
+  under a registered session and the folders that contain one. Folders
+  unrelated to any ``PipelineSession`` row (legacy ``/upload_zip`` flow)
+  keep the historical behaviour.
+- Web usage ledger: when a request resolves its chat model to Albert, one
+  ``UsageLedger`` is passed to the note / citation helpers and appended to
+  ``<session>/albert_usage.jsonl`` at the end of the job, only when Albert
+  was called (``ALBERT_USAGE_LOG=0`` keeps the summary log line only).
 """
 import os
 import re
@@ -43,10 +62,12 @@ import logging
 import json
 import pandas as pd
 import asyncio
+import unicodedata
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Form, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.config import APP_DIR, RAGPY_DIR, UPLOAD_DIR
@@ -108,11 +129,17 @@ _ALBERT_ABORT_RE = re.compile(
     r"^Albert abort: kind=(\w+) reason=(\w+)(?: credential_required=(\w+))?\s*$", re.MULTILINE
 )
 # 403 body of a registered session of a project the user cannot access
-# (stop_all_scripts and the Albert branches).
+# (stop_all_scripts).
 SESSION_DENIED_BODY = {
     "error": "Accès non autorisé à cette session",
     "details": "You can only stop the processes of your own sessions."
 }
+# Refusals of the session check of the pipeline routes (``_pipeline_session_refusal``):
+# JSON body ``{"error": <message>}``, or one SSE event ``{"type": "error", "message": <message>}``.
+SESSION_PATH_INVALID_MESSAGE = "Chemin de session invalide : le dossier doit se trouver sous uploads/."
+SESSION_ACCESS_DENIED_MESSAGE = (
+    "Accès non autorisé à cette session : elle appartient à un projet auquel vous n'avez pas accès."
+)
 ALBERT_GDPR_MESSAGE = (
     "Confirmation requise avant l'envoi vers Albert : les textes des chunks sont "
     "conservés par la DINUM (sous-traitant, art. 28 RGPD) dans une collection privée "
@@ -266,7 +293,7 @@ def _sse_event(payload: Dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _sse_error_response(payload: Dict[str, Any]) -> StreamingResponse:
+def _sse_error_response(payload: Dict[str, Any], status_code: int = 200) -> StreamingResponse:
     """
     Build an SSE response made of a single event (no subprocess is started).
 
@@ -275,6 +302,8 @@ def _sse_error_response(payload: Dict[str, Any]) -> StreamingResponse:
 
     Args:
         payload: The event body (``type``, ``message`` and optional fields).
+        status_code: HTTP status of the response (200, the historical SSE
+            error style, unless a refusal status is given).
 
     Returns:
         The ``text/event-stream`` response.
@@ -285,7 +314,7 @@ def _sse_error_response(payload: Dict[str, Any]) -> StreamingResponse:
         """Yield the prepared event once."""
         yield event
 
-    return StreamingResponse(_single_event(), media_type="text/event-stream")
+    return StreamingResponse(_single_event(), media_type="text/event-stream", status_code=status_code)
 
 
 def _credential_error_payload(error: CredentialMissingError) -> Dict[str, str]:
@@ -421,12 +450,35 @@ def _albert_vectordb_flags(target: Dict[str, Any]) -> list:
     return flags
 
 
+def _session_rows_denied(db: Session, rows: List[PipelineSession], user: User) -> bool:
+    """
+    Tell whether one of ``rows`` belongs to a project ``user`` cannot access.
+
+    Args:
+        db: Database session.
+        rows: Pipeline session rows.
+        user: The authenticated (non-admin) user.
+
+    Returns:
+        True when the project of a row exists and the user neither owns it
+        nor is a member of it; a row whose project no longer exists is
+        ignored (historical behaviour).
+    """
+    for row in rows:
+        project = db.query(Project).filter(Project.id == row.project_id).first()
+        if project is not None and not project.has_access(user.id):
+            return True
+    return False
+
+
 def _registered_session_denied(db: Session, session: str, user: User) -> bool:
     """
     Tell whether ``session`` is a registered session of a project ``user`` cannot access.
 
     Session folders that are not registered (standalone pipeline page) keep
-    the historical behaviour (not denied).
+    the historical behaviour (not denied). Exact match on the stored folder
+    (``stop_all_scripts``, whose process registry is keyed by that exact
+    value); the pipeline routes use ``_session_folder_denied``.
 
     Args:
         db: Database session.
@@ -440,22 +492,188 @@ def _registered_session_denied(db: Session, session: str, user: User) -> bool:
     if getattr(user, "is_admin", False):
         return False
     rows = db.query(PipelineSession).filter(PipelineSession.session_folder == session).all()
-    for row in rows:
-        project = db.query(Project).filter(Project.id == row.project_id).first()
-        if project is not None and not project.has_access(user.id):
-            return True
-    return False
+    return _session_rows_denied(db, rows, user)
+
+
+def _session_folder_under_uploads(absolute_path: str) -> Optional[str]:
+    """
+    Normalised session folder of ``absolute_path``, when it lies strictly under ``UPLOAD_DIR``.
+
+    Symbolic links are followed on both sides, so a link that leaves
+    ``uploads/`` is outside.
+
+    Args:
+        absolute_path: ``UPLOAD_DIR`` joined with the folder sent by the client.
+
+    Returns:
+        The folder relative to ``UPLOAD_DIR`` (e.g. ``"sess"`` for
+        ``"sess/"`` or ``"./sess"``), or None when the path is outside
+        ``UPLOAD_DIR``, is ``UPLOAD_DIR`` itself or cannot be resolved
+        (embedded NUL byte, different drives).
+    """
+    upload_root = os.path.realpath(UPLOAD_DIR)
+    try:
+        target = os.path.realpath(absolute_path)
+        inside = target != upload_root and os.path.commonpath([upload_root, target]) == upload_root
+    except ValueError:  # embedded NUL byte, or different drives (Windows)
+        return None
+    return os.path.relpath(target, upload_root) if inside else None
+
+
+def _listed_name(parent: str, name: str) -> str:
+    """
+    Name under which the entry ``parent/name`` is listed by its parent directory.
+
+    On a case- or normalisation-insensitive filesystem (macOS APFS, Docker
+    Desktop bind mounts of ``uploads/``), ``SESS`` or the NFD form of an
+    accented name opens the directory listed as ``sess`` or in NFC, while
+    ``os.path.realpath`` keeps the caller's spelling. The listed name is the
+    one the ingestion routes stored in ``PipelineSession.session_folder``.
+
+    Args:
+        parent: Existing directory (a component of a resolved path).
+        name: One path component under ``parent``.
+
+    Returns:
+        ``name`` when it is listed as such, when ``parent/name`` does not
+        exist or when ``parent`` cannot be listed; otherwise the listed name
+        of the same file (``os.path.samefile``).
+    """
+    try:
+        with os.scandir(parent) as listing:
+            entries = list(listing)
+    except OSError:
+        return name
+    if any(entry.name == name for entry in entries):
+        return name
+    candidate = os.path.join(parent, name)
+    if not os.path.exists(candidate):
+        return name
+    for entry in entries:
+        try:
+            if os.path.samefile(entry.path, candidate):
+                return entry.name
+        except OSError:
+            continue
+    return name
+
+
+def _session_folder_spellings(folder: str) -> List[str]:
+    """
+    Spellings under which the resolved session folder ``folder`` may be registered.
+
+    ``folder`` itself; its spelling as listed on disk, component by
+    component (``_listed_name``); and the NFC and NFD forms of the latter
+    when they open the same directory (normalisation-insensitive
+    filesystems). On a case- and byte-exact filesystem (Linux ext4) the
+    result is ``[folder]``.
+
+    Args:
+        folder: Folder relative to ``UPLOAD_DIR``, from ``_session_folder_under_uploads``.
+
+    Returns:
+        The distinct spellings, ``folder`` first.
+    """
+    upload_root = os.path.realpath(UPLOAD_DIR)
+    current = upload_root
+    listed_parts = []
+    for part in folder.split(os.sep):
+        listed = _listed_name(current, part)
+        listed_parts.append(listed)
+        current = os.path.join(current, listed)
+    listed_folder = os.sep.join(listed_parts)
+    spellings = [folder]
+    if listed_folder not in spellings:
+        spellings.append(listed_folder)
+    target = os.path.join(upload_root, folder)
+    for form in ("NFC", "NFD"):
+        variant = unicodedata.normalize(form, listed_folder)
+        if variant in spellings:
+            continue
+        try:
+            if os.path.samefile(os.path.join(upload_root, variant), target):
+                spellings.append(variant)
+        except (OSError, ValueError):
+            continue
+    return spellings
+
+
+def _session_folder_denied(db: Session, path: str, folder: str, user: User) -> bool:
+    """
+    Tell whether ``folder`` is, lies under or contains a registered session of a project ``user`` cannot access.
+
+    Every spelling of the resolved folder is looked up
+    (``_session_folder_spellings``), plus the raw value sent by the client.
+    A folder under a registered session (a subfolder of an uploaded ZIP)
+    and a folder that contains one (the upload directory of a ZIP whose
+    single root folder was registered) are part of that session. Paths are
+    compared component by component: ``sess-2`` is unrelated to ``sess``.
+    Administrators are never denied; a folder unrelated to any registered
+    session keeps the historical behaviour.
+
+    Args:
+        db: Database session.
+        path: Session folder as sent by the client.
+        folder: The same folder resolved under ``UPLOAD_DIR`` (``_session_folder_under_uploads``).
+        user: The authenticated user.
+
+    Returns:
+        True when access must be refused.
+    """
+    if getattr(user, "is_admin", False):
+        return False
+    spellings = _session_folder_spellings(folder)
+    same_or_above = {path}
+    for spelling in spellings:
+        parts = spelling.split(os.sep)
+        same_or_above.update(os.sep.join(parts[:depth]) for depth in range(1, len(parts) + 1))
+    rows = db.query(PipelineSession).filter(PipelineSession.session_folder.in_(sorted(same_or_above))).all()
+    if _session_rows_denied(db, rows, user):
+        return True
+    prefixes = [spelling + os.sep for spelling in spellings]
+    below = db.query(PipelineSession).filter(or_(*[
+        PipelineSession.session_folder.startswith(prefix, autoescape=True) for prefix in prefixes
+    ])).all()
+    # LIKE may ignore the case (SQLite): keep the exact component prefixes only.
+    below = [row for row in below if any(row.session_folder.startswith(prefix) for prefix in prefixes)]
+    return _session_rows_denied(db, below, user)
+
+
+def _session_refusal_for(db: Session, path: str, absolute_path: str, user: User) -> Optional[Tuple[int, str]]:
+    """
+    Check a session folder before any work on it (shared by the pipeline routes and the Albert branch).
+
+    Args:
+        db: Database session.
+        path: Session folder as sent by the client (relative to uploads/).
+        absolute_path: ``UPLOAD_DIR`` joined with ``path``.
+        user: The authenticated user.
+
+    Returns:
+        None when the request may go on; ``(400, message)`` when the folder
+        does not resolve strictly under ``UPLOAD_DIR``; ``(403, message)``
+        when ``_session_folder_denied`` refuses it.
+    """
+    folder = _session_folder_under_uploads(absolute_path)
+    if folder is None:
+        logger.warning(f"Session folder refused for user {user.id}: outside uploads/ ('{path}')")
+        return 400, SESSION_PATH_INVALID_MESSAGE
+    if _session_folder_denied(db, path, folder, user):
+        logger.warning(f"Session folder refused for user {user.id}: registered session of another project ('{path}')")
+        return 403, SESSION_ACCESS_DENIED_MESSAGE
+    return None
 
 
 def _albert_session_refusal(db: Session, path: str, absolute_path: str, user: User) -> Optional[JSONResponse]:
     """
     Refuse a session whose texts may not be sent to Albert by ``user``.
 
-    Used by the Albert branches only (the historical routes are unchanged).
-    The folder must resolve (symbolic links followed) strictly under
-    ``UPLOAD_DIR``; a registered session of a project the user cannot access
-    is refused whatever the spelling of ``path`` (the raw value and the
-    normalised relative folder are both checked).
+    Defence in depth for the Albert branch of ``/upload_db``: the route runs
+    ``_pipeline_session_refusal`` on the same folder first, so this check
+    refuses nothing there today; it keeps the branch from ever running
+    unchecked (another caller, or a symbolic link swapped between the two
+    checks). Same lookup (``_session_refusal_for``) and same JSON bodies as
+    the pipeline routes.
 
     Args:
         db: Database session.
@@ -465,25 +683,114 @@ def _albert_session_refusal(db: Session, path: str, absolute_path: str, user: Us
 
     Returns:
         A 400 response when the folder is outside ``UPLOAD_DIR`` (or is
-        ``UPLOAD_DIR`` itself), a 403 response (body of ``stop_all_scripts``)
-        for a foreign registered session, else None.
+        ``UPLOAD_DIR`` itself), a 403 response for a session of a project
+        the user cannot access, else None.
     """
-    upload_root = os.path.realpath(UPLOAD_DIR)
-    target = os.path.realpath(absolute_path)
+    refusal = _session_refusal_for(db, path, absolute_path, user)
+    return _session_refusal_json(refusal) if refusal is not None else None
+
+
+def _pipeline_session_refusal(db: Session, path: str, user: User) -> Optional[Tuple[int, str]]:
+    """
+    Check the session folder of a pipeline request, before any work on it.
+
+    Decision of 2026-09-27 (lot 9): a registered session (``PipelineSession``
+    row) is reserved to the members of its project and to the
+    administrators; a folder unrelated to any such row (legacy
+    ``/upload_zip`` flow) keeps the historical behaviour. Another spelling
+    of a registered folder (``sess/``, ``./sess``, ``other/../sess``,
+    another case or Unicode form on an insensitive filesystem), a folder
+    under it and a folder containing it are refused as well
+    (``_session_folder_denied``).
+
+    Args:
+        db: Database session.
+        path: Session folder as sent by the client (relative to uploads/).
+        user: The authenticated user.
+
+    Returns:
+        None when the request may go on; ``(400, message)`` when the folder
+        does not resolve strictly under ``UPLOAD_DIR``; ``(403, message)``
+        for a session of a project the user cannot access.
+    """
+    return _session_refusal_for(db, path, os.path.join(UPLOAD_DIR, path), user)
+
+
+def _session_refusal_json(refusal: Tuple[int, str]) -> JSONResponse:
+    """
+    JSON response of a session refusal (``{"error": <message>}``, the routes' error style).
+
+    Args:
+        refusal: ``(status, message)`` from ``_pipeline_session_refusal``.
+
+    Returns:
+        The 400 or 403 JSON response.
+    """
+    status, message = refusal
+    return JSONResponse(status_code=status, content={"error": message})
+
+
+def _session_refusal_sse(refusal: Tuple[int, str]) -> StreamingResponse:
+    """
+    SSE response of a session refusal: one error event, with the refusal status.
+
+    Args:
+        refusal: ``(status, message)`` from ``_pipeline_session_refusal``.
+
+    Returns:
+        The 400 or 403 ``text/event-stream`` response carrying
+        ``{"type": "error", "message": <message>}``.
+    """
+    status, message = refusal
+    return _sse_error_response({"type": "error", "message": message}, status_code=status)
+
+
+def new_albert_usage_ledger() -> Any:
+    """
+    Create the usage ledger of one web request that selected Albert.
+
+    Returns:
+        A new ``scripts.rad_albert.usage.UsageLedger`` (imported here, so a
+        request that does not select Albert never loads it).
+    """
     try:
-        inside = target != upload_root and os.path.commonpath([upload_root, target]) == upload_root
-    except ValueError:  # different drives (Windows)
-        inside = False
-    if not inside:
-        logger.warning(f"Albert selection refused for user {user.id}: session outside uploads/ ('{path}')")
-        return JSONResponse(status_code=400, content={
-            "error": "Chemin de session invalide : le dossier doit se trouver sous uploads/."
-        })
-    folder = os.path.relpath(target, upload_root)
-    if _registered_session_denied(db, path, user) or (folder != path and _registered_session_denied(db, folder, user)):
-        logger.warning(f"Albert selection refused for user {user.id}: foreign session '{path}'")
-        return JSONResponse(status_code=403, content=dict(SESSION_DENIED_BODY))
-    return None
+        from scripts.rad_albert.usage import UsageLedger
+    except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
+        from rad_albert.usage import UsageLedger
+    return UsageLedger()
+
+
+def flush_albert_usage_ledger(ledger: Any, session_dir: str, context: str) -> Optional[str]:
+    """
+    Append the Albert usage of a web job to ``<session_dir>/albert_usage.jsonl``.
+
+    Same contract as the pipeline scripts: nothing at all unless the ledger
+    recorded an Albert call; then the records not yet written are appended
+    (unless ``ALBERT_USAGE_LOG=0``) and the ledger's summary line is logged.
+    Never raises: a write error is logged and the job's outcome is unchanged.
+
+    Args:
+        ledger: The request's ``UsageLedger``, or None (Albert not selected).
+        session_dir: Absolute session folder.
+        context: Short label of the job for the log line (``notes``, ``citations``…).
+
+    Returns:
+        The path written, or None when nothing was written.
+    """
+    if ledger is None or not ledger.called:
+        return None
+    written = None
+    try:
+        from scripts.rad_albert.usage import USAGE_FILENAME
+    except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
+        from rad_albert.usage import USAGE_FILENAME
+    try:
+        if _albert_setting("usage_log"):
+            written = ledger.write_jsonl(os.path.join(session_dir, USAGE_FILENAME))
+    except Exception as exc:
+        logger.warning(f"Albert usage ledger of {context} not written: {type(exc).__name__}: {exc}")
+    logger.info(f"Albert usage ({context}): {ledger.summary_line()}")
+    return written
 
 
 def _albert_upload_credential_required(returncode: int, stdout: str) -> Optional[str]:
@@ -649,6 +956,7 @@ async def stop_all_scripts(
 async def process_dataframe(
     path: str = Form(...),
     force_fresh: bool = Form(False),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -673,7 +981,15 @@ async def process_dataframe(
         JSONResponse: A JSON response containing the path to the created CSV file
                       and a preview of its first few rows. On error, returns a
                       JSON object with an error message.
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): 400 outside uploads/,
+    403 for a registered session of an inaccessible project.
     """
+    refusal = _pipeline_session_refusal(db, path, current_user)
+    if refusal is not None:
+        return _session_refusal_json(refusal)
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"Received relative path: '{path}', resolved to absolute: '{absolute_processing_path}', force_fresh: {force_fresh}")
 
@@ -900,6 +1216,7 @@ async def process_dataframe(
 async def initial_text_chunking(
     path: str = Form(...),
     model: str = Form(None),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -919,7 +1236,15 @@ async def initial_text_chunking(
     Returns:
         JSONResponse: A success response with the path to the chunks file and the
                       number of chunks created, or an error response.
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): 400 outside uploads/,
+    403 for a registered session of an inaccessible project.
     """
+    refusal = _pipeline_session_refusal(db, path, current_user)
+    if refusal is not None:
+        return _session_refusal_json(refusal)
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"Initial chunking requested for path: '{path}', resolved to: '{absolute_processing_path}'")
     
@@ -1043,16 +1368,26 @@ async def initial_text_chunking(
 @router.post("/process_dataframe_sse")
 async def process_dataframe_sse(
     path: str = Form(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
     Process dataframe with Server-Sent Events for real-time progress updates.
     Streams progress from rad_dataframe.py execution.
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): one error event with
+    status 400 outside uploads/, 403 for a registered session of an
+    inaccessible project.
     """
     from app.utils.sse_helpers import (
         run_subprocess_with_sse, create_combined_parser,
         parse_tqdm_progress, parse_dataframe_logs, parse_multilevel_progress
     )
+
+    refusal = _pipeline_session_refusal(db, path, current_user)
+    if refusal is not None:
+        return _session_refusal_sse(refusal)
 
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"SSE dataframe processing for path: '{path}', resolved to: '{absolute_processing_path}'")
@@ -1147,12 +1482,21 @@ async def process_dataframe_sse(
 async def dense_embedding_generation(
     path: str = Form(...),
     embedding_provider: str = Form(None),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
     Generate dense embeddings using rad_chunk.py with phase=dense.
     Requires OpenAI API key for embedding generation.
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): 400 outside uploads/,
+    403 for a registered session of an inaccessible project.
     """
+    refusal = _pipeline_session_refusal(db, path, current_user)
+    if refusal is not None:
+        return _session_refusal_json(refusal)
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"Dense embedding generation for path: '{path}' by user {current_user.email}")
     
@@ -1238,12 +1582,21 @@ async def dense_embedding_generation(
 @router.post("/sparse_embedding_generation")
 async def sparse_embedding_generation(
     path: str = Form(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
     Generate sparse embeddings using rad_chunk.py with phase=sparse.
     Uses local spaCy model - no external API credentials required.
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): 400 outside uploads/,
+    403 for a registered session of an inaccessible project.
     """
+    refusal = _pipeline_session_refusal(db, path, current_user)
+    if refusal is not None:
+        return _session_refusal_json(refusal)
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"Sparse embedding generation for path: '{path}' by user {current_user.email}")
     
@@ -1488,7 +1841,15 @@ async def upload_db(
     file check): see ``_upload_db_albert``; its fields are read from the raw
     form. While Albert is disabled, ``db_choice=albert`` keeps the historical
     400 (after the sparse file check).
+
+    The session folder is checked first, whatever the target
+    (``_pipeline_session_refusal``): 400 outside uploads/, 403 for a
+    registered session of an inaccessible project.
     """
+    refusal = _pipeline_session_refusal(db, path, current_user)
+    if refusal is not None:
+        return _session_refusal_json(refusal)
+
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"Vector DB upload for path: '{path}', db: {db_choice}, user: {current_user.email}")
     
@@ -1616,6 +1977,7 @@ async def generate_zotero_notes_sse(
     session: str = Form(...),
     note_mode: str = Form("extended"),
     model: str = Form(None),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -1639,6 +2001,17 @@ async def generate_zotero_notes_sse(
     Requires:
     - OpenAI API key (or OpenRouter for alternative models)
     - Zotero credentials (optional - for sync to Zotero library)
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): one error event with
+    status 400 outside uploads/, 403 for a registered session of an
+    inaccessible project.
+
+    When the effective model resolves to the sovereign provider, one usage
+    ledger (``new_albert_usage_ledger``) is handed to the note builders
+    (``albert_usage_ledger``) and appended to the session's usage journal
+    at the end of the job (``flush_albert_usage_ledger``, only if a call was
+    recorded); any other provider gets no ledger and no journal.
     """
     from app.utils.llm_note_generator import (
         build_note_html_async, build_abstract_text_async, sentinel_in_html,
@@ -1649,6 +2022,10 @@ async def generate_zotero_notes_sse(
         verify_api_key, create_child_note, check_note_exists,
         update_item_abstract, ZoteroAPIError
     )
+
+    refusal = _pipeline_session_refusal(db, session, current_user)
+    if refusal is not None:
+        return _session_refusal_sse(refusal)
 
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, session))
     logger.info(f"Zotero notes generation for session: '{session}', mode: {note_mode}, model: {model}, user: {current_user.email}")
@@ -1667,6 +2044,8 @@ async def generate_zotero_notes_sse(
     use_short_mode = note_mode == "short"
 
     async def event_generator():
+        # Usage ledger of this request: created only when Albert is selected
+        albert_ledger = None
         try:
             # Check for output.csv (contains texteocr from pipeline)
             csv_path = os.path.join(absolute_processing_path, 'output.csv')
@@ -1724,6 +2103,13 @@ async def generate_zotero_notes_sse(
                 required = resolution.credential_key
                 yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message(required)}\", \"credential_required\": \"{required}\"}}\n\n"
                 return
+
+            # Albert only: one usage ledger for the whole job, handed to the
+            # builders (no argument at all on the other providers)
+            ledger_kwargs = {}
+            if resolution.provider == PROVIDER_ALBERT:
+                albert_ledger = new_albert_usage_ledger()
+                ledger_kwargs["albert_usage_ledger"] = albert_ledger
 
             # Get Zotero credentials (optional - for sync to library)
             zotero_api_key = get_credential_or_env(current_user, "zotero_api_key") or ""
@@ -1833,6 +2219,7 @@ async def generate_zotero_notes_sse(
                                 openai_api_key=openai_key,
                                 openrouter_api_key=openrouter_key,
                                 albert_api_key=albert_key,
+                                **ledger_kwargs,
                             )
                         else:
                             sentinel, note_html = await build_note_html_async(
@@ -1843,7 +2230,8 @@ async def generate_zotero_notes_sse(
                                 mode=note_mode,
                                 openai_api_key=openai_key,
                                 openrouter_api_key=openrouter_key,
-                                albert_api_key=albert_key
+                                albert_api_key=albert_key,
+                                **ledger_kwargs
                             )
 
                         # Store generated note
@@ -1910,7 +2298,8 @@ async def generate_zotero_notes_sse(
                             model=effective_model,
                             openai_api_key=openai_key,
                             openrouter_api_key=openrouter_key,
-                            albert_api_key=albert_key
+                            albert_api_key=albert_key,
+                            **ledger_kwargs
                         )
 
                         # Store generated summary
@@ -1999,6 +2388,10 @@ async def generate_zotero_notes_sse(
             logger.error(f"Zotero notes SSE error: {e}", exc_info=True)
             error_msg = str(e).replace('"', '\\"').replace('\n', ' ')
             yield f"data: {{\"type\": \"error\", \"message\": \"{error_msg}\"}}\n\n"
+        finally:
+            # Albert usage of the job (also after a stop or a disconnection);
+            # nothing when Albert was not selected or never called
+            flush_albert_usage_ledger(albert_ledger, absolute_processing_path, "notes")
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -2011,16 +2404,26 @@ async def generate_zotero_notes_sse(
 async def initial_text_chunking_sse(
     path: str = Form(...),
     model: str = Form(None),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
     SSE version of initial_text_chunking for real-time progress updates.
     Uses multilevel progress parser for dual progress bars (documents + chunks).
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): one error event with
+    status 400 outside uploads/, 403 for a registered session of an
+    inaccessible project.
     """
     from app.utils.sse_helpers import (
         run_subprocess_with_sse, create_combined_parser,
         parse_multilevel_progress, parse_tqdm_progress, parse_chunking_logs
     )
+
+    refusal = _pipeline_session_refusal(db, path, current_user)
+    if refusal is not None:
+        return _session_refusal_sse(refusal)
 
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     logger.info(f"SSE chunking for path: '{path}'")
@@ -2091,17 +2494,27 @@ async def initial_text_chunking_sse(
 async def dense_embedding_generation_sse(
     path: str = Form(...),
     embedding_provider: str = Form(None),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
     SSE version of dense_embedding_generation for real-time progress updates.
     Uses multilevel progress parser for dual progress bars (documents + chunks).
     Requires OpenAI API key for embedding generation.
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): one error event with
+    status 400 outside uploads/, 403 for a registered session of an
+    inaccessible project.
     """
     from app.utils.sse_helpers import (
         run_subprocess_with_sse, create_combined_parser,
         parse_multilevel_progress, parse_tqdm_progress, parse_chunking_logs
     )
+
+    refusal = _pipeline_session_refusal(db, path, current_user)
+    if refusal is not None:
+        return _session_refusal_sse(refusal)
 
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     input_chunks = os.path.join(absolute_processing_path, 'output_chunks.json')
@@ -2166,17 +2579,27 @@ async def dense_embedding_generation_sse(
 @router.post("/sparse_embedding_generation_sse")
 async def sparse_embedding_generation_sse(
     path: str = Form(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
     SSE version of sparse_embedding_generation for real-time progress updates.
     Uses multilevel progress parser for chunk-level progress display.
     Uses local spaCy model - no external API credentials required.
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): one error event with
+    status 400 outside uploads/, 403 for a registered session of an
+    inaccessible project.
     """
     from app.utils.sse_helpers import (
         run_subprocess_with_sse, create_combined_parser,
         parse_multilevel_progress, parse_tqdm_progress, parse_chunking_logs
     )
+
+    refusal = _pipeline_session_refusal(db, path, current_user)
+    if refusal is not None:
+        return _session_refusal_sse(refusal)
 
     absolute_processing_path = os.path.abspath(os.path.join(UPLOAD_DIR, path))
     input_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings.json')
@@ -2236,6 +2659,7 @@ async def cluster_documents(
     session_name: str = Form(...),
     min_cluster_size: int = Form(None),
     aggregation: str = Form("mean"),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -2272,7 +2696,15 @@ async def cluster_documents(
         Form data:
             session_folder: "abc123_MaBiblio"
             session_name: "MaBiblio"
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): 400 outside uploads/,
+    403 for a registered session of an inaccessible project.
     """
+    refusal = _pipeline_session_refusal(db, session_folder, current_user)
+    if refusal is not None:
+        return _session_refusal_json(refusal)
+
     # Validate session folder exists
     abs_session = os.path.abspath(os.path.join(UPLOAD_DIR, session_folder))
 
@@ -2345,6 +2777,7 @@ async def cluster_documents_sse(
     session_name: str = Form(...),
     min_cluster_size: int = Form(None),
     aggregation: str = Form("mean"),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -2357,11 +2790,22 @@ async def cluster_documents_sse(
     - error: If clustering fails
 
     Uses subprocess to run rad_clustering.py with PROGRESS logging.
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): status 400 outside
+    uploads/, 403 for a registered session of an inaccessible project. The
+    refusal is a JSON body ``{"error": <message>}``, not an SSE event: the
+    clustering handler of the pipeline page reads ``response.json()`` on a
+    refusal status, and would otherwise show the bare status text.
     """
     from app.utils.sse_helpers import (
         run_subprocess_with_sse, create_combined_parser,
         parse_multilevel_progress
     )
+
+    refusal = _pipeline_session_refusal(db, session_folder, current_user)
+    if refusal is not None:
+        return _session_refusal_json(refusal)
 
     # Validate session folder
     abs_session = os.path.abspath(os.path.join(UPLOAD_DIR, session_folder))
@@ -2426,6 +2870,7 @@ async def cluster_documents_sse(
 @router.post("/apply_cluster_tags_zotero")
 async def apply_cluster_tags_zotero(
     session_folder: str = Form(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -2452,7 +2897,15 @@ async def apply_cluster_tags_zotero(
     Note:
         Requires Zotero API credentials (zotero_api_key, zotero_user_id or zotero_group_id)
         to be configured in user settings.
+    \f
+    The session folder is checked first (``_pipeline_session_refusal``, with
+    the database session ``db`` and ``current_user``): 400 outside uploads/,
+    403 for a registered session of an inaccessible project.
     """
+    refusal = _pipeline_session_refusal(db, session_folder, current_user)
+    if refusal is not None:
+        return _session_refusal_json(refusal)
+
     # Get Zotero credentials
     zotero_api_key = get_credential_or_env(current_user, "zotero_api_key")
     zotero_user_id = get_credential_or_env(current_user, "zotero_user_id")

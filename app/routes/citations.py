@@ -17,6 +17,13 @@ Workflow:
 2. Filter citations via LLM → Save preview.json
 3. User validates selection → Import to Zotero
 4. Return final stats (created/updated/errors)
+
+Albert usage (lot 9): when the citation model resolves to Albert, the three
+LLM sites (``filter_citations_sse``, ``batch_import_citations_sse``,
+``filter_citations_bg``) create one usage ledger per request, hand it to
+the filtering helpers (``albert_usage_ledger``) and append it to
+``<session>/albert_usage.jsonl`` at the end of the job, only when Albert was
+called. Any other provider: no ledger, no argument, no file.
 """
 import os
 
@@ -69,6 +76,7 @@ from app.utils.state_persistence import (
 )
 from app.models.background_task import TaskType
 from app.services.background_task_manager import background_task_manager
+from app.routes.processing import flush_albert_usage_ledger, new_albert_usage_ledger
 
 try:
     from scripts.rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, resolve_llm_provider
@@ -146,6 +154,35 @@ def _albert_account_error_event(error):
         "message": str(error),
         "credential_required": getattr(error, "credential_required", ALBERT_CREDENTIAL_KEY),
     })
+
+
+def _citation_usage_ledger(resolution):
+    """
+    Usage ledger of a citation request: one for an Albert resolution, else None.
+
+    Args:
+        resolution: Result of ``_resolve_citation_model``.
+
+    Returns:
+        A new ``UsageLedger`` for Albert, None for another provider.
+    """
+    if resolution.provider != PROVIDER_ALBERT:
+        return None
+    return new_albert_usage_ledger()
+
+
+def _ledger_kwargs(ledger):
+    """
+    Keyword argument carrying the usage ledger to a filtering helper.
+
+    Args:
+        ledger: The request's ledger, or None.
+
+    Returns:
+        ``{"albert_usage_ledger": ledger}``, or ``{}`` when there is no ledger
+        (the helpers then get exactly the historical arguments).
+    """
+    return {"albert_usage_ledger": ledger} if ledger is not None else {}
 
 # Main router for project-related endpoints
 router = APIRouter(prefix="/api/projects", tags=["Citations"])
@@ -325,6 +362,9 @@ async def filter_citations_sse(
         HTTPException 403: User doesn't have access
     """
     async def event_generator():
+        # Albert usage of this request (ledger created only for an Albert model)
+        albert_ledger = None
+        session_folder = None
         try:
             # Get session from database
             pipeline_session = db.query(PipelineSession).filter(
@@ -429,6 +469,7 @@ async def filter_citations_sse(
                     error_msg = get_credential_error_message("openai_api_key")
                     yield f'data: {{"type": "error", "message": "{error_msg}", "credential_required": "openai_api_key"}}\n\n'
                     return
+            albert_ledger = _citation_usage_ledger(resolution)
 
             # If all citations already processed, skip to completion
             if is_resume and len(remaining_citations) == 0:
@@ -472,7 +513,8 @@ async def filter_citations_sse(
                 openai_api_key=openai_api_key,
                 openrouter_api_key=openrouter_api_key,
                 batch_size=effective_batch_size,
-                albert_api_key=albert_api_key
+                albert_api_key=albert_api_key,
+                **_ledger_kwargs(albert_ledger)
             ):
                 if event_type == "init":
                     # Include resume info in init event
@@ -574,6 +616,10 @@ async def filter_citations_sse(
         except Exception as e:
             logger.error(f"Unexpected error in filter_citations_sse: {e}", exc_info=True)
             yield f'data: {{"type": "error", "message": "Unexpected error: {str(e)}"}}\n\n'
+        finally:
+            # Albert usage of the job (nothing unless an Albert call was recorded)
+            if albert_ledger is not None:
+                flush_albert_usage_ledger(albert_ledger, session_folder, "citations")
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1113,6 +1159,9 @@ async def batch_import_citations_sse(
             - complete: {"type": "complete", "total_created": X, "total_skipped": Y, "total_errors": Z}
     """
     async def event_generator():
+        # Albert usage of this request (ledger created only for an Albert model)
+        albert_ledger = None
+        session_folder = None
         try:
             # Validate batch_size
             effective_batch_size = min(max(batch_size, 1), 50)
@@ -1182,6 +1231,7 @@ async def batch_import_citations_sse(
             elif not openai_api_key:
                 yield f'data: {{"type": "error", "message": "OpenAI API key required", "credential_required": "openai_api_key"}}\n\n'
                 return
+            albert_ledger = _citation_usage_ledger(resolution)
 
             if not zotero_api_key:
                 yield f'data: {{"type": "error", "message": "Zotero API key required", "credential_required": "zotero_api_key"}}\n\n'
@@ -1301,7 +1351,8 @@ async def batch_import_citations_sse(
                                 model=model_name,
                                 openai_api_key=openai_api_key,
                                 openrouter_api_key=openrouter_api_key,
-                                albert_api_key=albert_api_key
+                                albert_api_key=albert_api_key,
+                                **_ledger_kwargs(albert_ledger)
                             )
                         else:
                             async with semaphore:
@@ -1441,6 +1492,10 @@ async def batch_import_citations_sse(
         except Exception as e:
             logger.error(f"Unexpected error in batch_import_citations_sse: {e}", exc_info=True)
             yield f'data: {{"type": "error", "message": "Unexpected error: {str(e)}"}}\n\n'
+        finally:
+            # Albert usage of the job (nothing unless an Albert call was recorded)
+            if albert_ledger is not None:
+                flush_albert_usage_ledger(albert_ledger, session_folder, "citations")
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1752,6 +1807,8 @@ async def filter_citations_background(
             status_code=400,
             detail=get_credential_error_message("openai_api_key")
         )
+    # Albert usage of this request, written when the background job ends
+    albert_ledger = _citation_usage_ledger(resolution)
 
     # Check for already processed citations (resume support)
     processed_indices = get_processed_indices(session_folder)
@@ -1834,7 +1891,8 @@ async def filter_citations_background(
                 openai_api_key=openai_api_key,
                 openrouter_api_key=openrouter_api_key,
                 batch_size=effective_batch_size,
-                albert_api_key=albert_api_key
+                albert_api_key=albert_api_key,
+                **_ledger_kwargs(albert_ledger)
             ):
                 if event_type == "progress":
                     processor_idx = event_data["current"] - 1
@@ -1935,6 +1993,10 @@ async def filter_citations_background(
                 log_line=f"FATAL ERROR: {str(e)}"
             )
             raise
+        finally:
+            # Albert usage of the job (nothing unless an Albert call was recorded)
+            if albert_ledger is not None:
+                flush_albert_usage_ledger(albert_ledger, session_folder, "citations")
 
     # Start the background task
     await background_task_manager.start_task(bg_task.id, run_filtering(), db)

@@ -1232,6 +1232,21 @@ def test_g7_sse_credential_error_known_defect(golden_app):
     event, NameError) or the single fixed event ``{type: error, message:
     <the JSON twin's 403 text>, credential_required: <key>}``. In both, no
     launcher is called and no env is built (``calls == []``).
+
+    Lot 9 amendment (decision of 2026-09-27): a case that targets a
+    registered session of another user's project mirrors the twin's
+    session refusal instead (403, ``{type: error, message: <the twin's 403
+    text>}``, no ``credential_required`` since the twin names none). For
+    that case (``member_keys:gemini_slug``) both slots hold the refusal,
+    although the slot is named ``frozen_crash`` and the file's ``route``
+    label still says "missing key".
+
+    Never apply update mode blindly to this golden: since the lot 7 fix the
+    non-foreign cases no longer reproduce the baseline crash, so a
+    regeneration would replace their ``frozen_crash`` baseline with the
+    fixed event. The lot 9 file was recomposed by hand: the 4
+    ``member_nokeys`` cases kept byte for byte, only the foreign case taken
+    from the regeneration.
     """
     env = golden_app
     specs = _known_defect_specs()
@@ -1247,11 +1262,9 @@ def test_g7_sse_credential_error_known_defect(golden_app):
         for (case, persona, _sse_url, twin_url, form), out in zip(specs, observed):
             twin = _post_case(env, case, persona, twin_url, form)
             assert twin["status"] == 403 and twin["calls"] == [], f"{case}: JSON twin is not a clean 403"
-            fixed_event = {
-                "type": "error",
-                "message": twin["body"]["error"],
-                "credential_required": twin["body"]["credential_required"],
-            }
+            fixed_event = {"type": "error", "message": twin["body"]["error"]}
+            if "credential_required" in twin["body"]:
+                fixed_event["credential_required"] = twin["body"]["credential_required"]
             golden_cases.append({
                 "case": case,
                 "persona": persona,

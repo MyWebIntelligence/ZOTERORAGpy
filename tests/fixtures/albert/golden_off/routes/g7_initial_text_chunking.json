@@ -14,12 +14,7 @@
     "fp:023284cfdd83": "server_env.QDRANT_URL",
     "fp:669b22cf2228": "server_env.ZOTERO_API_KEY",
     "fp:cb7c9d34db28": "server_env.ZOTERO_USER_ID",
-    "fp:fba411cc5d41": "db.admin.openai_api_key",
-    "fp:a9908d50d22f": "db.member_keys.openai_api_key",
-    "fp:66565bd23150": "db.member_keys.mistral_api_key",
-    "fp:5914d90d87b1": "db.member_keys.pinecone_api_key",
-    "fp:f2859cefcc3f": "db.member_keys.zotero_api_key",
-    "fp:0aef06c7da78": "db.member_keys.zotero_user_id"
+    "fp:fba411cc5d41": "db.admin.openai_api_key"
   },
   "cases": [
     {
@@ -199,50 +194,12 @@
           "path": "gsess-full"
         }
       },
-      "status": 200,
+      "status": 403,
       "body": {
-        "status": "success",
-        "file": "<TMP>/uploads/gsess-full/output_chunks.json",
-        "count": 3,
-        "message": "Generated 3 chunks using model gpt-4o-mini"
+        "error": "Accès non autorisé à cette session : elle appartient à un projet auquel vous n'avez pas accès."
       },
       "server_exceptions": [],
-      "calls": [
-        {
-          "fn": "run_tracked_subprocess",
-          "argv": [
-            "python3",
-            "<RAGPY>/scripts/rad_chunk.py",
-            "--input",
-            "<TMP>/uploads/gsess-full/output.csv",
-            "--output",
-            "<TMP>/uploads/gsess-full",
-            "--phase",
-            "initial",
-            "--model",
-            "gpt-4o-mini"
-          ],
-          "session_folder": "gsess-full",
-          "timeout": 1800,
-          "env": {
-            "OPENAI_API_KEY": "fp:a9908d50d22f",
-            "OPENROUTER_API_KEY": null,
-            "OPENROUTER_DEFAULT_MODEL": null,
-            "MISTRAL_API_KEY": "fp:66565bd23150",
-            "MISTRAL_OCR_MODEL": null,
-            "MISTRAL_API_BASE_URL": null,
-            "PINECONE_API_KEY": "fp:5914d90d87b1",
-            "PINECONE_ENV": null,
-            "WEAVIATE_API_KEY": null,
-            "WEAVIATE_URL": null,
-            "QDRANT_API_KEY": null,
-            "QDRANT_URL": null,
-            "ZOTERO_API_KEY": "fp:f2859cefcc3f",
-            "ZOTERO_USER_ID": "fp:0aef06c7da78",
-            "ZOTERO_GROUP_ID": null
-          }
-        }
-      ]
+      "calls": []
     },
     {
       "case": "member_keys:gpt-4o-mini",
@@ -255,50 +212,12 @@
           "model": "gpt-4o-mini"
         }
       },
-      "status": 200,
+      "status": 403,
       "body": {
-        "status": "success",
-        "file": "<TMP>/uploads/gsess-full/output_chunks.json",
-        "count": 3,
-        "message": "Generated 3 chunks using model gpt-4o-mini"
+        "error": "Accès non autorisé à cette session : elle appartient à un projet auquel vous n'avez pas accès."
       },
       "server_exceptions": [],
-      "calls": [
-        {
-          "fn": "run_tracked_subprocess",
-          "argv": [
-            "python3",
-            "<RAGPY>/scripts/rad_chunk.py",
-            "--input",
-            "<TMP>/uploads/gsess-full/output.csv",
-            "--output",
-            "<TMP>/uploads/gsess-full",
-            "--phase",
-            "initial",
-            "--model",
-            "gpt-4o-mini"
-          ],
-          "session_folder": "gsess-full",
-          "timeout": 1800,
-          "env": {
-            "OPENAI_API_KEY": "fp:a9908d50d22f",
-            "OPENROUTER_API_KEY": null,
-            "OPENROUTER_DEFAULT_MODEL": null,
-            "MISTRAL_API_KEY": "fp:66565bd23150",
-            "MISTRAL_OCR_MODEL": null,
-            "MISTRAL_API_BASE_URL": null,
-            "PINECONE_API_KEY": "fp:5914d90d87b1",
-            "PINECONE_ENV": null,
-            "WEAVIATE_API_KEY": null,
-            "WEAVIATE_URL": null,
-            "QDRANT_API_KEY": null,
-            "QDRANT_URL": null,
-            "ZOTERO_API_KEY": "fp:f2859cefcc3f",
-            "ZOTERO_USER_ID": "fp:0aef06c7da78",
-            "ZOTERO_GROUP_ID": null
-          }
-        }
-      ]
+      "calls": []
     },
     {
       "case": "member_keys:gemini_slug",
@@ -313,9 +232,7 @@
       },
       "status": 403,
       "body": {
-        "error": "Clé API OpenRouter requise pour ce modèle. Configurez-la dans Paramètres > Mes Identifiants.",
-        "credential_required": "openrouter_api_key",
-        "configure_url": "/settings/credentials"
+        "error": "Accès non autorisé à cette session : elle appartient à un projet auquel vous n'avez pas accès."
       },
       "server_exceptions": [],
       "calls": []
