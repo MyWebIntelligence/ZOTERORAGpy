@@ -1,6 +1,6 @@
 """Tests du câblage Albert des routes (lot 7) : pipeline, notes, citations, Celery.
 
-Couverture (``.claude/tasks/SPRINT_albert.md``, lot 7, tâches 0 à 9) :
+Couverture (``docs/SPRINT_albert.md``, lot 7, tâches 0 à 9) :
 
 * Albert OFF : les requêtes des goldens G7, complétées des champs de
   formulaire propres à Albert, donnent exactement les réponses, événements

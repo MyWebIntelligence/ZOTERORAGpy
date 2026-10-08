@@ -1,6 +1,6 @@
 """Tests des gabarits Albert (lot 7, tâche 10) : blocs Jinja en ligne, OFF identique à G9.
 
-Couverture (``.claude/tasks/SPRINT_albert.md``, lot 7) :
+Couverture (``docs/SPRINT_albert.md``, lot 7) :
 
 * Albert OFF (interrupteur absent, ``0`` ou ``false``) : les pages pipeline,
   profil et détail de projet rendues pour un admin et un non-admin ont

@@ -1,0 +1,1150 @@
+# RAGpy - Guide d'utilisation et architecture
+
+**Date de création** : 2025-10-21
+**Dernière mise à jour** : 2026-10-03 (configuration unifiée ; recherche, réponses sourcées et rerank Albert retirés) ; 2026-10-02 (Albert R2 : politique albert_only, corpus, reprises OCR, audio ; audit A01–A14)
+
+---
+
+## 📚 Documentation complémentaire
+
+### Lecture obligatoire
+
+En complément de ce fichier, lis aussi :
+- **[pipeline_current_architecture.md](docs/pipeline_current_architecture.md)** — Architecture technique détaillée du pipeline, modèle de sécurité credentials, analyse qualité code et roadmap
+
+### Lecture optionnelle (`docs/`)
+
+Selon le contexte de ta tâche, consulte les fichiers suivants :
+
+| Fichier | Description | Quand le lire |
+|---------|-------------|---------------|
+| **[CSV_INGESTION_GUIDE.md](docs/CSV_INGESTION_GUIDE.md)** | Guide complet ingestion CSV directe (sans OCR), mapping colonnes, métadonnées dynamiques | Tâches liées à l'import CSV ou au module `csv_ingestion.py` |
+| **[README_ZOTERO_PROMPT.md](docs/README_ZOTERO_PROMPT.md)** | Personnalisation du template de prompt Zotero, placeholders disponibles, exemples | Modification du prompt de génération de fiches Zotero |
+| **[PROMPT_ANALYSIS_EXHAUSTIVE.md](docs/PROMPT_ANALYSIS_EXHAUSTIVE.md)** | Structure détaillée des analyses académiques exhaustives (6 sections, format HTML) | Développement de l'analyse LLM des articles scientifiques |
+| **[CHANGELOG_PROMPT_CUSTOMIZATION.md](docs/CHANGELOG_PROMPT_CUSTOMIZATION.md)** | Historique des changements système de personnalisation prompt | Comprendre l'évolution du système de templates |
+| **[SSE_DEBUGGING.md](docs/SSE_DEBUGGING.md)** | Diagnostic et corrections des problèmes Server-Sent Events (barres de progression) | Bugs liés au streaming temps réel, `tqdm`, ou endpoints SSE |
+| **[performance_baseline.md](docs/performance_baseline.md)** | Métriques de performance, configuration système, résultats tests de charge | Optimisation performance, tuning workers, dimensionnement |
+| **[ui_tech.md](docs/ui_tech.md)** | Architecture frontend (HTML/CSS/JS vanilla), templates Jinja2, composants UI | Développement interface utilisateur ou modifications CSS/JS |
+| **[clustersfeature.md](docs/clustersfeature.md)** | Clustering UMAP+HDBSCAN, tags Zotero automatiques, endpoints API | Développement ou maintenance du clustering (Step 4.b) |
+| **[albert.md](docs/albert.md)** | API Albert (DINUM) : activation par capacité, modèles et échéances, quotas, OCR souverain, espace bge-m3, collections, RGPD, sécurité, tests live, déploiement | Toute tâche touchant `scripts/rad_albert/`, un modèle `albert/…`, `EMBEDDING_PROVIDER`, la cible `albert` ou une variable `ALBERT_*` |
+
+---
+
+Ce document constitue le guide de référence pour le projet **RAGpy**, un pipeline sophistiqué de Retrieval-Augmented Generation conçu pour traiter des documents académiques. Il couvre l'utilisation des agents CLI, l'architecture du système et les bonnes pratiques d'implémentation.
+
+> **Note d'architecture** : RAGpy combine une interface web FastAPI moderne avec un pipeline modulaire de traitement. L'application supporte multiple sources d'ingestion (Zotero+PDFs, CSV direct, fichiers manuels) et s'intègre avec diverses bases vectorielles (Pinecone, Weaviate, Qdrant).
+
+> **Astuce interface** : dans l'UI FastAPI, les étapes 3.1 à 3.3 proposent un couple « Upload » / « Generate » pour réinjecter respectivement `output.csv`, `output_chunks.json` ou `output_chunks_with_embeddings.json`. Sans fichier téléversé, l'étape réutilise automatiquement le résultat précédent afin de reprendre un traitement interrompu.
+
+---
+
+## Déploiement Docker (recommandé)
+
+### Démarrage rapide
+
+```bash
+# Cloner et configurer
+git clone <URL_DU_DEPOT> && cd ragpy
+cp .env.example .env
+# Éditer .env avec vos clés API
+
+# Lancer
+docker compose up -d
+
+# Accéder
+open http://localhost:8000
+```
+
+### Commandes Docker
+
+```bash
+docker compose logs -f ragpy      # Logs temps réel
+docker compose down               # Arrêter
+docker compose up -d --build      # Reconstruire
+docker compose exec ragpy bash    # Shell conteneur
+```
+
+### Volumes persistants
+
+- `./data` : Base de données SQLite
+- `./uploads` : Sessions de traitement
+- `./logs` : Journaux applicatifs
+- `./sources` : Fichiers sources (optionnel)
+
+### Qdrant local (optionnel)
+
+Décommentez la section `qdrant` dans `docker-compose.yml` pour une base vectorielle locale.
+
+## Vue d'ensemble des agents
+
+| Agent | Localisation | Rôle principal | Commande de base |
+| --- | --- | --- | --- |
+| `ragpy_cli.sh` | `ragpy/ragpy_cli.sh` | Gestion du serveur FastAPI (UI) | `./ragpy/ragpy_cli.sh <start|close|kill>` (depuis le dossier parent) |
+| `rad_clustering.py` | `ragpy/scripts/rad_clustering.py` | Clustering documents + tags Zotero (Step 4.b) | `python scripts/rad_clustering.py --input ... --output ... --session-name ...` |
+| `rad_dataframe.py` | `ragpy/scripts/rad_dataframe.py` | Extraction Zotero + OCR PDF → CSV | `python scripts/rad_dataframe.py --json ... --dir ... --output ...` |
+| `rad_chunk.py` | `ragpy/scripts/rad_chunk.py` | Chunking, recodage GPT, embeddings denses & sparses | `python scripts/rad_chunk.py --input ... --output ... --phase ...` |
+| `rad_vectordb.py` | `ragpy/scripts/rad_vectordb.py` | Insertion dans Pinecone / Weaviate / Qdrant | `python - <<'PY' ...` (appel fonctionnel) |
+| `crawl.py` | `ragpy/scripts/crawl.py` | Crawler HTML → PDF/Markdown pour constitution de corpus | `python scripts/crawl.py` |
+
+### Pré-requis communs
+
+- Python 3.8 ou plus et accès au dossier `ragpy/`.
+- Environnement virtuel recommandé (`python -m venv .venv && source .venv/bin/activate`).
+- Dépendances : `pip install -r scripts/requirements.txt` (FastAPI, uvicorn, Jinja2 et python-multipart y sont inclus).
+- Fichier `.env` à la racine contenant au minimum `OPENAI_API_KEY`. Ajouter les clés Pinecone / Weaviate / Qdrant selon les cibles.
+- Répertoire `logs/` et `uploads/` existent par défaut; les scripts y écrivent automatiquement.
+
+---
+
+## Agent `ragpy_cli.sh` — Gestion du serveur FastAPI
+
+### Mission
+Automatiser le démarrage, l'arrêt et la purge du serveur FastAPI (`uvicorn`). Idéal pour piloter l'interface web lors d'ateliers ou de sessions Vibe Coding.
+
+### Exécution
+```bash
+# Depuis le dossier parent qui contient `ragpy/`
+cd /chemin/vers/__RAG
+./ragpy/ragpy_cli.sh start
+```
+
+### Sous-commandes
+- `start` : lance `uvicorn ragpy.app.main:app` en arrière-plan (`nohup`). Écrit les logs dans `ragpy/ragpy_server.log`.
+- `close` : envoie un `SIGTERM` doux au processus `uvicorn` repéré.
+- `kill` : kill -9 du serveur et des scripts `python3 scripts/rad_*` résiduels.
+
+### Points d'attention
+- Vérifie d'abord si le serveur tourne déjà (affiche les PID détectés).
+- Suppose que `uvicorn` est disponible dans l'environnement actif.
+- Les journaux sont consultables via `tail -f ragpy/ragpy_server.log`.
+- Pour un usage dans `ragpy/` directement, préférez `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`.
+
+---
+
+## Agent `rad_dataframe.py` — Extraction Zotero + OCR PDF
+
+### Mission
+Transformer un export Zotero (`.json` + arborescence `files/`) en CSV enrichi avec texte OCR. Première étape du pipeline CLI.
+
+### Dépendances spécifiques
+- `mistralai` et `requests` pour l'appel OCR Markdown côté Mistral.
+- `openai` (fallback vision) et `fitz` (PyMuPDF) pour les alternatives.
+- `pandas` pour l'assemblage du DataFrame.
+- Logger configuré vers `logs/pdf_processing.log`.
+
+### Variables d'environnement clés
+- `MISTRAL_API_KEY` (obligatoire pour la voie OCR Mistral).
+- `MISTRAL_OCR_MODEL` et `MISTRAL_API_BASE_URL` (optionnels selon l'endpoint OCR choisi).
+- `OPENAI_API_KEY` et `OPENAI_OCR_MODEL` pour le fallback vision.
+- `OPENAI_OCR_MAX_PAGES`, `OPENAI_OCR_MAX_TOKENS`, `OPENAI_OCR_RENDER_SCALE` pour contrôler les appels de secours.
+
+#### Gestion des PDFs volumineux (Mistral > 50 MB)
+
+L'API Mistral `/v1/files` rejette les uploads au-dessus de ~50 MB. Pour les livres scannés et autres PDFs volumineux, RAGpy applique automatiquement (depuis 2026-05-04) une stratégie en deux temps :
+
+1. **Compression PyMuPDF** (`garbage=4` + `deflate` streams/images/fonts) si la taille dépasse `MISTRAL_MAX_UPLOAD_MB`. La compression visuelle est préservée ; seuls les objets inutiles et flux non compressés sont réduits. (Skip si seul le critère pages est dépassé — la compression ne réduit pas le nombre de pages.)
+2. **Découpage en parts** si la compression ne suffit pas OU si `page_count > MISTRAL_MAX_PAGES` (Lot G) : sub-PDFs de `MISTRAL_SPLIT_PART_MB` ET `MISTRAL_SPLIT_PART_PAGES` (les deux critères), OCRisés séquentiellement, puis concaténés avec marqueurs `<!-- Part N/M (pages A-B) -->`. **Renumérotation globale** des `<!-- Page N -->` markers : chaque part Mistral recommence à 1, le concatenateur applique un offset cumulatif pour garantir des numéros uniques (1→1188 pour un livre de 1188 pages découpé en 3 parts de 500).
+
+Variables d'environnement associées :
+
+| Variable | Défaut | Rôle |
+|----------|--------|------|
+| `MISTRAL_MAX_UPLOAD_MB` | `45` | Seuil de bascule vers le mode large-file (marge sous la limite serveur de 50 MB) |
+| `MISTRAL_MAX_PAGES` | `950` | Seuil de bascule sur le nombre de pages (limite serveur Mistral = 1000 pages, code 3730) |
+| `MISTRAL_SPLIT_PART_PAGES` | `500` | Pages cible par part découpée (Lot G — découpe par pages en plus de la taille MB) |
+| `MISTRAL_AUTO_COMPRESS` | `true` | Active la recompression PyMuPDF avant upload |
+| `MISTRAL_AUTO_SPLIT` | `true` | Active le découpage automatique si la compression ne suffit pas |
+| `MISTRAL_SPLIT_PART_MB` | `30` | Taille cible de chaque part découpée |
+
+**Fonctions concernées** (dans `scripts/rad_dataframe.py`) :
+- `_pdf_size_mb(path)` — taille en MB
+- `_compress_pdf_for_ocr(path)` — recompression vers fichier temporaire
+- `_split_pdf_for_ocr(path, max_size_mb)` — découpage en parts
+- `_extract_text_with_mistral(path, max_pages)` — orchestre fast-path / compress / split
+- `_mistral_upload_and_ocr(path, max_pages)` — upload + appel OCR pour un fichier déjà sous-limite
+
+**Garde-fous** :
+- Les fichiers temporaires (compression, parts) sont supprimés via `_safe_unlink()` même en cas d'erreur (clauses `try/finally`).
+- Si `MISTRAL_AUTO_SPLIT=false` et que le fichier reste trop gros, l'OCR échoue explicitement avec un message indiquant comment activer l'option (plutôt qu'un fallback silencieux vers PyMuPDF legacy).
+- Le sémaphore global `MISTRAL_SEMAPHORE` (`MISTRAL_CONCURRENT_CALLS`) reste respecté : chaque part prend un slot, donc un livre découpé en N parts mobilise N slots successifs.
+
+### Lot 1 — Robustesse Mistral (retry transitoire + diagnostic 401)
+
+`_mistral_upload_and_ocr` enrobe désormais `_mistral_upload_and_ocr_once` d'une boucle de retry (voir `SPRINT_ocr_resilience.md`). Un glitch transitoire Mistral (404 « Could not get file » dû à la course upload→OCR, 429, 5xx, timeout réseau) ne fait **plus** basculer immédiatement sur le fallback dégradé : il est réessayé `MISTRAL_OCR_RETRIES` fois (défaut 4) avec **backoff exponentiel** `MISTRAL_OCR_RETRY_BACKOFF * 2**tentative`, plafonné à `MISTRAL_OCR_RETRY_MAX_BACKOFF` (défaut 60 s), **avec jitter** (anti-thundering-herd sur les workers parallèles).
+
+- `_classify_mistral_http_error(exc, pdf_path)` mappe le `requests.HTTPError` :
+  - **401** → `OCRExtractionError` **permanent** avec message actionnable : « clé invalide OU plafond de dépense mensuel atteint (console.mistral.ai → Limits) » (cf. mémoire `reference-mistral-401-spend-cap`). **Jamais** réessayé.
+  - **404 / 408 / 429 / 5xx** → `_MistralTransientError` (réessayé).
+  - autres 4xx → `OCRExtractionError` permanent.
+- **`Retry-After` (429)** : `_parse_retry_after` lit l'en-tête (delta-secondes **et** HTTP-date) et l'attache à `_MistralTransientError.retry_after` ; `_mistral_retry_wait(attempt, retry_after)` le respecte **exactement** (plafonné, sans jitter) au lieu du backoff calculé.
+- Le sémaphore est acquis **par tentative** dans `_once` ; le `time.sleep` du backoff a lieu dans le wrapper, **hors slot**, donc un retry endormi ne bloque pas les autres workers.
+- Variables : `MISTRAL_OCR_RETRIES` (défaut 4), `MISTRAL_OCR_RETRY_BACKOFF` (défaut 3.0 s), `MISTRAL_OCR_RETRY_MAX_BACKOFF` (défaut 60 s).
+
+**Salvage partiel des livres découpés (review-driven).** `_extract_text_with_mistral` renvoie désormais un `_MistralOcr(text, partial, pages_done, pages_total, error)`. Dans le chemin split, une part qui échoue après ses retries ne jette **plus** tout le livre : les parts réussies sont conservées, la part échouée laisse un marqueur explicite `<!-- … OCR ÉCHOUÉ … -->` (la renumérotation globale des pages est préservée), et le résultat est flaggé `partial=True` (→ `texteocr_partial` + `OCR_PARTIAL` dans errors.json). Deux exceptions au salvage : (1) `_MistralAuthError` (401, niveau **compte** : clé/plafond — les autres parts échoueraient pareil) **abandonne** le livre pour que le 401 remonte ; (2) si **toutes** les parts échouent, on lève `OCRExtractionError` (→ fallback legacy).
+
+**Limite de débit 429 (2026-10-02).** L'échelle générique (3 + 6 + 12 + 24 s ≈ 45 s) restait dans la même fenêtre de quota : les 5 tentatives d'une part tombaient toutes en 429 (cas réel : part 2/14 d'un livre scanné, `PDF_EXTRACTION_WORKERS=3`). Désormais :
+- le classifieur pose `_MistralTransientError.status` ; un **429** suit l'échelle `MISTRAL_OCR_RATE_LIMIT_BACKOFF` × 2^tentative (défaut 10, 20, 40, 80 s, plafond `MISTRAL_OCR_RATE_LIMIT_MAX_BACKOFF` = 120 s, gigue ≤ 25 %), et le plafond de `Retry-After` devient 120 s ;
+- un 429 ouvre une **pause commune** aux threads du processus (`_mistral_cooldown`, aussi après la dernière tentative) : chaque tentative commence par l'attendre, les autres workers cessent de saturer la fenêtre. Locale au processus ;
+- les réessais épuisés lèvent `_MistralRetriesExhausted` (sous-classe d'`OCRExtractionError`, avec le `status` du dernier échec) ;
+- chemin split (`_ocr_split_parts_pass`) : une part épuisée **sur un 429** est reprise après les autres (`MISTRAL_SPLIT_RETRY_PASSES` = 1 passe, après `MISTRAL_SPLIT_RETRY_DELAY` = 60 s) ; après `MISTRAL_SPLIT_MAX_RATE_LIMITED_PARTS` (2) parts consécutives en 429, la passe n'envoie plus rien et remet le reste à la passe suivante (quota épuisé : temps borné). Une part encore en échec garde son marqueur et la cause apparaît dans `error` (`2/14 (pages 35-68, limite de débit 429)`).
+- **Seul le 429 change** : les 5xx épuisés, les erreurs permanentes et les marqueurs existants restent identiques à l'octet (goldens G1 inchangés). Étendre la reprise aux 5xx ou supprimer le fichier téléversé après un échec (aujourd'hui seulement après un succès) exigerait un amendement des goldens.
+- Tests : `tests/test_ocr_providers.py::TestRateLimit*` et `::TestSplitRateLimitedParts`.
+
+### Politique fournisseurs — OpenAI Vision désactivé par défaut
+
+La chaîne OCR par défaut est désormais **Mistral → (OpenAI opt-in) → OCR local → legacy (PyMuPDF)**. Le fallback **OpenAI Vision est désactivé** (`OCR_ENABLE_OPENAI_FALLBACK=0`, défaut) : sa transcription page-par-page est plafonnée à `OPENAI_OCR_MAX_PAGES` et tronque silencieusement les livres. La branche OpenAI (avec ses garde-fous partiels Lot 2) reste dans le code et n'est exécutée que si `OCR_ENABLE_OPENAI_FALLBACK=1`. Quand Mistral échoue (ex. 401 plafond) et OpenAI est désactivé, on tente l'OCR local (cf. Lot 4) puis legacy — flaggé `partial` par le garde-fou de densité si le texte est trop maigre (livre scanné). Conseil d'exploitation : aligner `PDF_EXTRACTION_WORKERS` sur `MISTRAL_CONCURRENT_CALLS` pour limiter les 429.
+
+**Maillon Albert (opt-in).** Avec `ALBERT_ENABLED=1` et `OCR_ENABLE_ALBERT=1` (et une clé Albert), la chaîne devient **Albert → Mistral → (OpenAI opt-in) → OCR local → legacy**. Le maillon Albert utilise `/v1/ocr` (`albert_mistral_ocr`) si le compte y a accès, sinon LightOnOCR page par page (`albert_lightonocr`) ; le compte actuel n'a pas accès à `/v1/ocr`. Un repli vers le maillon suivant est tracé (`OCRResult.fallback_from`, entrée `OCR_PROVIDER_FALLBACK` dans `*_errors.json`) ; une erreur de compte ou de quota est mémorisée pour le processus. Désactivé, la chaîne est identique à l'octet. Détails : [albert.md](docs/albert.md) §4.
+
+### Lot 4 — OCR LOCAL (Docling) — sans clé, sans cap, hors-ligne
+
+Voie d'OCR **locale** insérée dans la chaîne **avant** le dernier recours `legacy` : c'est elle qui traite les **PDF scannés** que `legacy` (extraction texte PyMuPDF) ne sait pas lire, **sans clé API ni cap de pages**, y compris quand Mistral est KO (plafond/panne). Voir `.claude/tasks/SPRINT_ocr_local_docling.md`.
+
+- **Isolation (double)** : (1) **process** — l'OCR tourne dans le subprocess dédié **[scripts/ocr_local.py](scripts/ocr_local.py)** ; (2) **venv** — Docling est installé dans un **venv séparé `/opt/ocr-venv`**, PAS dans l'env principal, car il exige `numpy 2.x` / `httpx 0.28` qui casseraient `spacy`/`thinc` (numpy<2) et `mistralai`/`weaviate` (httpx<0.28). Le subprocess est lancé avec `/opt/ocr-venv/bin/python` (`_local_ocr_python()`, surchargeable via `LOCAL_OCR_PYTHON`). torch installé en **CPU-only** (évite ~5 Go de CUDA).
+- **Détection** : `_local_ocr_available()` (dans `rad_dataframe.py`) délègue à `ocr_local.py --check` exécuté avec le python du venv (simple `find_spec`, n'importe pas torch), résultat caché. Si Docling n'est pas installé, le provider est **sauté silencieusement** dans la chaîne.
+- **Contrat de sortie** : `render_markdown_with_page_markers()` émet markdown + `<!-- Page N -->` (export par page, repli mono-marqueur si la version Docling ne supporte pas `page_no`).
+- **Skip recodage** : `texteocr_provider="docling"` est ajouté à `RECODE_SKIP_PROVIDERS` dans `rad_chunk.py` (markdown déjà propre, comme Mistral).
+- **Concurrence** : `LOCAL_OCR_SEMAPHORE` (`LOCAL_OCR_CONCURRENCY`, défaut 1) — CPU/RAM-bound, distinct de `MISTRAL_SEMAPHORE`.
+- **Variables** : `OCR_ENABLE_LOCAL_FALLBACK` (défaut 1), `LOCAL_OCR_ENGINE` (docling), `LOCAL_OCR_DEVICE` (cpu|cuda), `LOCAL_OCR_MAX_PAGES`, `LOCAL_OCR_TIMEOUT`, `LOCAL_OCR_CONCURRENCY`.
+- **Installation (opt-in)** : `pip install -r scripts/requirements-ocr-local.txt` ou image Docker `docker compose build --build-arg INSTALL_LOCAL_OCR=true` (Dockerfile `ARG INSTALL_LOCAL_OCR=false` par défaut → image légère).
+
+Tests : `tests/test_ocr_local.py` (pagination, détection moteur) + `tests/test_ocr_providers.py::TestLocalOcrChain`/`TestLocalOcrSubprocessWrapper` (chaîne, wrapper subprocess, skip recodage).
+
+### Lot 2 — Garde-fou anti-troncature (jamais de « success » silencieux)
+
+Un OCR manifestement incomplet n'est **plus jamais** marqué succès silencieux. `OCRResult` porte maintenant `partial: bool`, `pages_done`, `pages_total`, `error`, propagés dans le CSV (`texteocr_partial`, `texteocr_pages_done`, `texteocr_pages_total`) et dans `*_errors.json` (entrée `error_type="OCR_PARTIAL"` + `logger.warning`).
+
+- **Provider plafonné (OpenAI vision, `OPENAI_OCR_MAX_PAGES`)** : `_extract_text_with_openai` renvoie un `_PagedOcr(text, pages_done, pages_total)`. Si `pages_done < pages_total` (ex. livre 284 p → 10 pages), `extract_text_with_ocr` tente d'abord le moteur **non plafonné** (legacy) ; si legacy n'est pas plus complet, il renvoie le texte OpenAI **flaggé `partial=True`** avec le détail des pages.
+- **Heuristique de densité générique** : `_ocr_density_warning(text, pages_total, ...)` flague `partial=True` quand la densité < `OCR_MIN_CHARS_PER_PAGE` car./page (défaut 500) — typiquement un livre scanné passé dans l'extracteur texte PyMuPDF legacy. Appliquée aux résultats OpenAI complets et au fallback legacy ; **le chemin Mistral (bon) n'est pas touché** pour éviter les faux positifs.
+- Variable : `OCR_MIN_CHARS_PER_PAGE` (défaut 500).
+
+Tests : `tests/test_ocr_providers.py` (classification d'erreur, boucle de retry, flag partiel, densité, chaîne de fallback — 30 tests).
+
+### Lot H — Détection structure par headings markdown (book note)
+
+Quand un livre n'a **aucune Table des matières imprimée** (ex. monographies poche dont la ToC a été retirée pour économiser des pages, ou OCR qui n'a pas capturé la ToC), Phase 1 du `book_note_generator` ne peut rien deviner depuis les `PHASE1_TOC_PAGES` (premières) ou `PHASE1_LAST_TOC_PAGES` (dernières) — généralement remerciements / bibliographie. Résultat : le LLM retourne 1-2 chapitres et la note finale est tronquée.
+
+Mistral OCR émet pourtant `# Chapitre N. Titre` en markdown H1 dans le corps du livre. Lot H exploite ce signal :
+
+1. **`_CHAPTER_PATTERNS_EXPLICIT`** (priorité 1) — `Chapitre N` / `Chapter N` / `IV. Title` avec préfixe markdown optionnel `^(?:\s*#{1,6}\s+|\s*)`.
+2. **`_CHAPTER_PATTERN_H1_FALLBACK`** (priorité 2) — quand priorité 1 retourne <3 chapitres, on retombe sur tous les H1 markdown bruts `^#\s+(.{3,200})$`. Mistral utilise H1 uniquement pour les sauts de chapitre (H2-H3 = sous-sections gérées par `_detect_sections`), donc même les livres dont les chapitres n'ont pas de numérotation explicite (ex. *L'esprit sociologique* de Lahire — chapitres nommés uniquement par leur titre) sont correctement segmentés. Les paratextes (DU MÊME AUTEUR, Remerciements, Bibliographie) sont laissés à Phase 1 LLM qui les marque `is_paratext=True`.
+3. **`_split_text_into_chapters_heuristic`** retourne `(heading, body, (start_page, end_page))` ; les pages sont lues depuis le `<!-- Page N -->` voisin via `_page_marker_positions` + `_page_at_offset`.
+4. **`_build_initial_structure`** marque `structure_signal="markdown_headings"` quand ≥3 chapitres détectés avec corps substantiels (≥`MIN_CHAPTER_CHARS`). Les entrées de ToC qui matchent aussi le pattern (corps trop courts) sont filtrées au lieu de déclencher un fallback wholesale vers `_split_text_into_fixed_parts`.
+5. **Garde-fou dans `_merge_llm_structure`** : si Phase 0 a `markdown_headings` ≥3 chapitres et Phase 1 retourne `< max(3, len(initial)//2)`, on garde la structure Phase 0 et on marque `structure_signal="markdown_headings_guardrail"`. Évite la régression observée sur Lahire 1188 pages où Phase 1 retournait 2 chapitres au lieu de 17.
+
+Tests : `tests/test_book_note_generator_v2.py::TestLotHMarkdownHeadings` (7 tests, dont 2 spécifiques au fallback H1).
+
+### Paramètres CLI
+```bash
+python scripts/rad_dataframe.py \
+  --json sources/MaBiblio/MaBiblio.json \
+  --dir  sources/MaBiblio \
+  --output sources/MaBiblio/output.csv
+```
+- `--json` : chemin de l'export Zotero (UTF-8).
+- `--dir` : dossier de base permettant de résoudre les chemins PDF relatifs du JSON. Depuis l'audit du 2026-09-27, une pièce jointe dont le chemin (absolu ou `..`) sort de `--dir` n'est jamais lue : elle est cherchée dans `--dir` par ses derniers composants (`CLÉ/fichier`, jamais le nom seul), sinon erreur `PATH_OUTSIDE_DIR`. En CLI seulement, `--allow-outside-dir` suit ces chemins (jamais utilisé par l'application web).
+- `--output` : fichier CSV produit (le script crée le dossier si besoin).
+
+### Comportement remarqué
+- En cas de PDF introuvable, tente une recherche fuzzy (normalisation accent, Levenshtein ≤ 2) dans le dossier visé.
+- `extract_text_with_ocr` commence par envoyer les PDF à l'endpoint `v1/ocr` de Mistral (upload + document_id). Si le fichier dépasse `MISTRAL_MAX_UPLOAD_MB` il est compressé puis, si nécessaire, découpé en parts avant upload (voir section « Gestion des PDFs volumineux » ci-dessus). En cas d'échec Mistral : OCR local Docling s'il est installé, puis PyMuPDF (legacy) ; OpenAI Vision seulement avec `OCR_ENABLE_OPENAI_FALLBACK=1` (voir « Politique fournisseurs »).
+- Les métadonnées extraites incluent désormais `texteocr_provider` pour tracer l'origine (`mistral`, `openai`, `legacy`).
+- Le CSV est encodé en `utf-8-sig` pour compatibilité Excel.
+
+### Journaux & diagnostics
+- Trace détaillée dans `logs/pdf_processing.log` (créé si absent).
+- En console: progression `tqdm` pour les pages PDF et éléments Zotero.
+
+---
+
+## Agent `rad_chunk.py` — Chunking, recodage GPT, embeddings
+
+### Mission
+Enrichir le CSV issu de `rad_dataframe.py` via trois phases successives:
+1. Chunking + sauvegarde JSON (`*_chunks.json`).
+2. Recodage GPT + embeddings denses OpenAI (`*_chunks_with_embeddings.json`).
+3. Embeddings sparses spaCy (`*_chunks_with_embeddings_sparse.json`).
+
+### Dépendances & environnement
+
+**Variables d'environnement obligatoires** :
+- `OPENAI_API_KEY` - Embeddings + recodage GPT (lue dans l'environnement ou le `.env` ; aucune saisie interactive). Inutile pour un recodage `albert/…` ou des embeddings `--embedding-provider albert`
+
+**Variables d'optimisation** :
+- `OPENROUTER_API_KEY` - Alternative économique (~75% économie sur recodage)
+- `OPENROUTER_DEFAULT_MODEL` - Modèle par défaut (ex: `google/gemini-2.5-flash`)
+- `MAX_CONCURRENT_LLM_CALLS` - Limite globale d'appels LLM simultanés (défaut: 5)
+
+**Librairies requises** :
+- `langchain_text_splitters` - Chunking intelligent avec RecursiveTextSplitter
+- `openai` - API embeddings et completion
+- `spacy` (`fr_core_news_md`) - NLP français pour embeddings sparse
+- `tqdm`, `pandas` - Utilitaires et manipulation données
+
+**Configuration système** :
+- Concurrency: `ThreadPoolExecutor` (par défaut `os.cpu_count() - 1`)
+- Sauvegarde thread-safe avec verrou global `SAVE_LOCK`
+- Chunking optimisé pour `text-embedding-3-large` (1000 tokens, overlap 150)
+
+**Logique d'optimisation coûts** :
+- Si `texteocr_provider` vaut `mistral` ou `csv` → skip recodage GPT automatiquement
+- `RECODE_SKIP_PROVIDERS` contient aussi `docling`, `mineru`, `marker` et `albert_mistral_ocr` ; `albert_lightonocr` n'y entre que si `ALBERT_OCR_SKIP_RECODE=1` (défaut 0 : recodé, décision D21 à confirmer)
+- Recodage par Albert : `--model albert/<modèle>` (ex. `albert/ministral-3-8b-instruct-2512`), sans repli silencieux vers OpenAI/OpenRouter ; embeddings bge-m3 : `--embedding-provider albert` (espace 1024 d séparé)
+- Support OpenRouter pour réduction drastique des coûts API
+
+### Paramètres CLI
+```bash
+python scripts/rad_chunk.py \
+  --input sources/MaBiblio/output.csv \
+  --output sources/MaBiblio \
+  --phase all
+```
+- `--input` : CSV (phase `initial`) ou JSON (phases `dense`/`sparse`).
+- `--output` : dossier cible des JSON (créé si besoin).
+- `--phase` : `initial`, `dense`, `sparse`, ou `all` (enchaîne les trois).
+
+### Détails par phase
+
+- **initial** : lit un CSV, découpe le champ `texteocr` en chunks (~1 000 tokens avec chevauchement 150), recode via GPT (`gpt-4o-mini`) uniquement si l'OCR ne provient pas de Mistral ou CSV direct, puis sauvegarde `output_chunks.json`.
+- **dense** : attend un fichier `_chunks.json`, génère les embeddings denses OpenAI (`text-embedding-3-large`), écrit `_chunks_with_embeddings.json`.
+- **sparse** : attend `_chunks_with_embeddings.json`, dérive les features spaCy (POS filtrés, lemmas, TF normalisé, indice stable `blake2b` mod 100 000 de `scripts/rad_sparse.py`, collisions additionnées), sauvegarde `_chunks_with_embeddings_sparse.json`.
+- **all** : enchaîne les trois sous-étapes avec journalisation dans `<output>/chunking.log`.
+
+### Support OpenRouter (économie coûts)
+
+Le script supporte **OpenRouter** comme alternative économique (~75% moins cher) pour le recodage GPT :
+
+```bash
+# Utiliser OpenAI (défaut)
+python scripts/rad_chunk.py --input data.csv --output ./out --phase initial
+
+# Utiliser OpenRouter (économique)
+python scripts/rad_chunk.py --input data.csv --output ./out --phase initial \
+  --model google/gemini-2.5-flash
+```
+
+**Auto-détection** : Les modèles avec format `provider/model` utilisent automatiquement OpenRouter. Fallback vers OpenAI si OpenRouter indisponible.
+
+### Comportement complémentaire
+- Si la clé OpenAI est absente, le script affiche un message et sort en `exit 1` pour toute phase qui l'exige (`initial` avec un modèle OpenAI, `dense` dans l'espace OpenAI ; `sparse` n'en a pas besoin). Plus d'invite interactive ni d'écriture dans `.env`. Un modèle `albert/…` (recodage) ou `--embedding-provider albert` (phase dense) n'exige aucune clé OpenAI, seulement `ALBERT_API_KEY`.
+- SpaCy : tronque les textes très longs à `nlp.max_length` (ou 50 000 caractères) pour éviter les dépassements.
+- Les identifiants de chunk incluent `doc_id`, `chunk_index`, `total_chunks` pour faciliter l'upload.
+- Les erreurs d'API GPT sont réessayées séquentiellement (seconde passe) avant fallback sur le texte brut.
+
+### Bonnes pratiques Vibe Coding
+1. Vérifier le `.env` avant lancement (`OPENAI_API_KEY`, etc.).
+2. Lancer la phase `initial` seule pour valider le découpage, puis `dense`/`sparse` si les coûts OpenAI sont confirmés.
+3. Sur de gros corpus, limiter `DEFAULT_MAX_WORKERS` via variable d'environnement pour éviter de saturer l'API.
+4. Contrôler les fichiers générés dans `uploads/<session>/` ou `sources/<projet>/` avant ingestion vectorielle.
+
+---
+
+## Agent `rad_vectordb.py` — Insertion dans les bases vectorielles
+
+### Mission
+Consommer `*_chunks_with_embeddings_sparse.json` et pousser les vecteurs + métadonnées vers Pinecone, Weaviate (multi-tenants) ou Qdrant.
+
+### Dépendances & configurations
+- `pinecone` SDK (>=3.x), `weaviate-client`, `qdrant-client`, `python-dateutil`.
+- Variables d'environnement :
+  - Pinecone : `PINECONE_API_KEY` (+ `PINECONE_ENV` si nécessaire).
+  - Weaviate : `WEAVIATE_URL`, `WEAVIATE_API_KEY`.
+  - Qdrant : `QDRANT_URL`, `QDRANT_API_KEY` (optionnelle selon l'instance).
+- Tailles de lot par défaut : `PINECONE_BATCH_SIZE = 100`, `WEAVIATE_BATCH_SIZE = 100`, `QDRANT_BATCH_SIZE = 100`.
+
+### Modes d'appel recommandés
+```bash
+python - <<'PY'
+from scripts.rad_vectordb import insert_to_pinecone
+import os
+res = insert_to_pinecone(
+    embeddings_json_file='sources/MaBiblio/output_chunks_with_embeddings_sparse.json',
+    index_name='articles-demo',
+    pinecone_api_key=os.getenv('PINECONE_API_KEY')
+)
+print(res)
+PY
+```
+Remplacer `insert_to_pinecone` par `insert_to_weaviate_hybrid` ou `insert_to_qdrant` selon la cible.
+
+### Spécificités par connecteur
+- **Pinecone** :
+  - Vérifie la présence de l'index dans `pc.list_indexes()`. Aucun auto-create dans ce script; créer l'index en amont avec la bonne dimension (embeddings OpenAI = 3 072).
+  - Supporte les vecteurs sparses (`sparse_values`) si fournis.
+  - Retry sur les erreurs d'upsert avec délai de 2s.
+
+- **Weaviate (hybride)** :
+  - Connexion `weaviate.connect_to_weaviate_cloud` avec auth API key.
+  - Vérifie/crée le tenant (`collection.tenants.create`). Paramètre par défaut `tenant_name="alakel"` à modifier selon projet.
+  - Cast les ID chunk → UUID v5 stable (`generate_uuid`).
+  - Normalise les dates en RFC3339 (`normalize_date_to_rfc3339`).
+  - Batching via `collection.with_tenant(...).data.insert_many`.
+
+- **Qdrant** :
+  - Tente de récupérer/creer la collection (`client.create_collection`) en inférant la dimension depuis le premier chunk valide.
+  - Upsert synchrone avec `wait=True` et vérification du statut `COMPLETED`.
+  - Fournit un résumé final (`Total de points insérés`).
+
+- **Albert (collections, 4e cible, opt-in)** :
+  - `insert_to_albert` / `--db albert` : collection **privée** forcée, embeddings calculés côté serveur (vecteurs du fichier ignorés), 10 métadonnées au plus en liste blanche (`ALBERT_METADATA_FIELDS`, jamais `path`).
+  - Idempotence append-skip par `content_id` toujours active (relance : `Inserted: 0`, `Skipped (existing): N`), rollback du document créé en cas d'échec d'une tranche, manifeste `albert_manifest.jsonl` écrit par tranche.
+  - Acquittement de rétention obligatoire (`--albert-ack-retention`) : les textes sont conservés par la DINUM jusqu'à suppression.
+  - Gardes d'espace vectoriel des 3 autres connecteurs : un fichier bge-m3 (1024 d) est refusé avant tout envoi vers un index de 3072 d.
+
+### Vérifications avant ingestion
+1. Nettoyer les métadonnées dans le JSON d'entrée (titres, dates) pour éviter les conversions invalides.
+2. Contrôler l'espace disque: chaque JSON peut peser plusieurs centaines de Mo selon le corpus.
+3. Exécuter un lot test (10-20 chunks) avant d'envoyer l'ensemble pour valider credentials et schéma.
+4. Sur Weaviate multi-tenant, confirmer que la classe (`class_name`) est déjà définie côté cluster (schema management hors scope du script).
+
+---
+
+## Agent `crawl.py` — Constitution rapide de corpus web
+
+### Mission
+Crawler un site (par défaut `https://docs.n8n.io/integrations/`), enregistrer chaque page en PDF (via `wkhtmltopdf` ou Playwright) et Markdown simplifié. Utile pour enrichir un corpus avant passage dans `rad_dataframe.py`.
+
+### Usage
+```bash
+python scripts/crawl.py
+```
+
+### Points clés
+- Nécessite `requests`, `beautifulsoup4`, `playwright`. Pour PDF fidèle, installer `wkhtmltopdf` (sinon fallback Playwright headless).
+- Enregistre les ressources dans `pages_pdf/` et `pages_md/` créés automatiquement à la racine du script.
+- Garde la navigation dans le domaine de départ (`is_internal_link`).
+- À adapter avant production : changer `START_URL` (l'erreur de syntaxe de la condition `if response.status_code != 200` est corrigée depuis l'audit du 2026-09-27).
+
+---
+
+## Pipeline CLI recommandé
+
+1. **Préparer la source** :
+   ```bash
+   python scripts/rad_dataframe.py --json sources/MaBiblio/MaBiblio.json --dir sources/MaBiblio --output sources/MaBiblio/output.csv
+   ```
+2. **Chunk + embeddings** :
+   ```bash
+   python scripts/rad_chunk.py --input sources/MaBiblio/output.csv --output sources/MaBiblio --phase all
+   ```
+3. **Upload vectoriel** (ex. Pinecone) :
+   ```bash
+   python - <<'PY'
+from scripts.rad_vectordb import insert_to_pinecone
+import os
+res = insert_to_pinecone(
+    embeddings_json_file='sources/MaBiblio/output_chunks_with_embeddings_sparse.json',
+    index_name='ma-collection',
+    pinecone_api_key=os.getenv('PINECONE_API_KEY')
+)
+print(res)
+PY
+   ```
+4. **Lancer l'UI** si nécessaire : `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000` ou, depuis le dossier parent, `./ragpy/ragpy_cli.sh start`.
+
+---
+
+## Interface web FastAPI
+
+### Démarrage et gestion
+```bash
+# Démarrage développement
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Gestion via script CLI (depuis le dossier parent de ragpy/)
+./ragpy/ragpy_cli.sh start    # Démarrage arrière-plan
+./ragpy/ragpy_cli.sh close    # Arrêt propre
+./ragpy/ragpy_cli.sh kill     # Arrêt forcé + nettoyage processus
+```
+
+### Endpoints principaux
+- **Upload** : `POST /upload_zip`, `POST /upload_csv` - Ingestion multi-sources
+- **Processing** : `POST /process_dataframe`, `/initial_text_chunking`, `/dense_embedding_generation`
+- **Vector DB** : `POST /upload_db` - Insertion Pinecone/Weaviate/Qdrant
+- **Zotero** : `POST /generate_zotero_notes` - Génération notes académiques automatiques
+- **Configuration** : `GET/POST /get_credentials`, `/save_credentials` - Gestion API keys
+- **Albert** (404 si `ALBERT_ENABLED=0`) : `GET /api/albert/status`, `GET /api/albert/models`, `GET /api/albert/collections`, `DELETE /api/albert/collections/{id}?confirm=true`
+
+### Fonctionnalités avancées
+- **Server-Sent Events (SSE)** pour suivi temps réel des traitements longs
+- **Gestion de sessions** avec répertoires uniques par utilisateur
+- **Upload artifacts intermédiaires** pour reprendre traitements interrompus
+- **Interface credentials** pour configuration API keys via UI
+
+---
+
+## Ingestion CSV directe
+
+### Module csv_ingestion.py
+
+Permet d'injecter des fichiers CSV dans le pipeline en **contournant l'OCR** :
+
+```python
+from ingestion.csv_ingestion import ingest_csv, CSVIngestionConfig
+
+# Configuration flexible
+config = CSVIngestionConfig(
+    text_column="description",      # Colonne source du texte
+    encoding="auto",                # Détection automatique encoding
+    skip_empty=True,                # Ignorer lignes vides
+    add_row_index=True              # Ajouter métadonnées row_index
+)
+
+# Ingestion
+documents = ingest_csv("data.csv", config)
+df = pd.DataFrame([doc.to_dict() for doc in documents])
+df.to_csv("output.csv", index=False)  # Compatible pipeline
+```
+
+### Avantages
+- **Économie API** : Pas de recodage GPT (texteocr_provider="csv")
+- **Métadonnées préservées** : Toutes colonnes CSV conservées
+- **Validation robuste** : Gestion encoding, erreurs, lignes vides
+- **Flexibilité** : Configuration mapping colonnes via YAML
+
+---
+
+## Architecture et points critiques
+
+### Métadonnées dynamiques ✅ (ex-« métadonnées hardcodées », corrigé)
+
+`rad_chunk.py` injecte **toutes** les colonnes du CSV dans chaque chunk (hors `texteocr` et
+clés réservées `id`, `doc_id`, `chunk_index`, `total_chunks`, `content_hash`, `dedup_eligible`),
+et les 3 connecteurs de `rad_vectordb.py` transmettent toutes les clés du chunk sauf
+`id` / `embedding` / `sparse_embedding`. Une colonne CSV personnalisée arrive donc jusqu'à la
+base vectorielle (cf. tableau « Dynamique » dans `pipeline_current_architecture.md`).
+
+### Forces architecturales ✅
+
+- **Modularité excellente** : Séparation claire des responsabilités
+- **Classe Document unifiée** : Abstraction robuste pour toutes sources
+- **Pipeline flexible** : Support multi-sources et multi-providers
+- **Optimisation coûts** : OpenRouter, skip recodage intelligent
+- **Intégration académique** : Zotero bidirectionnel sophistiqué
+
+### Dépendances critiques (épinglées 2025-11-24)
+
+```python
+# Pipeline core
+pandas>=2.2.2                    # Manipulation données
+pymupdf==1.24.2                  # PDF extraction
+openai==1.50.2                   # Embeddings + completion
+langchain-text-splitters>=0.3.9  # Chunking intelligent (CVE-2025-6985 fix)
+spacy==3.7.5                     # NLP français
+tiktoken==0.7.0                  # Tokenisation OpenAI
+
+# Vector databases
+pinecone-client==5.0.1           # Hybrid search
+weaviate-client==4.8.1           # Multi-tenancy
+qdrant-client==1.11.1            # Vector similarity
+
+# Web interface
+fastapi==0.115.0                 # API moderne
+uvicorn==0.30.6                  # ASGI server
+jinja2>=3.1.6                    # Templates (CVE-2024-56326 fix)
+python-multipart>=0.0.18         # Upload fichiers (CVE-2024-24762 fix)
+
+# Authentication
+sqlalchemy==2.0.35               # ORM
+python-jose[cryptography]>=3.4.0 # JWT (CVE-2024-33663 fix)
+bcrypt==4.0.1                    # Hashing
+
+# Dev & test
+pytest==8.3.3                    # Tests
+httpx<=0.27.2                    # HTTP client async
+chardet==5.2.0                   # Détection encoding
+```
+
+---
+
+## Conseils opérationnels et bonnes pratiques
+
+### Développement et debugging
+- **Centraliser les clés** dans `.env` et utiliser `source .env` lors des sessions
+- **Contrôler les logs** : `logs/app.log`, `logs/pdf_processing.log`, `<output>/chunking.log`
+- **Valider par étapes** : Lancer `initial` seul avant `dense`/`sparse` pour valider coûts
+- **Optimiser concurrence** : Ajuster `DEFAULT_MAX_WORKERS` selon quotas API
+
+### Production et sécurité
+- **Versions épinglées** ✅ : `scripts/requirements.txt` avec versions fixes (2025-11-24)
+- **Docker disponible** ✅ : Déploiement simplifié avec `docker compose up -d`
+- **CORS restreint** ✅ : origines explicites `CORS_ORIGINS` (audit A09)
+- **Authentification JWT** ✅ : Implémentée avec vérification email (Resend)
+- **Validation stricte** : Implémenter Pydantic models pour validation entrées
+
+### Optimisation performances
+- **Session cleanup** : Nettoyer `uploads/` après usage sur machines partagées
+- **Batch sizing** : Vérifier tailles lots et quotas API avant traitements massifs
+- **Monitoring** : Surveiller usage mémoire et temps traitement par phase
+- **Cache embeddings** : cache SQLite optionnel (`RECODE_EMBED_CACHE_ENABLED`, `scripts/rad_recode_cache.py`)
+
+---
+
+## Contrôle de concurrence LLM (2025-11-25)
+
+### Sémaphore global
+
+Le système utilise un **sémaphore asyncio global** pour limiter les appels LLM concurrents à travers **tous les utilisateurs** de la plateforme.
+
+**Configuration** (`.env`) :
+```bash
+MAX_CONCURRENT_LLM_CALLS=5      # Limite globale (défaut: 5)
+```
+
+**Comportement** :
+- Maximum N appels LLM simultanés sur toute la plateforme
+- Les requêtes excédentaires attendent qu'un slot se libère
+- Protection contre surcharge API et rate limits
+- Logs de debug pour tracer acquisition/release des slots
+
+**Fonctions async avec contrôle** :
+```python
+# app/utils/llm_note_generator.py
+await build_note_html_async(...)       # Mode étendu
+await build_abstract_text_async(...)   # Mode court
+```
+
+### Retry logic LLM
+
+Les appels LLM incluent une logique de retry automatique :
+- **1 retry** en cas d'erreur
+- **2 secondes** de délai entre tentatives
+- Logging détaillé de chaque tentative
+
+---
+
+## Sécurité des Credentials par Rôle (2025-12-07)
+
+### Modèle de sécurité
+
+RAGpy implémente un modèle de sécurité **role-based** pour l'accès aux credentials API :
+
+| Rôle | Comportement |
+|------|--------------|
+| **ADMIN** | Credentials personnels → fallback `.env` si vide |
+| **NON-ADMIN** | Credentials personnels UNIQUEMENT, **JAMAIS** `.env` |
+
+### Module `app/core/credentials.py`
+
+Ce module gère le chiffrement, le stockage et la récupération sécurisée des credentials utilisateur.
+
+**Composants clés** :
+
+```python
+# Exception personnalisée avec messages français
+class CredentialMissingError(Exception):
+    """Raised when a required credential is missing for a user."""
+    credential_key: str
+    message: str
+    is_admin: bool
+
+# Mapping credential → variable d'environnement
+CREDENTIAL_ENV_MAPPING = {
+    "openai_api_key": "OPENAI_API_KEY",
+    "openrouter_api_key": "OPENROUTER_API_KEY",
+    "mistral_api_key": "MISTRAL_API_KEY",
+    "pinecone_api_key": "PINECONE_API_KEY",
+    # ... autres credentials
+}
+
+# Messages d'erreur en français
+CREDENTIAL_ERROR_MESSAGES = {
+    "openai_api_key": "Clé API OpenAI requise. Configurez-la dans Paramètres > Mes Identifiants.",
+    "mistral_api_key": "Clé API Mistral requise pour l'OCR des PDFs.",
+    # ... autres messages
+}
+```
+
+### Fonction `get_credential_or_env()`
+
+Récupère un credential avec logique de fallback basée sur le rôle :
+
+```python
+def get_credential_or_env(
+    user: User,
+    credential_key: str,
+    env_key: str = None,
+    raise_if_missing: bool = False
+) -> Optional[str]:
+    """
+    Security Model:
+        - ADMIN: Personal credentials first, fallback to .env
+        - NON-ADMIN: Personal credentials ONLY, no .env access
+    """
+```
+
+**Usage dans les routes** :
+```python
+from app.core.credentials import get_credential_or_env, get_credential_error_message
+
+# Dans un endpoint
+openai_key = get_credential_or_env(current_user, "openai_api_key")
+if not openai_key:
+    return JSONResponse(status_code=403, content={
+        "error": get_credential_error_message("openai_api_key"),
+        "credential_required": "openai_api_key"
+    })
+```
+
+### Fonction `build_subprocess_env()`
+
+Construit un environnement sécurisé pour les subprocesses avec isolation des credentials :
+
+```python
+def build_subprocess_env(
+    user: User,
+    required_keys: List[str] = None
+) -> Dict[str, str]:
+    """
+    Security Model:
+        - ADMIN: Keep existing .env credentials, overlay with personal credentials
+        - NON-ADMIN: REMOVE all credential env vars, inject only personal credentials
+
+    Example:
+        >>> env = build_subprocess_env(user, required_keys=["openai_api_key"])
+        >>> process = await asyncio.create_subprocess_exec(*cmd, env=env)
+    """
+```
+
+**Usage dans `app/routes/processing.py`** :
+```python
+from app.core.credentials import build_subprocess_env, CredentialMissingError
+
+@router.post("/process_dataframe")
+async def process_dataframe(..., current_user: User = Depends(get_current_active_user)):
+    try:
+        subprocess_env = build_subprocess_env(
+            current_user,
+            required_keys=["mistral_api_key"]
+        )
+    except CredentialMissingError as e:
+        return JSONResponse(status_code=403, content={
+            "error": str(e),
+            "credential_required": e.credential_key
+        })
+
+    # Lancer subprocess avec env sécurisé
+    process = await asyncio.create_subprocess_exec(*cmd, env=subprocess_env)
+```
+
+### Injection de credentials pour LLM
+
+Pour les appels LLM directs (sans subprocess), les credentials sont passés en paramètres :
+
+```python
+# app/utils/llm_note_generator.py
+async def build_note_html_async(
+    ...,
+    openai_api_key: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None
+):
+    openai_client, openrouter_client, default_model = _get_llm_clients(
+        openai_api_key=openai_api_key,
+        openrouter_api_key=openrouter_api_key
+    )
+```
+
+### Fichiers modifiés pour la sécurité credentials
+
+| Fichier | Modifications |
+|---------|---------------|
+| `app/core/credentials.py` | `CredentialMissingError`, `CREDENTIAL_ENV_MAPPING`, `build_subprocess_env()` |
+| `app/routes/processing.py` | Auth obligatoire + `build_subprocess_env()` pour tous les endpoints |
+| `app/routes/settings.py` | Erreurs 403 explicites pour vector DB endpoints |
+| `app/routes/citations.py` | `get_credential_or_env()` pour Zotero et LLM |
+| `app/utils/llm_note_generator.py` | Paramètres credentials au lieu de `os.getenv()` |
+| `app/utils/citation_filter.py` | Paramètres credentials pour filtrage LLM |
+
+### Bonnes pratiques
+
+1. **Toujours utiliser `get_credential_or_env()`** au lieu de `os.getenv()` direct
+2. **Valider les credentials AVANT** de lancer un subprocess coûteux
+3. **Retourner des erreurs 403** avec `credential_required` pour guider l'utilisateur
+4. **Utiliser `build_subprocess_env()`** pour tous les subprocesses nécessitant des credentials
+5. **Passer les credentials en paramètres** pour les appels LLM directs
+
+---
+
+## Architecture Celery (Phase 3 - Production)
+
+### Vue d'ensemble
+
+RAGpy supporte un mode **dual** pour l'exécution des tâches longues :
+
+- **Mode subprocess** (défaut) : Exécution synchrone via `asyncio.create_subprocess_exec`
+- **Mode Celery** (production) : Queue distribuée avec workers dédiés
+
+```text
+[User Request] → [FastAPI] → [Celery Queue] → [Worker 1]
+                                            → [Worker 2]
+                                            → [Worker 3]
+                      ↓
+                 [Redis Broker]
+                      ↓
+                 [Result Backend]
+```
+
+### Activation Celery
+
+**Configuration** (`.env`) :
+```bash
+# Activer le mode Celery
+ENABLE_CELERY=true
+
+# Configuration Redis
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+
+# Monitoring Flower
+FLOWER_USER=admin
+FLOWER_PASSWORD=changeme
+```
+
+### Services Docker
+
+```bash
+# Démarrer stack complète avec Celery
+docker compose up -d
+
+# Services démarrés:
+# - ragpy (FastAPI)
+# - redis (broker)
+# - celery_worker (4 workers)
+# - celery_beat (tâches périodiques)
+# - flower (monitoring :5555)
+```
+
+### Endpoints API Celery
+
+Les endpoints Celery sont disponibles sous `/api/celery/` :
+
+| Endpoint | Méthode | Description |
+|----------|---------|-------------|
+| `/api/celery/process_dataframe` | POST | Soumettre extraction PDF |
+| `/api/celery/initial_chunking` | POST | Soumettre chunking |
+| `/api/celery/dense_embedding` | POST | Soumettre embeddings denses |
+| `/api/celery/sparse_embedding` | POST | Soumettre embeddings sparses |
+| `/api/celery/upload_vectordb` | POST | Soumettre upload vector DB |
+| `/api/celery/task/{id}/status` | GET | Statut d'une tâche |
+| `/api/celery/task/{id}/cancel` | POST | Annuler une tâche |
+| `/api/celery/status` | GET | Statut système Celery |
+| `/api/celery/workers` | GET | Info workers actifs |
+
+### Tasks Celery
+
+Les tâches sont définies dans `app/tasks/` :
+
+```python
+# Extraction PDF
+from app.tasks.extraction import process_dataframe_task
+task = process_dataframe_task.delay(json_path, base_dir, output_path, session_id)
+
+# Chunking
+from app.tasks.chunking import initial_chunking_task
+task = initial_chunking_task.delay(input_csv, output_dir, session_id, model)
+
+# Embeddings
+from app.tasks.embeddings import dense_embedding_task, sparse_embedding_task
+
+# Vector DB upload
+from app.tasks.vectordb import upload_to_vectordb_task
+
+# Cleanup (périodique)
+from app.tasks.cleanup import cleanup_sessions_task
+```
+
+### Monitoring avec Flower
+
+Accéder à l'interface Flower : `http://localhost:5555`
+
+Fonctionnalités :
+
+- Vue temps réel des workers
+- Historique des tâches
+- Statistiques de performance
+- Retry/revoke de tâches
+
+### Tâches périodiques (Beat)
+
+Celery Beat exécute automatiquement :
+
+- **update-system-metrics** : Chaque minute
+- **cleanup-orphaned-processes** : Toutes les heures
+
+Le nettoyage des sessions expirées tourne dans l'application web (APScheduler, toutes les 6 h), pas dans Beat.
+
+### Migration subprocess → Celery
+
+Le système supporte un **dual mode** avec fallback automatique :
+
+```python
+# processing.py - Le code existant continue de fonctionner
+# celery_tasks.py - Nouveaux endpoints pour mode Celery
+
+# Le frontend peut choisir:
+# - POST /process_dataframe (subprocess, SSE)
+# - POST /api/celery/process_dataframe (Celery, polling)
+```
+
+### Dépendances Celery
+
+```python
+# scripts/requirements.txt
+celery==5.3.4
+redis==5.0.1
+flower==2.0.1
+```
+
+---
+
+## Zotero et Playwright : points d'attention
+
+### API Zotero : clé d'un élément créé
+
+`result["successful"]["0"]` contient l'objet complet de l'élément (sa clé est `["key"]`), pas directement la clé ; `app/utils/zotero_client.py` accepte les deux formes.
+
+### Cookie consent popup dismissal - Playwright PDF
+
+**Problème** : Les conversions HTML→PDF via Playwright incluaient les bannières cookies.
+
+**Solution** dans `app/utils/pdf_downloader.py` :
+
+1. **Dialog handlers** : Dismiss automatique des alert/confirm/prompt JS
+2. **Clic boutons consentement** : 40+ sélecteurs multi-langues (EN/FR/DE)
+3. **Injection CSS fallback** : Masquage des overlays résiduels
+
+**Nouvelle fonction** : `_dismiss_popups(page, timeout_ms=3000) -> bool`
+
+**Sites testés** : Taylor & Francis, MDPI
+
+---
+
+## Déduplication des chunks (anti-doublons RAG, 2026-06-25)
+
+Sprint complet (Lots 0-7) — voir `.claude/tasks/SPRINT_chunk_dedup.md` (conception) et
+`.claude/tasks/sprint-deduplicate.md` (validation/éval). **Tout est OFF par défaut**
+(`DEDUP_ENABLED=0`, `RECODE_CACHE_ENABLED=0`, …) → comportement byte-identique à avant.
+
+### Cause racine (corrigée)
+
+`rad_chunk.py` régénérait `doc_id = random.randint(...)` à chaque run et en dérivait
+`chunk["id"]` → un même PDF ré-OCRisé/ré-inséré obtenait un **nouvel** ID, donc l'upsert
+« idempotent par ID » ne dédupliquait **jamais** entre deux runs. C'est un problème de
+doublon **EXACT** déguisé en problème sémantique.
+
+### Modules
+
+- **[scripts/rad_dedup.py](scripts/rad_dedup.py)** — fondation **stdlib seul** (write-path
+  et read-path partagent la MÊME normalisation/hash). `normalize_text_for_hash` (NFC →
+  retrait commentaires HTML `<!-- Page/Part/OCR -->` → collapse blancs ; **pas** de NFKC/
+  accent-strip/casefold), `content_hash`, `content_id = "{hash[:16]}_{idx}"` (v1, historique),
+  `source_key` / `source_content_id = "{hash[:16]}_s{source[:12]}"` (v2, audit A05), `dedup_candidate_ids`,
+  `is_dedup_eligible` (plancher `DEDUP_MIN_CHARS`), `DedupConfig.from_env`, `DedupAdapter`
+  (Protocol), `dedup_filter` (Tiers 1-3 + journal JSONL), `backfill_chunk_dedup_fields`.
+- **[scripts/rad_recode_cache.py](scripts/rad_recode_cache.py)** — Lot 7 : cache SQLite
+  (`data/recode_cache.sqlite`, WAL, connexion paresseuse par-process fork-safe, verrou
+  dédié `_CACHE_LOCK` ≠ `SAVE_LOCK`), clés `recode_key`/`embed_key`, advisory (erreur →
+  repli appel LLM, jamais fatal).
+
+### Cascade « du moins cher au plus cher »
+
+```
+Tier 0  content_hash = sha256(normalize(texte BRUT pré-recodage))   rad_chunk, ~µs, persisté
+Tier 1  seen-set mémoire des content_hash du run                    gratuit, in-batch + eventual consistency
+Tier 2  existence serveur-side batchée (1 RTT / lot ~100)           fetch/retrieve par ID adressé contenu
+Tier 3  similarité d'embedding (OFF par défaut, capé)               gated titre + chunk_index dur + Jaccard
+```
+
+**Invariant porteur** : le hash/la clé d'existence ne touchent **JAMAIS** `doc_id`
+(champ aléatoire = cause du bug) ; il reste au journal pour traçabilité seulement. Un
+refus exige **toujours** une corroboration métadonnée (titre) ; `chunk_index` est souple
+en Tier 2, garde **dure** en Tier 3.
+
+**Décision d'implémentation** : l'existence Tier 2 se fait par **ID adressé par contenu**
+sur les 3 bases (Pinecone `index.fetch`, Weaviate `fetch_objects(Filter.by_id)`, Qdrant
+`client.retrieve`) — uniforme, métrique-indépendant, **schéma-agnostique** (robuste à un
+schéma Weaviate `Article` figé), sans risque de starvation de `limit`. Pinecone n'utilise
+**jamais** `query`+`$in` (tronqué à top_k sur serverless → present-set incomplet → fuite).
+
+### Recodage déterministe (Lot 7)
+
+`gpt_recode_batch` renvoie désormais `(textes, statuts)` (`recoded|fallback_raw|
+fallback_truncated`). `recode_batch_cached` enrobe le GET/PUT cache (clé sur le
+`content_hash` du **brut**, calculé inconditionnellement de `DEDUP_ENABLED`) : **HIT → 0
+appel LLM**, texte stocké byte-identique. On ne cache QUE les succès (`finish_reason=stop`
++ non vide) ; les fallbacks ne sont ni cachés ni (contrat 7.d, filtré dans `_run_dedup`)
+upsertés. Cache d'embedding optionnel (`RECODE_EMBED_CACHE_ENABLED`) ferme l'axe vecteur.
+
+### Lot 0 (prérequis, réparés)
+
+- `insert_to_weaviate_hybrid`/`insert_to_qdrant` renvoient un **dict** unifié
+  `{status, message, inserted_count [, skipped_count, journal_path]}` (helper
+  `_vectordb_result`), comme Pinecone.
+- `app/tasks/vectordb.py` : wrappers Celery réparés (les 3 passaient `progress_callback`
+  non supporté ; Weaviate/Qdrant omettaient `url`/`api_key`) + lecture défensive du retour.
+- `app/routes/processing.py` : parser **ancré** `^Inserted:\s*(\d+)` / `^Skipped \(dedup\):`
+  / `^Dedup journal:` (l'ancien `re.search(r'(\d+)')` happait la 1ʳᵉ suite de chiffres).
+
+### Journal & surfaçage
+
+`uploads/<session>/dedup_journal.jsonl` (append, 1 objet/refus, `doc_id` = traçabilité,
+`score=null` pour exact/in-batch) + `dedup_summary.json`. Les connecteurs émettent
+`Skipped (dedup): N` + `Dedup journal: <path>` dans le bloc `=== Result ===` (stdout, parsé
+par la route) et `skipped_count`/`journal_path` dans le dict (lu par Celery).
+
+### Back-fill (Lot 5)
+
+`rebuild_pinecone_index.py --backfill-hash` dote les corpus pré-dédup d'un `content_hash`
+(hash sur le texte **stocké** — caveat : ne matche pas un ré-ingest frais qui hache le
+brut ; protège les ré-uploads). Requiert `DEDUP_ENABLED=1`.
+
+### Variables & tests
+
+Toutes les variables `DEDUP_*` / `RECODE_*` sont dans `.env.example`. Tests :
+`tests/test_dedup.py` (L1 hash, L2 cascade, L3 connecteurs mockés, L0 retours/parser, L5
+back-fill, L7 cache), `tests/load/bench_dedup.py` (invariants sans réseau : Tier2 ==
+ceil(N/lot), Tier3 == 0 si OFF). `pytest tests/test_dedup.py` — aucun credential requis.
+
+---
+
+
+---
+
+## Corrections de l'audit externe du 2026-09-27 (A01–A14)
+
+Audit : `.claude/auditchat6astra.md`. Règles en vigueur après correction :
+
+- **Uploads (A01)** : noms de stockage générés côté serveur (`<8 hex>_<stem assaini>`,
+  `_source_upload.csv`), le nom client n'est qu'une métadonnée ; toute destination et tout
+  nettoyage confinés sous `uploads/` (`app/core/upload_safety.py`) ; limites `UPLOAD_MAX_MB`,
+  `UPLOAD_MAX_UNZIPPED_MB`, `UPLOAD_MAX_ZIP_ENTRIES` (413). Même extraction ZIP pour
+  `/upload_zip` et `/api/pipeline/projects/{id}/upload_zip`. Côté lecture, les chemins de
+  pièces jointes du JSON Zotero sont confinés à la session (`rad_dataframe._confined_attachment_path`,
+  correspondance `CLÉ/fichier` pour les chemins d'une autre machine, `--allow-outside-dir` en CLI).
+- **Droits sur les sessions (A02)** : autorisation centrale `app/core/session_access.py`
+  (lecture, écriture, arrêt). Session de projet : lecture pour tout membre, écriture et arrêt
+  pour propriétaire et collaborateurs (un `viewer` reçoit 403). Import hors projet : table
+  `session_owners` (`SessionOwner`), réservé à son auteur. **Dossier sans aucune ligne** (import
+  antérieur, projet supprimé) : **administrateurs seuls** (règle explicite, remplace le
+  « comportement historique »). Identifiant canonique du dossier (`_session_key`) partagé par
+  les routes, le registre des PID et les verrous. Échec d'enregistrement du propriétaire :
+  l'upload est supprimé (500).
+- **Celery (A04)** : `task_queues` déclare toutes les files (worker sans `-Q`), routage et Beat
+  par noms explicites du registre ; le nettoyage des sessions expirées appartient à l'APScheduler
+  web (Beat ne le planifie plus) ; seuil des orphelins au-dessus de toute limite de tâche.
+- **Déduplication (A05)** : identité = contenu + source (`DEDUP_META_FIELDS`), sans la position ;
+  id v2 `{hash[:16]}_s{source[:12]}` ; Tier 1 par couple (contenu, source) ; existence Tier 2
+  interrogée sur l'id du chunk, l'id v2 et l'id v1 historique (migration sans rupture).
+  `scripts/backfill_pinecone_inplace.py --id-scheme v2` migre un index v1 (manuel, `--dry-run`
+  d'abord). Les collections Albert gardent leur clé `content_id` v1 (par document). La source vaut
+  les champs de `DEDUP_META_FIELDS` (titre par défaut) : pour des titres génériques, ajouter
+  `authors` ou `itemKey`, sinon deux œuvres homonymes au passage identique partagent un id.
+- **Sparse (A06)** : encodage stable `scripts/rad_sparse.py` (`blake2b`, collisions additionnées,
+  version `SPARSE_ENCODING`). Les vecteurs sparse produits avant (hash Python salé) ne sont pas
+  comparables : relancer la phase sparse puis l'envoi pour les index hybrides.
+- **Embeddings (A07)** : plus aucun vecteur nul d'échec ; validation commune
+  `rad_providers.valid_dense_vector` (dimension, valeurs finies, norme) avant cache, écriture et
+  insertion ; erreur OpenAI permanente (401/403/404) sans cascade d'appels ; la phase dense sort
+  en 1 au-delà de `EMBED_MAX_MISSING_RATIO` (défaut 0) ; entrée de cache invalide purgée.
+- **SSE (A08)** : script dans son propre groupe de processus, possédé par un superviseur
+  indépendant du flux : échéance unique appliquée même si le client ne lit plus, arrêt du groupe
+  (SIGTERM puis SIGKILL). **Décision explicite : une déconnexion n'arrête pas le traitement** (un
+  rechargement de page ne perd pas des heures d'appels payés) ; sa sortie est drainée, il reste
+  arrêtable (`/stop_all_scripts`) et garde le verrou de session jusqu'à sa fin réelle. Arrêt du
+  serveur : `process_manager.stop_all()` arrête tous les scripts enregistrés.
+- **Déploiement (A09)** : `RAGPY_ENV=production` refuse le secret JWT de remplacement ;
+  `JWT_SECRET_KEY_PREVIOUS` + `scripts/rotate_credentials_key.py` pour une rotation sans perte
+  des clés chiffrées ; CORS limité à `CORS_ORIGINS` ; Compose publie Redis et Flower sur
+  127.0.0.1 (`REDIS_BIND`, `FLOWER_BIND`) et Flower exige des identifiants.
+- **Checkpoints (A10)** : phase initiale en mémoire avec écritures atomiques bornées
+  (`CHUNK_CHECKPOINT_SECONDS`), fichier illisible conservé en `.corrupt-<date>` ; sorties
+  dense/sparse écrites atomiquement ; fenêtre bornée de lots d'embeddings.
+- **Boucle événementielle et SQL (A11)** : copies, extraction, pandas et gros JSON dans des
+  threads ; `/health/detailed` sans pause ; liste des projets paginée (`limit`, `offset`) sans
+  requête par projet ; index sur `project_members`.
+- **Admission (A12)** : `app/services/job_control.py` — verrou inter-processus par session et
+  groupe (409), créneaux `MAX_ACTIVE_JOBS` / `MAX_ACTIVE_JOBS_PER_USER` (429) ; le worker Celery
+  tient le même verrou ; limiteur Albert partagé via Redis dans Compose.
+- **Tests (A13)** : bases de test temporaires (plus de `data/ragpy.db`), tests asynchrones en
+  `@pytest.mark.anyio`, `ruff.toml` (erreurs seulement), CI `.github/workflows/tests.yml`
+  (Python 3.11, hors ligne) ; `scripts/requirements-dev.txt`.
+
+## Intégration Albert (DINUM) — opt-in, OFF par défaut (2026-09-27)
+
+Sprint complet (lots 0 à 8) — voir `docs/SPRINT_albert.md` (spécification et journal
+d'exécution) et le guide **[albert.md](docs/albert.md)**. **Tout est OFF par défaut**
+(`ALBERT_ENABLED=0`, `OCR_ENABLE_ALBERT=0`, `EMBEDDING_PROVIDER=openai`) → comportement identique
+à l'octet, prouvé par les goldens G1-G13 (`tests/fixtures/albert/golden_off/`, jamais régénérés
+hors amendement motivé et accepté explicitement, comme celui de G7 pour la sécurité dans `ca9561c`).
+
+### Les 4 capacités
+
+| Capacité | Activation | Effet |
+|---|---|---|
+| Chat (recodage, notes, fiches, citations) | modèle `albert/<modèle>` | routé vers Albert avant l'heuristique `provider/model` ; `albert/…` avec Albert OFF → 400 sans sous-processus |
+| OCR | `OCR_ENABLE_ALBERT=1` | maillon Albert en tête de chaîne (LightOnOCR sur le compte actuel), repli tracé |
+| Embeddings | `EMBEDDING_PROVIDER=albert` ou champ `embedding_provider` | `bge-m3`, **1024 d**, espace séparé des 3072 d d'OpenAI ; champs `embedding_provider/model/dim` écrits seulement hors défaut |
+| Base vectorielle | `db_choice=albert` / `--db albert` | collections Albert privées (4e cible), acquittement RGPD, audit, manifestes `data/albert_manifests/<user_id>/` |
+
+### Points d'architecture
+
+- **Socle** : `scripts/rad_albert/` (config, errors, retry, catalog, limiter, usage, client httpx,
+  preflight, ocr, collections), `scripts/rad_providers.py` (résolveur `resolve_llm_provider`,
+  `EmbeddingSpace`), `scripts/rad_env.py` (`load_dotenv_guarded`). Le registre `ENV_REGISTRY`
+  (`scripts/rad_albert/config.py`) est la source du bloc ALBERT de `.env.example`
+  (`tests/test_albert_docs_sync.py`).
+- **Clé** : identifiant `albert_api_key` → `ALBERT_API_KEY`, masqué côté serveur (`••••` + 4
+  caractères) ; repli `.env` réservé aux admins ; `ALBERT_BASE_URL` = configuration serveur (https,
+  liste blanche). La bibliothèque ne lit jamais la clé dans l'environnement.
+- **Isolation non-admin** : `build_subprocess_env` pose `RAGPY_DOTENV_DENY` (noms `*_API_KEY`
+  retirés, triés, séparés par des virgules) ; `rad_env.load_dotenv_guarded()` empêche les
+  sous-processus de les recharger depuis `.env`.
+- **Espaces vectoriels** : gardes de dimension dans les 3 connecteurs, `rebuild_pinecone_index.py`
+  et le clustering ; Tier 3 de la dédup sauté pour bge-m3 tant que `DEDUP_SIM_THRESHOLD_BGE_M3`
+  est vide.
+- **Quotas partagés par compte** : régime d'expérimentation du compte actuel (1 000 requêtes par
+  jour et par modèle de chat, gpt-oss à 10 requêtes par minute) ; limiteur proactif par rôle
+  (`ALBERT_LIMITER_BACKEND=redis` sous Celery) ; `ALBERT_SUBPROCESS_TIMEOUT` (21 600 s) appliqué
+  seulement quand la requête sélectionne Albert.
+- **Celery** : routes authentifiées, sous-processus par utilisateur (`build_subprocess_env`),
+  aucun secret dans Redis, branche albert jamais réessayée automatiquement, limites de temps
+  relevées pour les tâches Albert (`runner.albert_time_limits()`).
+- **Échéances des modèles** : 2026-10-01 (fin de test de LightOnOCR) et 2026-12-01 (retrait de
+  mistral-small) ; re-sonde `ALBERT_LIVE=1 .venv/bin/python scripts/albert_probe.py --only P2,P5,P21 --out data/albert_probe --diff-against tests/fixtures/albert`.
+
+### Commandes
+
+```bash
+# Local : toujours .venv/bin/python -m <outil> ; .venv/bin en tête du PATH (les routes lancent python3)
+PATH="$PWD/.venv/bin:$PATH" ALBERT_ENABLED=1 OCR_ENABLE_ALBERT=1 .venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Tests mockés (aucun réseau) puis suite live (ALBERT_LIVE dans le shell seulement, jamais dans .env)
+.venv/bin/python -m pytest tests/test_albert_off_golden.py tests/test_albert_off_golden_routes.py tests/test_albert_docs_sync.py -q -p no:cacheprovider
+ALBERT_LIVE=1 .venv/bin/python -m pytest tests/live -m albert_live -v -p no:cacheprovider
+ALBERT_LIVE=1 .venv/bin/python scripts/albert_e2e_smoke.py --corpus-size 3 --cleanup
+ALBERT_LIVE=1 .venv/bin/python scripts/albert_probe.py --cleanup --dry-run
+```
+
+**Docker** : le code est intégré à l'image → `docker compose up -d --build` après toute mise à
+jour. **Ordre de déploiement sur le VPS** : code d'abord, puis `ALBERT_API_KEY` (et
+`ALBERT_ENABLED=1`) dans le `.env` du VPS, puis `docker compose up -d --build`.
+
+### Sprint R2 (2026-10-02) — intégration complète, tout OFF par défaut
+
+Plan et journal : `.claude/tasks/SPRINT_albert_r2.md` ; guide : sections 15 à 21 d'**[albert.md](docs/albert.md)**.
+
+| Capacité | Activation | Points clés |
+|---|---|---|
+| Politique d'inférence | `ALBERT_DATA_POLICY=albert_only` | modèle vide → défaut Albert du rôle, autre fournisseur → 400 `policy_violation` ; embeddings `openai` refusés ; OCR Mistral/OpenAI sautés ; `OPENAI/OPENROUTER/MISTRAL_API_KEY` retirées des sous-processus et ajoutées à `RAGPY_DOTENV_DENY` ; Albert OFF → 400 `policy_requires_albert` |
+| Recherche et réponses sourcées | **retirées le 2026-10-03** | RAGpy prépare les corpus ; les questions sont posées par d'autres outils. Page `/albert/rag`, routes de recherche/réponse, rerank, `scripts/rad_albert/rag.py` et variables `ALBERT_RAG_*`/`ALBERT_RERANK_*` supprimés (archive : `data/code_backups/`) |
+| Corpus | registre `albert_corpora` / `albert_corpus_sources`, routes `app/routes/albert_corpora.py` | rempli après chaque envoi `db_choice=albert` (manifeste) ou par rattachement ; droits propriétaire / membres (lecture) / collaborateurs (écriture) ; suppression de document auditée ; suppression de compte refusée sans `?albert_data=keep` |
+| OCR | `ALBERT_OCR_CHECKPOINT=1` (défaut) | reprise page par page dans `<session>/albert_ocr_checkpoints/` ; images (PNG, JPEG, TIFF, WebP) quand le maillon Albert est actif |
+| Audio | `ALBERT_AUDIO_ENABLED=1` | `scripts/rad_audio.py` (ffmpeg, reprise par segment), `/upload_audio`, `/process_audio_sse`, `texteocr_provider=albert_whisper` (non recodé) |
+| Usage | — | `GET /api/albert/usage?days=N` ; `ALBERT_LIMITER_REQUIRE_REDIS=1` = aucun appel si Redis tombe |
+| Évaluation | — | `scripts/eval/albert/` : fiches CSV + HTML à l'aveugle, métriques, rapport de décision (OCR D21, audio) |
+
+**État du lot 9 (corrigé)** : contrôle d'appartenance des sessions sur les routes pipeline,
+authentification du bouton d'arrêt, chunks au texte vide non comptés comme embeddings manquants,
+journal d'usage `albert_usage.jsonl` écrit par les routes des notes, des fiches et du filtre de
+citations (contrôle on6 de l'E2E obligatoire : `NOTES_LEDGER_REQUIRED = True`). **Restent ouverts** :
+D21 (recodage des textes LightOnOCR) à confirmer ; révocation de l'ancienne clé Pinecone à
+confirmer.

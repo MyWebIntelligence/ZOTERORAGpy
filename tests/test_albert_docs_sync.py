@@ -1,6 +1,6 @@
 """Synchronisation entre le code Albert, les ``.env.example`` et la documentation.
 
-Invariants couverts (``.claude/tasks/SPRINT_albert.md``, lot 8) :
+Invariants couverts (``docs/SPRINT_albert.md``, lot 8) :
 
 * 32 : ``ALBERT_LIVE`` n'apparaît dans aucun fichier d'environnement d'exemple
   (interrupteur réservé au shell) ;
@@ -8,7 +8,7 @@ Invariants couverts (``.claude/tasks/SPRINT_albert.md``, lot 8) :
   ``ENV_REGISTRY``, présente une seule fois dans le ``.env.example`` racine
   (active ou en commentaire, selon le registre unique
   ``scripts/rad_settings/registry.py``) avec son défaut, désactivée par
-  défaut, et documentée dans ``.claude/docs/albert.md``.
+  défaut, et documentée dans ``docs/albert.md``.
 
 Sprint « configuration unifiée » (lot L2) : ``.env.example`` est généré depuis
 le registre unique et rangé par blocs numérotés ; ``scripts/.env.example``,
@@ -51,7 +51,7 @@ REPO = Path(__file__).resolve().parents[1]
 ROOT_ENV_EXAMPLE = REPO / ".env.example"
 SCRIPTS_ENV_EXAMPLE = REPO / "scripts" / ".env.example"
 """Supprimé au lot L2 du sprint « configuration unifiée » : ne doit pas revenir."""
-ALBERT_DOC = REPO / ".claude" / "docs" / "albert.md"
+ALBERT_DOC = REPO / "docs" / "albert.md"
 
 EXAMPLE_LINE_RE = re.compile(r"^(#\s*)?([A-Z][A-Z0-9_]*)=(.*)$")
 """Affectation active (``NOM=valeur``) ou en commentaire (``# NOM=valeur``)."""
@@ -267,7 +267,7 @@ def test_albert_defaults_off():
 
 
 def test_docs_mention_required_topics():
-    """``.claude/docs/albert.md`` couvre les sujets imposés par le lot 8."""
+    """``docs/albert.md`` couvre les sujets imposés par le lot 8."""
     text = ALBERT_DOC.read_text(encoding="utf-8")
     required = (
         "RGPD",
@@ -290,21 +290,21 @@ def test_docs_mention_required_topics():
 
 
 def test_every_registered_var_documented_in_albert_md():
-    """Chaque variable de ``ENV_REGISTRY`` est citée dans ``.claude/docs/albert.md``."""
+    """Chaque variable de ``ENV_REGISTRY`` est citée dans ``docs/albert.md``."""
     text = ALBERT_DOC.read_text(encoding="utf-8")
     undocumented = [name for name in _registry_names() if f"`{name}`" not in text]
     assert undocumented == []
 
 
 def test_albert_doc_commands_on_one_line():
-    """Aucune commande de ``.claude/docs/albert.md`` n'est coupée par une
+    """Aucune commande de ``docs/albert.md`` n'est coupée par une
     continuation ``\\`` en fin de ligne."""
     lines = ALBERT_DOC.read_text(encoding="utf-8").splitlines()
     continued = [number for number, line in enumerate(lines, 1) if line.rstrip().endswith("\\")]
     assert continued == []
 
 
-PROJECT_GUIDES = (REPO / "CLAUDE.md", REPO / ".claude" / "CLAUDE.md")
+PROJECT_GUIDES = (REPO / "CLAUDE.md", REPO / "docs" / "GUIDE.md")
 """Guides projet qui décrivent le comportement de ``rad_chunk.py``."""
 
 VECTORDB_SCRIPT = REPO / "scripts" / "rad_vectordb.py"
@@ -402,7 +402,7 @@ def test_e2e_notes_ledger_relaxation_documented():
 # ---------------------------------------------------------------------------
 # Lot 9 : cache tiktoken, limiteur, réessais, /v1/models, /save_credentials
 # ---------------------------------------------------------------------------
-SPRINT_DOC = REPO / ".claude" / "tasks" / "SPRINT_albert.md"
+SPRINT_DOC = REPO / "docs" / "SPRINT_albert.md"
 ROOT_CONFTEST = REPO / "conftest.py"
 
 TIKTOKEN_WARM_COMMAND = (
@@ -652,7 +652,7 @@ LOT9_REGRESSION_FILES = (
 )
 """Fichiers des tests de régression du lot 9 (au lieu d'un fichier unique)."""
 
-LOT9_COMMITS = ("a84e941", "0dd3e23", "be3693d")
+LOT9_COMMITS = ("c7314aa", "ca9561c", "ffa8e11")
 """Commits du lot 9 consignés dans le journal d'exécution."""
 
 

@@ -41,7 +41,7 @@ RAGpy transforme une collection de documents statique en une base de connaissanc
 
 ## Nouveautés
 
-- **Intégration Albert (DINUM), optionnelle** : OCR, recodage, notes, embeddings `bge-m3` et collections vectorielles privées servis par l'API publique française ; désactivée par défaut, activable capacité par capacité ([guide](.claude/docs/albert.md)).
+- **Intégration Albert (DINUM), optionnelle** : OCR, recodage, notes, embeddings `bge-m3` et collections vectorielles privées servis par l'API publique française ; désactivée par défaut, activable capacité par capacité ([guide](docs/albert.md)).
 - **Sécurité renforcée (audit externe A01–A14)** : imports confinés et limités en taille, droits par session (propriétaire, collaborateur, lecteur), admission des traitements (409 si la session est occupée, 429 au-delà des quotas), démarrage refusé en production sans secret JWT, Redis et Flower publiés en local seulement.
 - **OCR résilient** : réessais Mistral avec backoff, gros PDF compressés puis découpés automatiquement, OCR local hors ligne (Docling) pour les scans, et jamais de « succès » silencieux sur un texte tronqué (drapeau `texteocr_partial`).
 - **Fiches de lecture de livres** en plusieurs phases (détection des chapitres, analyse chapitre par chapitre, synthèse), lecture directe des **EPUB**.
@@ -509,7 +509,7 @@ Après l'étape 1, dans **« Generate Zotero Reading Notes »** : choisir le mod
 
 #### Personnalisation
 
-Éditez les gabarits ci-dessus. Placeholders : `{TITLE}`, `{AUTHORS}`, `{DATE}`, `{DOI}`, `{URL}`, `{ABSTRACT}`, `{TEXT}`, `{LANGUAGE}`. Guide : [.claude/docs/README_ZOTERO_PROMPT.md](.claude/docs/README_ZOTERO_PROMPT.md).
+Éditez les gabarits ci-dessus. Placeholders : `{TITLE}`, `{AUTHORS}`, `{DATE}`, `{DOI}`, `{URL}`, `{ABSTRACT}`, `{TEXT}`, `{LANGUAGE}`. Guide : [docs/README_ZOTERO_PROMPT.md](docs/README_ZOTERO_PROMPT.md).
 
 ---
 
@@ -604,7 +604,7 @@ RAGpy peut confier ses quatre usages externes à l'API Albert de la DINUM, hébe
 | Embeddings | `EMBEDDING_PROVIDER=albert` ou choix dans l'interface (espace 1024 d séparé, jamais mélangé aux index 3072 d) |
 | Base vectorielle | cible `albert` (collections privées, acquittement de rétention obligatoire) |
 
-Minimum dans `.env` : `ALBERT_ENABLED=1` et `ALBERT_API_KEY` (repli réservé aux administrateurs ; les autres utilisateurs saisissent leur clé Albert dans leurs identifiants). Un modèle `albert/…` demandé alors qu'Albert est désactivé est refusé (400), sans repli silencieux vers OpenAI ou OpenRouter. Les quotas sont partagés par compte Albert. Quotas, échéances des modèles, RGPD, sécurité et déploiement : [.claude/docs/albert.md](.claude/docs/albert.md) et le bloc ALBERT de `.env.example`.
+Minimum dans `.env` : `ALBERT_ENABLED=1` et `ALBERT_API_KEY` (repli réservé aux administrateurs ; les autres utilisateurs saisissent leur clé Albert dans leurs identifiants). Un modèle `albert/…` demandé alors qu'Albert est désactivé est refusé (400), sans repli silencieux vers OpenAI ou OpenRouter. Les quotas sont partagés par compte Albert. Quotas, échéances des modèles, RGPD, sécurité et déploiement : [docs/albert.md](docs/albert.md) et le bloc ALBERT de `.env.example`.
 
 ---
 
@@ -691,7 +691,7 @@ ragpy/
 └── docker-compose.yml, Dockerfile
 ```
 
-Documentation détaillée : [.claude/CLAUDE.md](.claude/CLAUDE.md) (guide complet), [.claude/pipeline_current_architecture.md](.claude/pipeline_current_architecture.md) et [.claude/docs/](.claude/docs/) (ingestion CSV, prompts Zotero, SSE, clustering, interface, Albert).
+Documentation détaillée : [docs/GUIDE.md](docs/GUIDE.md) (guide complet), [docs/pipeline_current_architecture.md](docs/pipeline_current_architecture.md) et [docs/](docs/) (ingestion CSV, prompts Zotero, SSE, clustering, interface, Albert).
 
 #### Technologies clés
 

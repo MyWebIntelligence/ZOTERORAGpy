@@ -94,3 +94,10 @@ ragpy_cli.sh
 .claude/audit.md
 .claude/audit_juridique.md
 .claude/auditchat6astra.md
+
+# Fichiers et dossiers en point : hors du dépôt, sauf ceux dont le dépôt a besoin
+.*
+!.gitignore
+!.dockerignore
+!.env.example
+!.github/

@@ -1,6 +1,6 @@
 """Tests des routes de collections Albert de ``app/routes/settings.py`` (lot 7, tâche 8).
 
-Couverture (``.claude/tasks/SPRINT_albert.md``, lot 7) :
+Couverture (``docs/SPRINT_albert.md``, lot 7) :
 
 * ``GET /api/albert/collections`` et ``DELETE /api/albert/collections/{id}``
   répondent 404 ``{"detail": "Not Found"}`` quand Albert est OFF, pour toute

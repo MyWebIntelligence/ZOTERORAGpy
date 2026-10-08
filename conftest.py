@@ -30,7 +30,7 @@ la racine. Il garantit qu'aucune session de test n'appelle l'API Albert réelle 
   temporaire du système, peut être purgé, et les tests nouveaux échouent alors
   faute de pouvoir le retélécharger. Rien n'est téléchargé ici (tiktoken n'est
   pas importé) ; le préchauffage se fait une fois, hors pytest
-  (``.claude/docs/albert.md``, section 10).
+  (``docs/albert.md``, section 10).
 
 Les transports ``httpx.MockTransport`` (``tests/albert_fakes.FakeAlbert``) et le
 ``TestClient`` de Starlette ne passent pas par ``HTTPTransport`` : la garde ne
