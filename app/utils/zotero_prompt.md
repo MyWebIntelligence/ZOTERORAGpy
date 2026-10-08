@@ -325,9 +325,7 @@ Adopter la sévérité d'un reviewer de conférence de rang A (NeurIPS, ICWSM, C
 ---
 
 **Métadonnées** :
-- Longueur : [NOMBRE DE MOTS]
 - Mots-clés : [5-7 mots-clés thématiques]
-- Date de fiche : [DATE]
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <!-- SECTION 7 : GARDE-FOUS SPÉCIFIQUES -->
