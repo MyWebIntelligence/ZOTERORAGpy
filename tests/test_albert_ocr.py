@@ -738,7 +738,7 @@ def test_off_record_columns_unchanged(monkeypatch, tmp_path):
 # Parseur pages[] de Mistral : extraction pure, octets inchangés
 # ---------------------------------------------------------------------------
 def _baseline_payload_to_markdown(response_payload):
-    """Copie verbatim du parseur ``pages[]`` de la baseline (``_mistral_upload_and_ocr_once``, commit 5e40aed)."""
+    """Copie verbatim du parseur ``pages[]`` de la baseline (``_mistral_upload_and_ocr_once``, commit c224520)."""
     markdown_text = ""
     if isinstance(response_payload, dict):
         pages = response_payload.get("pages")

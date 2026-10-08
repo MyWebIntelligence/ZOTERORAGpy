@@ -1075,7 +1075,7 @@ Sprint complet (lots 0 à 8) — voir `docs/SPRINT_albert.md` (spécification et
 d'exécution) et le guide **[albert.md](docs/albert.md)**. **Tout est OFF par défaut**
 (`ALBERT_ENABLED=0`, `OCR_ENABLE_ALBERT=0`, `EMBEDDING_PROVIDER=openai`) → comportement identique
 à l'octet, prouvé par les goldens G1-G13 (`tests/fixtures/albert/golden_off/`, jamais régénérés
-hors amendement motivé et accepté explicitement, comme celui de G7 pour la sécurité dans `ca9561c`).
+hors amendement motivé et accepté explicitement, comme celui de G7 pour la sécurité dans `e812c64`).
 
 ### Les 4 capacités
 

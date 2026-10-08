@@ -16,7 +16,7 @@ qui travaillent sur un dossier de session le contrôlent avant tout travail
 * propriétaire, collaborateur du projet et administrateur : accès inchangé,
   avec les clés du collaborateur lui-même (argv, env, délai, arguments des
   aides) ; les cas ``member_keys`` des goldens G7 d'avant l'amendement
-  (``3790a64``) sont rejoués à l'octet quand il est collaborateur ;
+  (``67068db``) sont rejoués à l'octet quand il est collaborateur ;
 * import hors projet (``SessionOwner``, audit A02) : réservé à son auteur ;
   dossier sans aucune ligne (import antérieur au contrôle, ou projet
   supprimé) : réservé aux administrateurs ; lecteur (``viewer``) d'un
@@ -354,7 +354,7 @@ def test_project_members_and_admin_keep_access(golden_app, no_zotero_tags, url, 
 
 
 # Lancements d'un collaborateur sur la session enregistrée : les valeurs figées par les
-# goldens G7 d'avant l'amendement (cas member_keys de 3790a64), chemins normalisés.
+# goldens G7 d'avant l'amendement (cas member_keys de 67068db), chemins normalisés.
 SESSION_TMP = "<TMP>/uploads/" + REGISTERED
 RAD_CHUNK = "<RAGPY>/scripts/rad_chunk.py"
 RAD_VECTORDB = "<RAGPY>/scripts/rad_vectordb.py"
@@ -474,9 +474,9 @@ def test_collaborator_notes_use_own_keys(golden_app):
     assert fingerprints and not fingerprints & _server_env_fps()
 
 
-# Cas member_keys des goldens de routes G7 de 3790a64 (avant l'amendement du lot 9) :
+# Cas member_keys des goldens de routes G7 de 67068db (avant l'amendement du lot 9) :
 # 24 premiers caractères hexadécimaux du sha256 de ``json.dumps(cas, indent=2,
-# ensure_ascii=False)``, relevés une fois sur ``git show 3790a64:tests/fixtures/albert/
+# ensure_ascii=False)``, relevés une fois sur ``git show 67068db:tests/fixtures/albert/
 # golden_off/routes/<fichier>``. Ils figent à l'octet la réponse, l'argv, le délai, l'env
 # (empreintes des clés en base de member_keys) et les arguments des aides ; l'amendement
 # les a remplacés par le refus de session, ce test les rejoue avec member_keys collaborateur.
@@ -516,7 +516,7 @@ HEAD_MEMBER_BUILDERS = {
     "g7_upload_db.json": "test_g7_upload_db",
     "g7_generate_zotero_notes_sse.json": "test_g7_generate_zotero_notes_sse",
 }
-# Issue ``fixed_event`` du cas member_keys du golden « défaut connu » de 3790a64.
+# Issue ``fixed_event`` du cas member_keys du golden « défaut connu » de 67068db.
 HEAD_KNOWN_DEFECT_FIXED_EVENT = {
     "status": 200,
     "content_type": "text/event-stream; charset=utf-8",
@@ -551,7 +551,7 @@ def test_collaborator_replays_pre_amendment_member_cases(golden_app, monkeypatch
     lieu d'être écrites ou comparées ; seuls les cas member_keys sont
     confrontés aux empreintes de ``HEAD_MEMBER_CASES``. En cas d'écart, le
     cas observé est affiché avec ses empreintes libellées, à comparer à
-    ``git show 3790a64:tests/fixtures/albert/golden_off/routes/<fichier>``.
+    ``git show 67068db:tests/fixtures/albert/golden_off/routes/<fichier>``.
     """
     env = golden_app
     _add_member(env, FOREIGN_PERSONA)
@@ -580,7 +580,7 @@ def test_collaborator_replays_pre_amendment_member_cases(golden_app, monkeypatch
             assert labels <= member_labels, (name, case, labels - member_labels)
     assert not mismatches, "\n\n".join(mismatches)
 
-    # Golden « défaut connu » : l'événement corrigé figé dans 3790a64 pour member_keys.
+    # Golden « défaut connu » : l'événement corrigé figé dans 67068db pour member_keys.
     form = {"path": REGISTERED, "model": "google/gemini-2.5-flash"}
     out = env.norm(golden._post_case(env, "initial_text_chunking_sse:member_keys:gemini_slug", FOREIGN_PERSONA,
                                      "/initial_text_chunking_sse", form, sse=True))

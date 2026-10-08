@@ -652,7 +652,7 @@ LOT9_REGRESSION_FILES = (
 )
 """Fichiers des tests de régression du lot 9 (au lieu d'un fichier unique)."""
 
-LOT9_COMMITS = ("c7314aa", "ca9561c", "ffa8e11")
+LOT9_COMMITS = ("3f5e31d", "e812c64", "0d2f148")
 """Commits du lot 9 consignés dans le journal d'exécution."""
 
 

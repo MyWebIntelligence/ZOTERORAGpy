@@ -13,6 +13,8 @@ Avant tout `git commit`, documenter les nouvelles fonctions Python avec docstrin
 
 Git : ne jamais commit/push sans demande explicite (la règle `.agent/rules/startsession.md` « git add/commit/push à chaque séquence » vise un autre agent et ne s'applique pas ici).
 
+Dépôt public : aucun fichier ni dossier en point n'est versionné (`.*` dans `.gitignore`, exceptions `.gitignore`, `.dockerignore`, `.env.example`, `.github/`) ; la documentation publique va dans `docs/`, jamais sous `.claude/` (un nouveau fichier en point utile au dépôt exige son exception `!nom`).
+
 ## Common commands
 
 ```bash
@@ -100,7 +102,7 @@ RAGpy is a FastAPI app that wraps a 4-stage academic-document RAG pipeline. The 
 - **Chunk metadata is dynamic.** `rad_chunk.py` copies every CSV column into each chunk (minus `texteocr` and reserved keys: `id`, `doc_id`, `chunk_index`, `total_chunks`, `content_hash`, `dedup_eligible`), and all three connectors forward every chunk key except `id`/`embedding`/`sparse_embedding`. A new upstream column therefore reaches the vector DB automatically.
 - **Chunk deduplication (all OFF by default: `DEDUP_ENABLED`, `RECODE_CACHE_ENABLED`).** `doc_id` is random per run, so the dedup key must never use it: `scripts/rad_dedup.py` hashes normalized raw text (`content_hash`), shared by write path and connectors. Identity = content + stable source (`DEDUP_META_FIELDS`), never the position: v2 id `{hash[:16]}_s{source[:12]}` (audit A05); existence checks are by ID (Pinecone `fetch`, never `query`+`$in`) on the chunk id, the v2 id and the legacy v1 id `{hash[:16]}_{chunk_index}`. `scripts/rad_recode_cache.py` = SQLite recode/embedding cache. Vector-DB connectors return a unified dict (`status`, `inserted_count`, `skipped_count`…), and `processing.py` parses the anchored `Inserted:` / `Skipped (dedup):` stdout lines — keep that output format stable.
 - **OpenRouter fallback for cost.** Models with `provider/model` slug auto-route to OpenRouter (~75% cheaper for GPT recoding); falls back to OpenAI if unavailable.
-- **Albert (DINUM) — opt-in, OFF par défaut** (guide complet : `docs/albert.md`). `ALBERT_ENABLED=0` = comportement identique à l'octet (goldens G1-G13 de `tests/fixtures/albert/golden_off/`, jamais régénérés hors amendement motivé et accepté explicitement, comme G7 pour la sécurité dans `ca9561c`).
+- **Albert (DINUM) — opt-in, OFF par défaut** (guide complet : `docs/albert.md`). `ALBERT_ENABLED=0` = comportement identique à l'octet (goldens G1-G13 de `tests/fixtures/albert/golden_off/`, jamais régénérés hors amendement motivé et accepté explicitement, comme G7 pour la sécurité dans `e812c64`).
   - Socle : paquet `scripts/rad_albert/` (client httpx, une seule couche de retry, limiteur par rôle, catalogue épinglé, preflight), `scripts/rad_providers.py` (résolveur, espaces d'embeddings), `scripts/rad_env.py`. Registre des variables : `ENV_REGISTRY` (`scripts/rad_albert/config.py`), recopié dans `.env.example`.
   - Convention `albert/<modèle>` (préfixe testé avant l'heuristique `provider/model`) ; `albert/…` avec Albert OFF → 400 sans sous-processus. Aucun repli silencieux vers OpenAI/OpenRouter.
   - Espaces vectoriels séparés : 3072 d (OpenAI) et 1024 d (bge-m3) jamais mélangés ; gardes de dimension dans les connecteurs ; Tier 3 de la dédup sauté pour bge-m3 sans `DEDUP_SIM_THRESHOLD_BGE_M3`.

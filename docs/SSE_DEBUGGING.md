@@ -56,7 +56,7 @@ yield f"data: {json.dumps(event)}\n\n"  # Produit: data: {...}\n\n (newlines ré
 
 ## ✅ Correctifs appliqués
 
-**Commit** : `52ea72f` - fix: Critical SSE bugs
+**Commit** : `edf7460` - fix: Critical SSE bugs
 
 **Fichiers modifiés** :
 - `app/utils/sse_helpers.py` : +41 lines, -17 lines
@@ -205,7 +205,7 @@ Symptômes possibles et causes :
 
 ## 🎯 Checklist de validation
 
-- [ ] Serveur redémarré après commit `52ea72f`
+- [ ] Serveur redémarré après commit `edf7460`
 - [ ] `curl` test retourne des événements SSE progressifs
 - [ ] Logs serveur montrent lignes stderr capturées
 - [ ] Frontend affiche barre qui anime
