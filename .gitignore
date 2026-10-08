@@ -91,3 +91,6 @@ coverage.xml
 
 # Script CLI (généré localement)
 ragpy_cli.sh
+.claude/audit.md
+.claude/audit_juridique.md
+.claude/auditchat6astra.md
