@@ -385,14 +385,46 @@ def create_child_note(
     }
 
 
+GENERATED_ABSTRACT_SEPARATOR = "\n\n---\n\n"
+
+
+def merge_generated_abstract(
+    current_abstract: Optional[str],
+    new_abstract: str,
+    separator: str = GENERATED_ABSTRACT_SEPARATOR
+) -> str:
+    """
+    Abstract with the generated summary replaced, the original abstract kept.
+
+    The original abstract is the text before the first ``separator``;
+    everything after it is a summary written by an earlier run and is
+    replaced, so a rerun never stacks summaries. Limit: a summary written
+    into an empty abstract has no separator, and a rerun reads it as the
+    original abstract.
+
+    Args:
+        current_abstract: Current ``abstractNote`` (``None`` or blank = empty).
+        new_abstract: Generated summary.
+        separator: Separator between the original abstract and the summary.
+
+    Returns:
+        ``new_abstract`` alone for an empty abstract, otherwise
+        ``original + separator + new_abstract``.
+    """
+    if not current_abstract or not current_abstract.strip():
+        return new_abstract
+    original = current_abstract.split(separator, 1)[0]
+    return original + separator + new_abstract
+
+
 def update_item_abstract(
     library_type: str,
     library_id: str,
     item_key: str,
     new_abstract: str,
     api_key: str,
-    separator: str = "\n\n---\n\n",
-    mode: str = "append"
+    separator: str = GENERATED_ABSTRACT_SEPARATOR,
+    mode: str = "replace_generated"
 ) -> Dict:
     """
     Update an item's abstractNote field.
@@ -403,8 +435,11 @@ def update_item_abstract(
         item_key: The item key to update
         new_abstract: New abstract text
         api_key: Zotero API key
-        separator: Separator between existing and new abstract (only used in append mode)
-        mode: "append" (default) appends to existing, "replace" replaces entirely
+        separator: Separator between existing and new abstract (append and
+            replace_generated modes)
+        mode: "replace_generated" (default) keeps the original abstract and
+            replaces the summary of an earlier run (``merge_generated_abstract``),
+            "append" appends to existing, "replace" replaces entirely
 
     Returns:
         A dictionary summarizing the outcome of the operation:
@@ -437,7 +472,10 @@ def update_item_abstract(
     logger.info(f"Current abstract length: {len(current_abstract)} chars, version: {item_version}")
 
     # Build new abstract based on mode
-    if mode == "append" and current_abstract and current_abstract.strip():
+    if mode == "replace_generated":
+        updated_abstract = merge_generated_abstract(current_abstract, new_abstract, separator)
+        logger.info(f"Replacing the generated summary, original abstract kept (mode={mode})")
+    elif mode == "append" and current_abstract and current_abstract.strip():
         updated_abstract = current_abstract + separator + new_abstract
         logger.info(f"Appending to existing abstract (mode={mode})")
     else:

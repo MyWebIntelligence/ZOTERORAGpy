@@ -146,11 +146,40 @@ NOTE_MODE_PREFIX = {
 # multiple smaller calls and overrides this in book_note_generator).
 NOTE_MODE_MAX_TOKENS = {
     "extended": 16000,
-    "short": 2000,
+    "short": 8000,
     "pedagogique": 10000,
     "evaluation": 10000,
     "book": 8000
 }
+
+# Truncated answer (finish_reason=length) on the OpenAI/OpenRouter/declared
+# server path: one retry with budget × 2, floored and capped, then an error.
+# A reasoning model counts its reasoning in max_tokens, so a tight budget can
+# leave a summary cut mid-sentence, or empty. The first call keeps the budget
+# of the mode (golden G11).
+NOTE_TRUNCATION_RETRY_FACTOR = 2
+NOTE_TRUNCATION_RETRY_MIN_TOKENS = 8000
+NOTE_TRUNCATION_RETRY_MAX_TOKENS = 32000
+
+
+class LLMTruncatedError(ValueError):
+    """The LLM stopped on its token budget (``finish_reason=length``): the answer is incomplete."""
+
+
+def _truncation_retry_budget(max_tokens: int) -> int:
+    """
+    Budget of the single retry after a truncated answer.
+
+    Args:
+        max_tokens: Budget of the truncated call.
+
+    Returns:
+        ``max_tokens`` × ``NOTE_TRUNCATION_RETRY_FACTOR``, at least
+        ``NOTE_TRUNCATION_RETRY_MIN_TOKENS`` and at most
+        ``NOTE_TRUNCATION_RETRY_MAX_TOKENS``.
+    """
+    budget = max(max_tokens * NOTE_TRUNCATION_RETRY_FACTOR, NOTE_TRUNCATION_RETRY_MIN_TOKENS)
+    return min(budget, NOTE_TRUNCATION_RETRY_MAX_TOKENS)
 
 # Display names for UI
 NOTE_MODE_DISPLAY = {
@@ -1586,9 +1615,13 @@ def _generate_with_llm(
         temperature: Sampling temperature (0.0 to 1.0)
         mode: Note generation mode. Determines max_tokens:
               - "extended": 16000 tokens
-              - "short": 2000 tokens
+              - "short": 8000 tokens
               - "pedagogique": 10000 tokens
               - "evaluation": 10000 tokens
+              A truncated answer (``finish_reason=length``, with or without
+              text) gets a single retry with ``_truncation_retry_budget``,
+              then raises ``LLMTruncatedError`` (OpenAI, OpenRouter and
+              declared servers; the Albert path has its own rule).
         openai_api_key: Optional OpenAI API key. If None, no OpenAI client
                         (no environment fallback).
         openrouter_api_key: Optional OpenRouter API key. If None, no OpenRouter
@@ -1607,6 +1640,7 @@ def _generate_with_llm(
         ValueError: If no LLM client is available
         AlbertDisabledError: ``albert/…`` model while Albert is disabled
         AlbertAuthError: Albert account error (no fallback to another provider)
+        LLMTruncatedError: Answer still truncated after the retry
         Exception: If the API call fails
     """
     # Single resolver, before the provider branch: an explicit albert/ model
@@ -1695,6 +1729,12 @@ def _generate_with_llm(
                 logger.error(f"LLM API returned empty response or no choices. Response: {response}")
                 raise ValueError(f"LLM API returned invalid response (no choices). Model: {model}")
 
+            # Cut on the token budget, with or without text: never a note
+            if getattr(response.choices[0], "finish_reason", None) == "length":
+                raise LLMTruncatedError(
+                    f"LLM answer truncated (finish_reason=length, max_tokens={max_tokens}). Model: {model}"
+                )
+
             if not response.choices[0].message or response.choices[0].message.content is None:
                 logger.error(f"LLM API returned empty message content. Response: {response}")
                 raise ValueError(f"LLM API returned empty content. Model: {model}")
@@ -1712,6 +1752,9 @@ def _generate_with_llm(
             last_error = e
             logger.error(f"LLM API error (attempt {attempt}/{max_attempts}): {e}")
 
+            if attempt < max_attempts and isinstance(e, LLMTruncatedError):
+                max_tokens = _truncation_retry_budget(max_tokens)
+                logger.warning(f"Truncated answer: single retry with max_tokens={max_tokens}")
             if attempt < max_attempts:
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 import time

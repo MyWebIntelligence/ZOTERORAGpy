@@ -564,6 +564,66 @@ class TestNormalizeTitleForSearch:
         assert result == "study 2024 results"
 
 
+SEP = zotero_client.GENERATED_ABSTRACT_SEPARATOR
+
+
+class TestMergeGeneratedAbstract:
+    """The generated summary replaces the previous one; the original abstract is kept."""
+
+    def test_empty_abstract_gets_summary_alone(self):
+        assert zotero_client.merge_generated_abstract("", "Résumé.") == "Résumé."
+        assert zotero_client.merge_generated_abstract("  \n", "Résumé.") == "Résumé."
+        assert zotero_client.merge_generated_abstract(None, "Résumé.") == "Résumé."
+
+    def test_first_summary_appended_after_original(self):
+        merged = zotero_client.merge_generated_abstract("Abstract d'origine.", "Résumé.")
+        assert merged == "Abstract d'origine." + SEP + "Résumé."
+
+    def test_previous_summary_replaced(self):
+        current = "Abstract d'origine." + SEP + "Ancien résumé coupé"
+        merged = zotero_client.merge_generated_abstract(current, "Nouveau résumé.")
+        assert merged == "Abstract d'origine." + SEP + "Nouveau résumé."
+
+    def test_stacked_summaries_collapsed(self):
+        """Two summaries left by earlier runs: only the original and the new one remain."""
+        current = "Abstract d'origine." + SEP + "Résumé 1." + SEP + "Résumé 2."
+        merged = zotero_client.merge_generated_abstract(current, "Résumé 3.")
+        assert merged == "Abstract d'origine." + SEP + "Résumé 3."
+
+    def test_idempotent(self):
+        once = zotero_client.merge_generated_abstract("Abstract d'origine.", "Résumé.")
+        assert zotero_client.merge_generated_abstract(once, "Résumé.") == once
+
+
+class TestUpdateItemAbstract:
+    """``update_item_abstract`` sends the merged abstract in the PATCH."""
+
+    def _run(self, current_abstract, **kwargs):
+        """Update an item whose abstract is ``current_abstract``; return (result, payload)."""
+        item = {"version": 7, "data": {"abstractNote": current_abstract}}
+        response = Mock(status_code=204, headers={"Last-Modified-Version": "8"})
+        with patch("app.utils.zotero_client.get_item", return_value=item), \
+                patch("app.utils.zotero_client.requests.patch", return_value=response) as mock_patch:
+            result = zotero_client.update_item_abstract(
+                "users", "123", "ITEMKEY", "Nouveau résumé.", "test_key", **kwargs
+            )
+        return result, mock_patch.call_args.kwargs["json"]
+
+    def test_default_replaces_previous_summary(self):
+        result, payload = self._run("Origine." + SEP + "Résumé 1." + SEP + "Résumé 2.")
+        assert payload == {"abstractNote": "Origine." + SEP + "Nouveau résumé."}
+        assert result["success"] is True
+        assert result["previous_abstract"] == "Origine." + SEP + "Résumé 1." + SEP + "Résumé 2."
+
+    def test_append_mode_still_stacks(self):
+        _, payload = self._run("Origine." + SEP + "Résumé 1.", mode="append")
+        assert payload == {"abstractNote": "Origine." + SEP + "Résumé 1." + SEP + "Nouveau résumé."}
+
+    def test_replace_mode_replaces_everything(self):
+        _, payload = self._run("Origine." + SEP + "Résumé 1.", mode="replace")
+        assert payload == {"abstractNote": "Nouveau résumé."}
+
+
 class TestMergeItemData:
     """Test intelligent item data merging."""
 

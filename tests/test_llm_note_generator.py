@@ -382,5 +382,111 @@ class TestGenerateWithLlm:
         llm_clients["openrouter"].chat.completions.create.assert_not_called()
 
 
+def _finished_response(content, finish_reason):
+    """Chat response whose first choice carries ``content`` and ``finish_reason``."""
+    response = _chat_response(content)
+    response.choices[0].finish_reason = finish_reason
+    return response
+
+
+class TestTruncatedAnswers:
+    """A truncated answer (``finish_reason=length``) is never returned as a note.
+
+    Reasoning models count their reasoning in ``max_tokens``: under a tight
+    budget the visible answer can stop mid-sentence, or be empty.
+    """
+
+    MODEL = "google/gemini-3.8-flash"
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        """Skip the 2 s pause between attempts."""
+        monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    def _generate(self, mode="short"):
+        """Call the generator on the OpenRouter path."""
+        return llm_note_generator._generate_with_llm(
+            prompt="Test prompt", model=self.MODEL, mode=mode,
+            openai_api_key=FAKE_OPENAI_KEY, openrouter_api_key=FAKE_OPENROUTER_KEY,
+        )
+
+    def _budgets(self, client):
+        """``max_tokens`` of every call, in order."""
+        return [call.kwargs["max_tokens"] for call in client.chat.completions.create.call_args_list]
+
+    def test_truncated_text_retried_with_larger_budget(self, llm_clients):
+        """Cut text on the first call: one retry with a larger budget, its answer returned."""
+        client = llm_clients["openrouter"]
+        client.chat.completions.create.side_effect = [
+            _finished_response("I. CADRAGE ET PROBL", "length"),
+            _finished_response("Résumé complet.", "stop"),
+        ]
+
+        assert self._generate() == "Résumé complet."
+        first, retry = self._budgets(client)
+        assert first == llm_note_generator.NOTE_MODE_MAX_TOKENS["short"]
+        assert retry == llm_note_generator._truncation_retry_budget(first)
+        assert retry > first
+
+    def test_empty_truncated_answer_retried_with_larger_budget(self, llm_clients):
+        """Reasoning ate the whole budget (no content): the retry gets a larger budget."""
+        client = llm_clients["openrouter"]
+        client.chat.completions.create.side_effect = [
+            _finished_response(None, "length"),
+            _finished_response("Résumé complet.", "stop"),
+        ]
+
+        assert self._generate() == "Résumé complet."
+        first, retry = self._budgets(client)
+        assert retry > first
+
+    def test_truncated_twice_raises(self, llm_clients):
+        """Still cut after the retry: an error, never the truncated text."""
+        client = llm_clients["openrouter"]
+        client.chat.completions.create.side_effect = [
+            _finished_response("I. CADRAGE", "length"),
+            _finished_response("I. CADRAGE ET", "length"),
+        ]
+
+        with pytest.raises(llm_note_generator.LLMTruncatedError):
+            self._generate()
+        assert client.chat.completions.create.call_count == 2
+
+    def test_truncated_error_is_a_value_error(self):
+        """Callers that catch ``ValueError`` keep working."""
+        assert issubclass(llm_note_generator.LLMTruncatedError, ValueError)
+
+    @pytest.mark.parametrize("mode", ["short", "extended", "pedagogique", "evaluation", "book"])
+    def test_retry_budget_bounds(self, mode):
+        """The retry budget is larger than the first one, floored and capped."""
+        first = llm_note_generator.NOTE_MODE_MAX_TOKENS[mode]
+        retry = llm_note_generator._truncation_retry_budget(first)
+        assert retry > first
+        assert retry >= llm_note_generator.NOTE_TRUNCATION_RETRY_MIN_TOKENS
+        assert retry <= llm_note_generator.NOTE_TRUNCATION_RETRY_MAX_TOKENS
+
+    def test_complete_answer_single_call(self, llm_clients):
+        """``finish_reason=stop``: one call, budget of the mode, unchanged behaviour."""
+        client = llm_clients["openrouter"]
+        client.chat.completions.create.return_value = _finished_response("Résumé.", "stop")
+
+        assert self._generate() == "Résumé."
+        assert self._budgets(client) == [llm_note_generator.NOTE_MODE_MAX_TOKENS["short"]]
+
+    def test_short_abstract_truncated_twice_raises(self, llm_clients):
+        """``build_abstract_text`` raises: no half summary reaches the Zotero abstract."""
+        client = llm_clients["openrouter"]
+        client.chat.completions.create.side_effect = [
+            _finished_response("I. CADRAGE", "length"),
+            _finished_response("I. CADRAGE ET", "length"),
+        ]
+
+        with pytest.raises(llm_note_generator.LLMTruncatedError):
+            llm_note_generator.build_abstract_text(
+                {"title": "Article", "language": "fr"}, text_content="Texte intégral.",
+                model=self.MODEL, openai_api_key=FAKE_OPENAI_KEY, openrouter_api_key=FAKE_OPENROUTER_KEY,
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
