@@ -65,6 +65,7 @@ import logging
 import json
 import pandas as pd
 import asyncio
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Form, Depends, Request
@@ -77,6 +78,15 @@ from app.services import job_control
 from app.services.process_manager import process_manager
 from app.middleware.auth import get_current_active_user
 from app.models.user import User
+from app.core.albert_policy import (
+    apply_chat_policy,
+    apply_embedding_policy,
+    check_configuration as check_policy_configuration,
+    is_policy_error,
+    policy_error_body,
+    restrict_subprocess_env,
+    strict_policy,
+)
 from app.core.credentials import (
     build_subprocess_env,
     get_credential_or_env,
@@ -92,11 +102,15 @@ from app.models.project import Project
 try:
     from scripts.rad_albert.config import AlbertConfig, FIELD_ENV_NAMES
     from scripts.rad_albert.errors import AlbertDisabledError
-    from scripts.rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, resolve_llm_provider
+    from scripts.rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, is_compat, resolve_llm_provider
+    from scripts.rad_settings.chat import routed_model_for, server_values
+    from scripts.rad_settings.models import ServiceConfigError, resolve_service
 except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
     from rad_albert.config import AlbertConfig, FIELD_ENV_NAMES
     from rad_albert.errors import AlbertDisabledError
-    from rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, resolve_llm_provider
+    from rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, is_compat, resolve_llm_provider
+    from rad_settings.chat import routed_model_for, server_values
+    from rad_settings.models import ServiceConfigError, resolve_service
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -205,6 +219,48 @@ def _resolve_chat_model(model: Optional[str]):
     return resolve_llm_provider(model, albert_enabled=albert_enabled())
 
 
+def _explicit_ocr_target(user_values=None):
+    """Couple OCR déclaré, ou ``None`` (chaîne historique) : ``app/services/ocr_target.py``."""
+    from app.services.ocr_target import explicit_ocr_target
+
+    return explicit_ocr_target(user_values)
+
+
+def _explicit_embedding_target(server=None, model=None):
+    """Couple des embeddings déclaré, ou ``None`` (règle historique) : ``app/services/embedding_target.py``."""
+    from app.services.embedding_target import explicit_embedding_target
+
+    return explicit_embedding_target(server, model)
+
+
+def _explicit_embedding_env(current_user: User, choice) -> Dict[str, str]:
+    """Environnement de la phase dense pour un couple déclaré : ``app/services/embedding_target.py``."""
+    from app.services.embedding_target import explicit_embedding_env
+
+    return explicit_embedding_env(current_user, choice)
+
+
+def _explicit_ocr_uses_albert(choice) -> bool:
+    """Moteur OCR principal ou repli sur Albert : ``app/services/ocr_target.py``."""
+    from app.services.ocr_target import explicit_ocr_uses_albert
+
+    return explicit_ocr_uses_albert(choice)
+
+
+def _user_values(db: Session, user: User) -> Dict[str, str]:
+    """Choix personnels de serveur et de modèle de ``user`` (lot L9)."""
+    from app.services.user_settings import get_user_settings
+
+    return get_user_settings(db, user)
+
+
+def _explicit_ocr_env(current_user: User, choice) -> Dict[str, str]:
+    """Environnement du script d'OCR explicite : ``app/services/ocr_target.py``."""
+    from app.services.ocr_target import explicit_ocr_env
+
+    return explicit_ocr_env(current_user, choice)
+
+
 def _ocr_albert_active(user: User) -> bool:
     """
     Tell whether the Albert OCR link runs for ``user`` (Albert ON, OCR on, key).
@@ -247,12 +303,16 @@ def _resolve_embedding_provider(value: Optional[str]) -> Optional[str]:
     """
     requested = (value or "").strip()
     if not albert_enabled():
+        check_policy_configuration()
         if requested.lower() == ALBERT_DB_CHOICE:
             raise AlbertDisabledError(
                 "embedding_provider=albert exige Albert, désactivé sur ce serveur (ALBERT_ENABLED=1 requis).",
                 model="embedding_provider=albert",
             )
         return None
+    if strict_policy():
+        # albert_only: bge-m3 only (empty -> albert, whatever EMBEDDING_PROVIDER says).
+        return apply_embedding_policy(requested)
     raw = requested or (os.environ.get(EMBEDDING_PROVIDER_ENV) or "").strip()
     name = raw.lower() or EMBEDDING_PROVIDERS[0]
     if name not in EMBEDDING_PROVIDERS:
@@ -666,10 +726,20 @@ def _json_list_count(path: str) -> int:
     Returns:
         The list length, or 0.
 
+    A list is counted element by element (``app/utils/json_stream.py``) : a
+    multi-GB embeddings file is never loaded whole (the web process was
+    killed by the container memory limit).
+
     Raises:
         OSError, ValueError: Unreadable file or invalid JSON (callers keep
             their historical handling).
     """
+    from app.utils.json_stream import count_json_array
+
+    with open(path, 'r', encoding='utf-8') as f:
+        head = f.read(64).lstrip()
+    if head.startswith('['):
+        return count_json_array(path)
     with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     return len(data) if isinstance(data, list) else 0
@@ -1089,42 +1159,70 @@ async def _process_dataframe_impl(
         else:
             # Run extraction script with improved error handling
             try:
-                # Albert OCR link (Albert ON, OCR_ENABLE_ALBERT=1, key available)
-                ocr_albert = _ocr_albert_active(current_user)
-                # Build secure subprocess environment with user credentials
-                # rad_dataframe.py requires MISTRAL_API_KEY for OCR (or OPENAI_API_KEY as fallback)
+                # OCR explicite (OCR_SERVER + OCR_MODEL, sprint « configuration unifiée »)
                 try:
-                    subprocess_env = build_subprocess_env(
-                        current_user,
-                        required_keys=["mistral_api_key"]  # Primary OCR provider
-                    )
-                except CredentialMissingError as e:
-                    # Try OpenAI as fallback
+                    ocr_choice = _explicit_ocr_target(_user_values(db, current_user))
+                except ServiceConfigError as e:
+                    return JSONResponse(status_code=400, content={
+                        "error": str(e), "model_not_configured": True, "variables": list(e.variables)})
+                if ocr_choice is not None:
+                    ocr_albert = _explicit_ocr_uses_albert(ocr_choice)
                     try:
-                        subprocess_env = build_subprocess_env(
-                            current_user,
-                            required_keys=["openai_api_key"]
-                        )
-                        logger.info(f"Using OpenAI fallback for OCR (user {current_user.email})")
-                    except CredentialMissingError:
-                        subprocess_env = None
-                        if ocr_albert:
-                            # Third attempt: the Albert OCR link alone
-                            try:
-                                subprocess_env = build_subprocess_env(
-                                    current_user,
-                                    required_keys=[ALBERT_CREDENTIAL_KEY]
-                                )
-                                logger.info(f"Using the Albert OCR link only (user {current_user.email})")
-                            except CredentialMissingError:
-                                subprocess_env = None
-                        if subprocess_env is None:
-                            logger.warning(f"User {current_user.email} missing OCR credentials")
-                            return JSONResponse(status_code=403, content={
-                                "error": get_credential_error_message("mistral_api_key"),
-                                "credential_required": "mistral_api_key",
-                                "configure_url": "/settings/credentials"
-                            })
+                        subprocess_env = _explicit_ocr_env(current_user, ocr_choice)
+                    except ValueError as e:
+                        return JSONResponse(status_code=400, content=policy_error_body(e))
+                    except CredentialMissingError as e:
+                        return JSONResponse(status_code=403, content={
+                            "error": str(e),
+                            "credential_required": e.credential_key,
+                            "configure_url": "/settings/credentials"
+                        })
+                else:
+                    # Albert OCR link (Albert ON, OCR_ENABLE_ALBERT=1, key available)
+                    ocr_albert = _ocr_albert_active(current_user)
+                    # Build secure subprocess environment with user credentials
+                    # rad_dataframe.py requires MISTRAL_API_KEY for OCR (or OPENAI_API_KEY as fallback)
+                    try:
+                        if strict_policy():
+                            # albert_only: Albert OCR link (if active) then local OCR only.
+                            check_policy_configuration()
+                            subprocess_env = restrict_subprocess_env(build_subprocess_env(
+                                current_user, required_keys=[ALBERT_CREDENTIAL_KEY] if ocr_albert else []
+                            ))
+                        else:
+                            subprocess_env = build_subprocess_env(
+                                current_user,
+                                required_keys=["mistral_api_key"]  # Primary OCR provider
+                            )
+                    except ValueError as e:
+                        return JSONResponse(status_code=400, content=policy_error_body(e))
+                    except CredentialMissingError as e:
+                        # Try OpenAI as fallback
+                        try:
+                            subprocess_env = build_subprocess_env(
+                                current_user,
+                                required_keys=["openai_api_key"]
+                            )
+                            logger.info(f"Using OpenAI fallback for OCR (user {current_user.email})")
+                        except CredentialMissingError:
+                            subprocess_env = None
+                            if ocr_albert:
+                                # Third attempt: the Albert OCR link alone
+                                try:
+                                    subprocess_env = build_subprocess_env(
+                                        current_user,
+                                        required_keys=[ALBERT_CREDENTIAL_KEY]
+                                    )
+                                    logger.info(f"Using the Albert OCR link only (user {current_user.email})")
+                                except CredentialMissingError:
+                                    subprocess_env = None
+                            if subprocess_env is None:
+                                logger.warning(f"User {current_user.email} missing OCR credentials")
+                                return JSONResponse(status_code=403, content={
+                                    "error": get_credential_error_message("mistral_api_key"),
+                                    "credential_required": "mistral_api_key",
+                                    "configure_url": "/settings/credentials"
+                                })
 
                 # Construct absolute path to the script using RAGPY_DIR
                 project_scripts_dir = os.path.join(RAGPY_DIR, "scripts")
@@ -1218,6 +1316,7 @@ async def _process_dataframe_impl(
 async def initial_text_chunking(
     path: str = Form(...),
     model: str = Form(None),
+    server: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -1250,7 +1349,7 @@ async def initial_text_chunking(
     if busy is not None:
         return _session_refusal_json(busy)
     try:
-        return await _initial_text_chunking_impl(path=path, model=model, db=db, current_user=current_user)
+        return await _initial_text_chunking_impl(path=path, model=model, server=server, db=db, current_user=current_user)
     finally:
         ticket.release()
 
@@ -1258,6 +1357,7 @@ async def initial_text_chunking(
 async def _initial_text_chunking_impl(
     path: str = Form(...),
     model: str = Form(None),
+    server: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -1292,6 +1392,23 @@ async def _initial_text_chunking_impl(
             "error": "Chunking script not found on server."
         })
     
+    # Server + model of the recoding service (sprint « configuration unifiée »):
+    # translated into the routed model; no-op in historical mode.
+    try:
+        routed = routed_model_for("recode", model, server, user_values=_user_values(db, current_user))
+    except ServiceConfigError as e:
+        return JSONResponse(status_code=400, content={
+            "error": str(e), "model_not_configured": True, "variables": list(e.variables)})
+    if routed is not None:
+        model = routed.routed_model
+
+    # Inference policy (ALBERT_DATA_POLICY=albert_only: Albert models only;
+    # an empty model becomes the Albert default). Unchanged while compatible.
+    try:
+        model = apply_chat_policy(model, "recode")
+    except ValueError as e:
+        return JSONResponse(status_code=400, content=policy_error_body(e))
+
     # Set default model if not provided
     if not model:
         model = "gpt-4o-mini"
@@ -1322,6 +1439,7 @@ async def _initial_text_chunking_impl(
                 "credential_required": e.credential_key,
                 "configure_url": "/settings/credentials"
             })
+        restrict_subprocess_env(subprocess_env)
 
         # Run rad_chunk.py with phase=initial (tracked for session-aware stop)
         result = await run_tracked_subprocess(
@@ -1457,43 +1575,67 @@ async def _process_dataframe_sse_impl(
     json_path = os.path.join(absolute_processing_path, json_files[0])
     out_csv = os.path.join(absolute_processing_path, 'output.csv')
 
-    # Albert OCR link (Albert ON, OCR_ENABLE_ALBERT=1, key available)
-    ocr_albert = _ocr_albert_active(current_user)
-
-    # Build secure subprocess environment with user credentials
-    # rad_dataframe.py requires MISTRAL_API_KEY for OCR (or OPENAI_API_KEY as fallback)
+    # OCR explicite (OCR_SERVER + OCR_MODEL, sprint « configuration unifiée »)
     try:
-        subprocess_env = build_subprocess_env(
-            current_user,
-            required_keys=["mistral_api_key"]
-        )
-    except CredentialMissingError:
-        # Try OpenAI as fallback
+        ocr_choice = _explicit_ocr_target(_user_values(db, current_user))
+    except ServiceConfigError as e:
+        return _sse_error_response({"type": "error", "message": str(e), "model_not_configured": True,
+                                    "variables": list(e.variables)})
+    if ocr_choice is not None:
+        ocr_albert = _explicit_ocr_uses_albert(ocr_choice)
         try:
-            subprocess_env = build_subprocess_env(
-                current_user,
-                required_keys=["openai_api_key"]
-            )
-            logger.info(f"Using OpenAI fallback for OCR (user {current_user.email})")
-        except CredentialMissingError:
-            subprocess_env = None
-            if ocr_albert:
-                # Third attempt: the Albert OCR link alone
-                try:
-                    subprocess_env = build_subprocess_env(
-                        current_user,
-                        required_keys=[ALBERT_CREDENTIAL_KEY]
-                    )
-                    logger.info(f"Using the Albert OCR link only (user {current_user.email})")
-                except CredentialMissingError:
-                    subprocess_env = None
-            if subprocess_env is None:
-                async def error_generator():
-                    """Single SSE error event of an early refusal of this route."""
-                    yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message('mistral_api_key')}\", \"credential_required\": \"mistral_api_key\"}}\n\n"
-                return StreamingResponse(error_generator(), media_type="text/event-stream")
+            subprocess_env = _explicit_ocr_env(current_user, ocr_choice)
+        except ValueError as e:
+            return _sse_error_response(dict(policy_error_body(e), type="error", message=str(e)))
+        except CredentialMissingError as e:
+            return _sse_error_response(_credential_error_payload(e))
+    else:
+        # Albert OCR link (Albert ON, OCR_ENABLE_ALBERT=1, key available)
+        ocr_albert = _ocr_albert_active(current_user)
 
-    # Build command
+        # Build secure subprocess environment with user credentials
+        # rad_dataframe.py requires MISTRAL_API_KEY for OCR (or OPENAI_API_KEY as fallback)
+        try:
+            if strict_policy():
+                # albert_only: Albert OCR link (if active) then local OCR only.
+                check_policy_configuration()
+                subprocess_env = restrict_subprocess_env(build_subprocess_env(
+                    current_user, required_keys=[ALBERT_CREDENTIAL_KEY] if ocr_albert else []
+                ))
+            else:
+                subprocess_env = build_subprocess_env(
+                    current_user,
+                    required_keys=["mistral_api_key"]
+                )
+        except ValueError as e:
+            return _sse_error_response(dict(policy_error_body(e), type="error", message=str(e)))
+        except CredentialMissingError:
+            # Try OpenAI as fallback
+            try:
+                subprocess_env = build_subprocess_env(
+                    current_user,
+                    required_keys=["openai_api_key"]
+                )
+                logger.info(f"Using OpenAI fallback for OCR (user {current_user.email})")
+            except CredentialMissingError:
+                subprocess_env = None
+                if ocr_albert:
+                    # Third attempt: the Albert OCR link alone
+                    try:
+                        subprocess_env = build_subprocess_env(
+                            current_user,
+                            required_keys=[ALBERT_CREDENTIAL_KEY]
+                        )
+                        logger.info(f"Using the Albert OCR link only (user {current_user.email})")
+                    except CredentialMissingError:
+                        subprocess_env = None
+                if subprocess_env is None:
+                    async def error_generator():
+                        """Single SSE error event of an early refusal of this route."""
+                        yield f"data: {{\"type\": \"error\", \"message\": \"{get_credential_error_message('mistral_api_key')}\", \"credential_required\": \"mistral_api_key\"}}\n\n"
+                    return StreamingResponse(error_generator(), media_type="text/event-stream")
+
+        # Build command
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_dataframe.py")
     cmd = ["python3", "-u", script_path, "--json", json_path, "--dir", absolute_processing_path, "--output", out_csv]
 
@@ -1526,6 +1668,8 @@ async def _process_dataframe_sse_impl(
 async def dense_embedding_generation(
     path: str = Form(...),
     embedding_provider: str = Form(None),
+    server: str = Form(None),
+    model: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -1544,7 +1688,8 @@ async def dense_embedding_generation(
     if busy is not None:
         return _session_refusal_json(busy)
     try:
-        return await _dense_embedding_generation_impl(path=path, embedding_provider=embedding_provider, db=db, current_user=current_user)
+        return await _dense_embedding_generation_impl(path=path, embedding_provider=embedding_provider, server=server,
+                                                      model=model, db=db, current_user=current_user)
     finally:
         ticket.release()
 
@@ -1552,6 +1697,8 @@ async def dense_embedding_generation(
 async def _dense_embedding_generation_impl(
     path: str = Form(...),
     embedding_provider: str = Form(None),
+    server: str = Form(None),
+    model: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -1576,26 +1723,46 @@ async def _dense_embedding_generation_impl(
     output_file = os.path.join(absolute_processing_path, 'output_chunks_with_embeddings.json')
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
 
-    # Embedding provider of the request (None: historical OpenAI behaviour)
+    # Couple EMBEDDING_SERVER + EMBEDDING_MODEL (sprint « configuration unifiée », lot L6)
     try:
-        provider = _resolve_embedding_provider(embedding_provider)
-    except ValueError as e:
-        logger.warning(f"Embedding provider refused for user {current_user.email}: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        embedding_choice = _explicit_embedding_target(server, model)
+    except ServiceConfigError as e:
+        return JSONResponse(status_code=400, content={
+            "error": str(e), "model_not_configured": True, "variables": list(e.variables)})
+    if embedding_choice is not None:
+        provider = ALBERT_DB_CHOICE if embedding_choice.server.key == ALBERT_DB_CHOICE else None
+        try:
+            subprocess_env = _explicit_embedding_env(current_user, embedding_choice)
+        except CredentialMissingError as e:
+            return JSONResponse(status_code=403, content={
+                "error": str(e),
+                "credential_required": e.credential_key,
+                "configure_url": "/settings/credentials"
+            })
+        except ValueError as e:
+            return JSONResponse(status_code=400, content=policy_error_body(e))
+    else:
+        # Embedding provider of the request (None: historical OpenAI behaviour)
+        try:
+            provider = _resolve_embedding_provider(embedding_provider)
+        except ValueError as e:
+            logger.warning(f"Embedding provider refused for user {current_user.email}: {e}")
+            return JSONResponse(status_code=400, content={"error": str(e)})
 
-    # Build secure subprocess environment with user credentials
-    # Dense embedding generation requires OpenAI API key
-    try:
-        subprocess_env = build_subprocess_env(current_user, required_keys=_embedding_required_keys(provider))
-    except CredentialMissingError as e:
-        logger.warning(f"User {current_user.email} missing credential: {e.credential_key}")
-        return JSONResponse(status_code=403, content={
-            "error": str(e),
-            "credential_required": e.credential_key,
-            "configure_url": "/settings/credentials"
-        })
-    if provider is not None:
-        subprocess_env[EMBEDDING_PROVIDER_ENV] = provider
+        # Build secure subprocess environment with user credentials
+        # Dense embedding generation requires OpenAI API key
+        try:
+            subprocess_env = build_subprocess_env(current_user, required_keys=_embedding_required_keys(provider))
+            restrict_subprocess_env(subprocess_env)
+        except CredentialMissingError as e:
+            logger.warning(f"User {current_user.email} missing credential: {e.credential_key}")
+            return JSONResponse(status_code=403, content={
+                "error": str(e),
+                "credential_required": e.credential_key,
+                "configure_url": "/settings/credentials"
+            })
+        if provider is not None:
+            subprocess_env[EMBEDDING_PROVIDER_ENV] = provider
 
     try:
         result = await run_tracked_subprocess(
@@ -1694,7 +1861,7 @@ async def _sparse_embedding_generation_impl(
 
     # Build subprocess environment (no external credentials required for sparse/spaCy)
     # Still use build_subprocess_env for proper credential isolation
-    subprocess_env = build_subprocess_env(current_user)
+    subprocess_env = restrict_subprocess_env(build_subprocess_env(current_user))
 
     try:
         result = await run_tracked_subprocess(
@@ -1811,7 +1978,7 @@ async def _upload_db_albert(
         return JSONResponse(status_code=500, content={"error": "Vector DB script not found"})
 
     try:
-        subprocess_env = build_subprocess_env(current_user, required_keys=[ALBERT_CREDENTIAL_KEY])
+        subprocess_env = restrict_subprocess_env(build_subprocess_env(current_user, required_keys=[ALBERT_CREDENTIAL_KEY]))
     except CredentialMissingError as e:
         logger.warning(f"User {current_user.email} missing credential: {e.credential_key}")
         return JSONResponse(status_code=403, content={
@@ -1849,6 +2016,9 @@ async def _upload_db_albert(
         })
 
     manifest_source = manifest_path_for(os.path.dirname(os.path.abspath(input_file)))
+    # Sprint R2: only the manifest lines of THIS run are registered (append-only file).
+    from app.services.albert_access import manifest_offset
+    manifest_start = manifest_offset(manifest_source)
     try:
         result = await run_tracked_subprocess(
             cmd=cmd,
@@ -1895,6 +2065,51 @@ async def _upload_db_albert(
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
         _archive_albert_manifest(manifest_source, current_user.id, path)
+        await _register_albert_corpus(db, current_user, manifest_source, path, input_file, manifest_start)
+
+
+async def _register_albert_corpus(db: Session, user: User, manifest_path: Optional[str], session: str,
+                                  input_file: Optional[str], offset: int = 0) -> None:
+    """
+    Register the corpus and documents of an Albert upload in the local registry (never raises).
+
+    Run after ``rad_vectordb.py --db albert``, success or failure: the
+    successful slices written by this run (manifest lines after ``offset``,
+    documents rolled back excluded) are registered under the uploader, so
+    that the remote data can always be listed, searched and erased from
+    RAGpy (``app/services/albert_access.py``). Earlier lines of the
+    append-only session manifest (other runs, other users) are never
+    re-registered. Nothing happens when the run wrote no slice.
+
+    Args:
+        db: Database session.
+        user: The uploader.
+        manifest_path: Manifest of the session (``albert_manifest.jsonl``).
+        session: Session folder (relative to uploads/).
+        input_file: Chunks file sent (bibliographic fields of the catalogue).
+        offset: Manifest size taken before the run.
+    """
+    try:
+        try:
+            from scripts.rad_albert.config import AlbertConfig
+        except ImportError:  # scripts/ itself on sys.path
+            from rad_albert.config import AlbertConfig
+        from app.services import albert_access
+
+        if not manifest_path or not os.path.isfile(manifest_path):
+            return
+        api_key = get_credential_or_env(user, ALBERT_CREDENTIAL_KEY) or ""
+        fingerprint = hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()[:12] if api_key else None
+        corpora = await asyncio.to_thread(
+            albert_access.register_manifest_run, db, user=user, manifest_path=manifest_path, offset=offset,
+            base_url=AlbertConfig.from_env().base_url, key_fingerprint=fingerprint,
+            session_folder=_session_key(session), chunks_path=input_file,
+        )
+        if not corpora:
+            return
+        logger.info(f"Albert corpus registry updated for user {user.id}: {[c.id for c in corpora]}")
+    except Exception as exc:
+        logger.error(f"Albert corpus registry not updated for session '{session}': {type(exc).__name__}: {exc}")
 
 
 @router.post("/upload_db")
@@ -1986,7 +2201,7 @@ async def _upload_db_impl(
 
     # Build secure subprocess environment with user credentials
     try:
-        subprocess_env = build_subprocess_env(current_user, required_keys=required_keys)
+        subprocess_env = restrict_subprocess_env(build_subprocess_env(current_user, required_keys=required_keys))
     except CredentialMissingError as e:
         logger.warning(f"User {current_user.email} missing credential: {e.credential_key}")
         return JSONResponse(status_code=403, content={
@@ -2079,6 +2294,7 @@ async def generate_zotero_notes_sse(
     session: str = Form(...),
     note_mode: str = Form("extended"),
     model: str = Form(None),
+    server: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -2099,6 +2315,10 @@ async def generate_zotero_notes_sse(
             - "pedagogique": Pedagogical note [CLAIR] for L3 students
             - "evaluation": Peer review evaluation grid [EVAL]
         model: LLM model to use (e.g., "gpt-4o-mini", "google/gemini-2.5-flash")
+        server: API address for this run (overrides ``LLM_NOTES_SERVER`` /
+            ``LLM_BOOK_SERVER``, then ``LLM_DEFAULT_SERVER``); empty = configured
+            server. Ignored while the ``.env`` has no ``LLM_DEFAULT_SERVER``
+            (historical mode).
 
     Requires:
     - OpenAI API key (or OpenRouter for alternative models)
@@ -2122,7 +2342,7 @@ async def generate_zotero_notes_sse(
     if busy is not None:
         return _session_refusal_sse(busy)
     try:
-        response = await _generate_zotero_notes_sse_impl(session=session, note_mode=note_mode, model=model, db=db, current_user=current_user)
+        response = await _generate_zotero_notes_sse_impl(session=session, note_mode=note_mode, model=model, server=server, db=db, current_user=current_user)
     except BaseException:
         ticket.release()
         raise
@@ -2133,6 +2353,7 @@ async def _generate_zotero_notes_sse_impl(
     session: str = Form(...),
     note_mode: str = Form("extended"),
     model: str = Form(None),
+    server: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -2166,6 +2387,8 @@ async def _generate_zotero_notes_sse_impl(
 
     # Determine if this is a "short" mode (updates abstractNote) vs HTML note modes
     use_short_mode = note_mode == "short"
+    # Personal server + model choices (lot L9), read before the stream opens
+    personal_values = _user_values(db, current_user)
 
     async def event_generator():
         """Stream the note generation events (init, progress, summary)."""
@@ -2200,6 +2423,19 @@ async def _generate_zotero_notes_sse_impl(
             # Retrieve both API keys (one may be None)
             openai_key = get_credential_or_env(current_user, "openai_api_key")
             openrouter_key = get_credential_or_env(current_user, "openrouter_api_key")
+            server_api_key = None
+
+            # Server + model of the service (sprint « configuration unifiée »):
+            # translated into the routed model the code below understands; no-op
+            # in historical mode (no LLM_DEFAULT_SERVER in the .env).
+            try:
+                routed = routed_model_for("book" if note_mode == "book" else "notes", model, server,
+                                         user_values=personal_values)
+            except ServiceConfigError as e:
+                yield _sse_event({"type": "error", "message": str(e), "model_not_configured": True,
+                                  "variables": list(e.variables)})
+                return
+            job_model = routed.routed_model if routed is not None else model
 
             # Effective model: the form field; while Albert is enabled, an empty
             # field means the web default (read off the event loop). While Albert
@@ -2207,10 +2443,18 @@ async def _generate_zotero_notes_sse_impl(
             # historical rule applies (empty -> OpenAI key) and the builders
             # resolve the default themselves, as before. The credential checked
             # is the one of the provider resolved by the single resolver.
-            if model or not albert_enabled():
-                effective_model = model
+            if job_model or not albert_enabled():
+                effective_model = job_model
             else:
                 effective_model = await asyncio.to_thread(resolve_default_llm_model)
+            if strict_policy():
+                # albert_only: the notes run on Albert only (empty or default
+                # model -> Albert default of the role, other providers refused).
+                try:
+                    effective_model = apply_chat_policy(job_model, "notes")
+                except ValueError as e:
+                    yield _sse_event(dict(policy_error_body(e), type="error", message=str(e)))
+                    return
             try:
                 resolution = _resolve_chat_model(effective_model)
             except ValueError as e:
@@ -2222,6 +2466,9 @@ async def _generate_zotero_notes_sse_impl(
                 provider_key = albert_key
             elif resolution.provider == PROVIDER_OPENROUTER:
                 provider_key = openrouter_key
+            elif is_compat(resolution.provider):
+                server_api_key = get_credential_or_env(current_user, resolution.credential_key)
+                provider_key = server_api_key
             else:
                 provider_key = openai_key
             if not provider_key:
@@ -2342,7 +2589,7 @@ async def _generate_zotero_notes_sse_impl(
                                 text_content=texteocr,
                                 model=effective_model,
                                 openai_api_key=openai_key,
-                                openrouter_api_key=openrouter_key,
+                                openrouter_api_key=openrouter_key, server_api_key=server_api_key,
                                 albert_api_key=albert_key,
                                 **ledger_kwargs,
                             )
@@ -2354,7 +2601,7 @@ async def _generate_zotero_notes_sse_impl(
                                 use_llm=True,
                                 mode=note_mode,
                                 openai_api_key=openai_key,
-                                openrouter_api_key=openrouter_key,
+                                openrouter_api_key=openrouter_key, server_api_key=server_api_key,
                                 albert_api_key=albert_key,
                                 **ledger_kwargs
                             )
@@ -2422,7 +2669,7 @@ async def _generate_zotero_notes_sse_impl(
                             text_content=texteocr,
                             model=effective_model,
                             openai_api_key=openai_key,
-                            openrouter_api_key=openrouter_key,
+                            openrouter_api_key=openrouter_key, server_api_key=server_api_key,
                             albert_api_key=albert_key,
                             **ledger_kwargs
                         )
@@ -2529,6 +2776,7 @@ async def _generate_zotero_notes_sse_impl(
 async def initial_text_chunking_sse(
     path: str = Form(...),
     model: str = Form(None),
+    server: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -2548,7 +2796,7 @@ async def initial_text_chunking_sse(
     if busy is not None:
         return _session_refusal_sse(busy)
     try:
-        response = await _initial_text_chunking_sse_impl(path=path, model=model, db=db, current_user=current_user, job_ticket=ticket)
+        response = await _initial_text_chunking_sse_impl(path=path, model=model, server=server, db=db, current_user=current_user, job_ticket=ticket)
     except BaseException:
         ticket.release()
         raise
@@ -2558,6 +2806,7 @@ async def initial_text_chunking_sse(
 async def _initial_text_chunking_sse_impl(
     path: str = Form(...),
     model: str = Form(None),
+    server: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
     job_ticket=None,
@@ -2589,6 +2838,18 @@ async def _initial_text_chunking_sse_impl(
         return StreamingResponse(error_generator(), media_type="text/event-stream")
     
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
+    # Server + model of the recoding service; no-op in historical mode.
+    try:
+        routed = routed_model_for("recode", model, server, user_values=_user_values(db, current_user))
+    except ServiceConfigError as e:
+        return _sse_error_response({"type": "error", "message": str(e), "model_not_configured": True,
+                                    "variables": list(e.variables)})
+    if routed is not None:
+        model = routed.routed_model
+    try:
+        model = apply_chat_policy(model, "recode")
+    except ValueError as e:
+        return _sse_error_response(dict(policy_error_body(e), type="error", message=str(e)))
     model = model or "gpt-4o-mini"
 
     # Determine required credentials based on model (single resolver)
@@ -2605,6 +2866,7 @@ async def _initial_text_chunking_sse_impl(
         subprocess_env = build_subprocess_env(current_user, required_keys=required_keys)
     except CredentialMissingError as e:
         return _sse_error_response(_credential_error_payload(e))
+    restrict_subprocess_env(subprocess_env)
 
     cmd = [
         "python3", "-u", script_path,  # -u for unbuffered output
@@ -2642,6 +2904,8 @@ async def _initial_text_chunking_sse_impl(
 async def dense_embedding_generation_sse(
     path: str = Form(...),
     embedding_provider: str = Form(None),
+    server: str = Form(None),
+    model: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -2662,7 +2926,9 @@ async def dense_embedding_generation_sse(
     if busy is not None:
         return _session_refusal_sse(busy)
     try:
-        response = await _dense_embedding_generation_sse_impl(path=path, embedding_provider=embedding_provider, db=db, current_user=current_user, job_ticket=ticket)
+        response = await _dense_embedding_generation_sse_impl(path=path, embedding_provider=embedding_provider, server=server,
+                                                              model=model, db=db, current_user=current_user,
+                                                              job_ticket=ticket)
     except BaseException:
         ticket.release()
         raise
@@ -2672,6 +2938,8 @@ async def dense_embedding_generation_sse(
 async def _dense_embedding_generation_sse_impl(
     path: str = Form(...),
     embedding_provider: str = Form(None),
+    server: str = Form(None),
+    model: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
     job_ticket=None,
@@ -2695,20 +2963,36 @@ async def _dense_embedding_generation_sse_impl(
             yield f"data: {{\"type\": \"error\", \"message\": \"output_chunks.json not found\"}}\n\n"
         return StreamingResponse(error_generator(), media_type="text/event-stream")
 
-    # Embedding provider of the request (None: historical OpenAI behaviour)
+    # Couple EMBEDDING_SERVER + EMBEDDING_MODEL (sprint « configuration unifiée », lot L6)
     try:
-        provider = _resolve_embedding_provider(embedding_provider)
-    except ValueError as e:
-        return _sse_error_response({"type": "error", "message": str(e)})
+        embedding_choice = _explicit_embedding_target(server, model)
+    except ServiceConfigError as e:
+        return _sse_error_response({"type": "error", "message": str(e), "model_not_configured": True,
+                                    "variables": list(e.variables)})
+    if embedding_choice is not None:
+        provider = ALBERT_DB_CHOICE if embedding_choice.server.key == ALBERT_DB_CHOICE else None
+        try:
+            subprocess_env = _explicit_embedding_env(current_user, embedding_choice)
+        except CredentialMissingError as e:
+            return _sse_error_response(_credential_error_payload(e))
+        except ValueError as e:
+            return _sse_error_response(dict(policy_error_body(e), type="error", message=str(e)))
+    else:
+        # Embedding provider of the request (None: historical OpenAI behaviour)
+        try:
+            provider = _resolve_embedding_provider(embedding_provider)
+        except ValueError as e:
+            return _sse_error_response({"type": "error", "message": str(e)})
 
-    # Build secure subprocess environment with user credentials. The error
-    # event is built here: the except block unbinds ``e`` when it ends.
-    try:
-        subprocess_env = build_subprocess_env(current_user, required_keys=_embedding_required_keys(provider))
-    except CredentialMissingError as e:
-        return _sse_error_response(_credential_error_payload(e))
-    if provider is not None:
-        subprocess_env[EMBEDDING_PROVIDER_ENV] = provider
+        # Build secure subprocess environment with user credentials. The error
+        # event is built here: the except block unbinds ``e`` when it ends.
+        try:
+            subprocess_env = build_subprocess_env(current_user, required_keys=_embedding_required_keys(provider))
+        except CredentialMissingError as e:
+            return _sse_error_response(_credential_error_payload(e))
+        restrict_subprocess_env(subprocess_env)
+        if provider is not None:
+            subprocess_env[EMBEDDING_PROVIDER_ENV] = provider
 
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     cmd = [
@@ -2803,7 +3087,7 @@ async def _sparse_embedding_generation_sse_impl(
 
     # Build subprocess environment (no external credentials required for sparse/spaCy)
     # Still use build_subprocess_env for proper credential isolation
-    subprocess_env = build_subprocess_env(current_user)
+    subprocess_env = restrict_subprocess_env(build_subprocess_env(current_user))
 
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_chunk.py")
     cmd = [
@@ -3057,7 +3341,7 @@ async def _cluster_documents_sse_impl(
             return StreamingResponse(error_generator(), media_type="text/event-stream")
 
     # Build subprocess environment (no external credentials needed for clustering)
-    subprocess_env = build_subprocess_env(current_user)
+    subprocess_env = restrict_subprocess_env(build_subprocess_env(current_user))
 
     # Build command
     script_path = os.path.join(RAGPY_DIR, "scripts", "rad_clustering.py")

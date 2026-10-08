@@ -80,6 +80,12 @@
                                 <span class="sidebar-nav-text">Utilisateurs</span>
                             </a>
                         </li>
+                        <li class="sidebar-nav-item">
+                            <a href="/admin/settings" class="sidebar-nav-link {% if '/admin/settings' in request.url.path %}active{% endif %}">
+                                <i class="bi bi-sliders sidebar-nav-icon"></i>
+                                <span class="sidebar-nav-text">Paramètres</span>
+                            </a>
+                        </li>
                     </ul>
                 </div>
                 {% endif %}

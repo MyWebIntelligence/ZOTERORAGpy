@@ -79,9 +79,13 @@ from app.services.background_task_manager import background_task_manager
 from app.routes.processing import flush_albert_usage_ledger, new_albert_usage_ledger
 
 try:
-    from scripts.rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, resolve_llm_provider
+    from scripts.rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, is_compat, resolve_llm_provider
+    from scripts.rad_settings.chat import routed_model_for
+    from scripts.rad_settings.models import ServiceConfigError
 except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
-    from rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, resolve_llm_provider
+    from rad_providers import PROVIDER_ALBERT, PROVIDER_OPENROUTER, is_compat, resolve_llm_provider
+    from rad_settings.chat import routed_model_for
+    from rad_settings.models import ServiceConfigError
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -106,8 +110,30 @@ def _resolve_citation_model(model_name):
     Raises:
         AlbertDisabledError: ``albert/…`` while Albert is disabled (a ``ValueError``).
         ValueError: ``albert/`` without a model identifier.
+        AlbertPolicyError: ``ALBERT_DATA_POLICY=albert_only`` and a model that
+            is not ``albert/<id>`` (a ``ValueError``; no-op while ``compatible``).
     """
+    from app.core.albert_policy import require_albert_model
+
+    require_albert_model(model_name, "citation")
     return resolve_llm_provider(model_name, albert_enabled=albert_enabled())
+
+
+def _citation_server_key(resolution, current_user):
+    """
+    Key of the user for a ``compat:<server>`` resolution (sprint « configuration
+    unifiée »), else None.
+
+    Args:
+        resolution: Result of ``_resolve_citation_model``.
+        current_user: The authenticated user (personal key, ``.env`` for admins).
+
+    Returns:
+        The key of the declared server, or ``None`` for the other providers.
+    """
+    if not is_compat(resolution.provider):
+        return None
+    return get_credential_or_env(current_user, resolution.credential_key)
 
 
 def _citation_albert_key(resolution, current_user):
@@ -197,7 +223,8 @@ async def upload_pop_json(
     json_file: UploadFile = File(...),
     collection_name: str = Form(...),
     collection_description: str = Form(""),
-    model: str = Form(DEFAULT_LLM_MODEL),
+    model: str = Form(None),
+    server: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -238,6 +265,17 @@ async def upload_pop_json(
             status_code=403,
             detail="You don't have permission to import citations for this project"
         )
+
+    # Server + model of the citation service (sprint « configuration unifiée »):
+    # the routed model is stored in the session config; historical mode keeps
+    # the field, or the default model, as before.
+    try:
+        from app.services.user_settings import get_user_settings
+
+        routed = routed_model_for("citations", model, server, user_values=get_user_settings(db, current_user))
+    except ServiceConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    model = routed.routed_model if routed is not None else (model or DEFAULT_LLM_MODEL)
 
     # Validate the model with the single resolver before anything is written
     # (an albert/ model while Albert is disabled is refused here)
@@ -452,11 +490,19 @@ async def filter_citations_sse(
                 yield _sse_json_event({"type": "error", "message": str(e)})
                 return
             albert_api_key = _citation_albert_key(resolution, current_user)
+            server_api_key = _citation_server_key(resolution, current_user)
             if resolution.provider == PROVIDER_ALBERT:
                 if not albert_api_key:
                     error_msg = get_credential_error_message(ALBERT_CREDENTIAL_KEY)
                     yield _sse_json_event({
                         "type": "error", "message": error_msg, "credential_required": ALBERT_CREDENTIAL_KEY
+                    })
+                    return
+            elif is_compat(resolution.provider):  # declared server (configuration unifiée)
+                if not server_api_key:
+                    yield _sse_json_event({
+                        "type": "error", "message": get_credential_error_message(resolution.credential_key),
+                        "credential_required": resolution.credential_key,
                     })
                     return
             elif resolution.provider == PROVIDER_OPENROUTER:  # e.g., google/gemini-2.5-flash
@@ -511,7 +557,7 @@ async def filter_citations_sse(
                     "model": config.get("model", DEFAULT_LLM_MODEL)
                 },
                 openai_api_key=openai_api_key,
-                openrouter_api_key=openrouter_api_key,
+                openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                 batch_size=effective_batch_size,
                 albert_api_key=albert_api_key,
                 **_ledger_kwargs(albert_ledger)
@@ -1215,6 +1261,7 @@ async def batch_import_citations_sse(
                 yield _sse_json_event({"type": "error", "message": str(e)})
                 return
             albert_api_key = _citation_albert_key(resolution, current_user)
+            server_api_key = _citation_server_key(resolution, current_user)
             albert_job = resolution.provider == PROVIDER_ALBERT
             if albert_job:
                 if not albert_api_key:
@@ -1222,6 +1269,14 @@ async def batch_import_citations_sse(
                         "type": "error",
                         "message": get_credential_error_message(ALBERT_CREDENTIAL_KEY),
                         "credential_required": ALBERT_CREDENTIAL_KEY,
+                    })
+                    return
+            elif is_compat(resolution.provider):
+                if not server_api_key:
+                    yield _sse_json_event({
+                        "type": "error",
+                        "message": get_credential_error_message(resolution.credential_key),
+                        "credential_required": resolution.credential_key,
                     })
                     return
             elif resolution.provider == PROVIDER_OPENROUTER:
@@ -1350,7 +1405,7 @@ async def batch_import_citations_sse(
                                 collection_description=config.get("collection_description", ""),
                                 model=model_name,
                                 openai_api_key=openai_api_key,
-                                openrouter_api_key=openrouter_api_key,
+                                openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                                 albert_api_key=albert_api_key,
                                 **_ledger_kwargs(albert_ledger)
                             )
@@ -1366,7 +1421,7 @@ async def batch_import_citations_sse(
                                     collection_description=config.get("collection_description", ""),
                                     model=model_name,
                                     openai_api_key=openai_api_key,
-                                    openrouter_api_key=openrouter_api_key
+                                    openrouter_api_key=openrouter_api_key, server_api_key=server_api_key
                                 )
 
                         if isinstance(filter_result, dict):
@@ -1790,11 +1845,18 @@ async def filter_citations_background(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     albert_api_key = _citation_albert_key(resolution, current_user)
+    server_api_key = _citation_server_key(resolution, current_user)
     if resolution.provider == PROVIDER_ALBERT:
         if not albert_api_key:
             raise HTTPException(
                 status_code=400,
                 detail=get_credential_error_message(ALBERT_CREDENTIAL_KEY)
+            )
+    elif is_compat(resolution.provider):
+        if not server_api_key:
+            raise HTTPException(
+                status_code=400,
+                detail=get_credential_error_message(resolution.credential_key)
             )
     elif resolution.provider == PROVIDER_OPENROUTER:
         if not openrouter_api_key:
@@ -1889,7 +1951,7 @@ async def filter_citations_background(
                     "model": bg_config.get("model", DEFAULT_LLM_MODEL)
                 },
                 openai_api_key=openai_api_key,
-                openrouter_api_key=openrouter_api_key,
+                openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                 batch_size=effective_batch_size,
                 albert_api_key=albert_api_key,
                 **_ledger_kwargs(albert_ledger)

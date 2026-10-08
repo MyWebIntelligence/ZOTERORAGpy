@@ -62,7 +62,9 @@ def dense_embedding_task(
     output_dir: str,
     session_id: int,
     user_id: int = None,
-    embedding_provider: str = None
+    embedding_provider: str = None,
+    embedding_server: str = None,
+    embedding_model: str = None,
 ) -> dict:
     """
     Generate dense embeddings using OpenAI text-embedding-3-large.
@@ -81,6 +83,8 @@ def dense_embedding_task(
         user_id: ID of the user who submitted the task (required)
         embedding_provider: Resolved provider (``openai``/``albert``), or
             None for the historical OpenAI path (environment untouched)
+        embedding_server: Server field of the dense step (lot L6, unified mode)
+        embedding_model: Model field of the dense step (lot L6, unified mode)
 
     Returns:
         dict: {
@@ -113,7 +117,8 @@ def dense_embedding_task(
         logger.info(f"Starting dense embedding task: {input_file}")
 
         user = runner.load_user(user_id)
-        env = runner.build_task_env(user, runner.STAGE_DENSE, embedding_provider=embedding_provider)
+        env = runner.build_task_env(user, runner.STAGE_DENSE, embedding_provider=embedding_provider,
+                                    embedding_server=embedding_server, embedding_model=embedding_model)
         cmd = runner.dense_argv(input_file, output_dir)
 
         result = runner.run_script(

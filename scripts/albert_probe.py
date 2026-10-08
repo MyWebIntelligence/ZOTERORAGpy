@@ -2,7 +2,9 @@
 """Sondes live de l'API Albert (DINUM) pour le lot 0 du sprint Albert.
 
 Ce script autonome (httpx, bibliothèque standard, python-dotenv, PyMuPDF)
-exécute les sondes P1 à P21 décrites dans la spécification du sprint, écrit
+exécute les sondes P1 à P21 décrites dans la spécification du sprint, puis
+P22 à P26 du sprint R2 (rerank, chat streamé, ``/v1/usage``, collections
+publiques en lecture, transcription audio d'une seconde de silence), écrit
 des fixtures assainies, un fichier ``decisions.json`` (D1 à D22) et un rapport
 Markdown en français.
 
@@ -122,7 +124,12 @@ DOCUMENTED_RPM_CANDIDATES = {
     2000: (EMBED_MODEL, "bge-reranker-v2-m3"),
 }
 
-PROBE_ORDER = ["P%d" % i for i in range(1, 22)]
+RERANK_MODEL = "bge-reranker-v2-m3"
+RERANK_ALIAS = "openweight-rerank"
+AUDIO_MODEL = "whisper-large-v3"
+AUDIO_ALIAS = "openweight-audio"
+
+PROBE_ORDER = ["P%d" % i for i in range(1, 27)]
 PROBE_TITLES = {
     "P1": "compte et quotas (/v1/me)",
     "P2": "catalogue (/v1/models)",
@@ -145,6 +152,11 @@ PROBE_TITLES = {
     "P19": "quota d'embeddings consommé par les envois",
     "P20": "points de santé",
     "P21": "débit de référence",
+    "P22": "rerank (/v1/rerank, convention Cohere v2)",
+    "P23": "chat streamé (SSE, [DONE], usage final)",
+    "P24": "usage agrégé (/v1/usage)",
+    "P25": "collections publiques et modèles rerank/audio",
+    "P26": "transcription audio (/v1/audio/transcriptions)",
 }
 
 # Assainissement
@@ -178,6 +190,8 @@ FIXTURE_FLOAT_LIST_MAX = 16
 FIXTURE_FLOAT_KEEP = 8
 FIXTURE_LIST_MAX = 64
 FIXTURE_STR_MAX = 6000
+FIXTURE_SSE_MAX = 20000
+"""Corps SSE (chat streamé, P23) gardés jusqu'à ce plafond pour conserver ``[DONE]``."""
 SUMMARY_STR_MAX = 500
 SUMMARY_LIST_MAX = 8
 
@@ -834,7 +848,12 @@ class ProbeContext:
 
     def record_fixture(self, ex: Exchange, name: Optional[str] = None) -> str:
         """Écrit la fixture assainie d'un échange et la garde en mémoire."""
-        body, notes = compact_for_fixture(ex.body if ex.body is not None else (ex.text[:2000] or None))
+        is_stream = "event-stream" in (ex.headers.get("content-type") or "").lower()
+        if is_stream and ex.body is None:
+            # Flux SSE (P23) : texte gardé tel quel jusqu'au plafond, pour conserver [DONE] et l'usage final.
+            body, notes = (ex.text[:FIXTURE_SSE_MAX] or None), []
+        else:
+            body, notes = compact_for_fixture(ex.body if ex.body is not None else (ex.text[:2000] or None))
         fixture: Dict[str, Any] = {
             "request": {"method": ex.method, "path": ex.path, "body_summary": ex.body_summary},
             "status": ex.status,
@@ -1963,10 +1982,223 @@ def probe_p19(ctx: ProbeContext) -> Dict[str, Any]:
     return _result(a, resume, constats, inconclusive=not usage_ok)
 
 
+# ---------------------------------------------------------------------------
+# Sondes P22 à P26 (sprint Albert R2 : rerank, streaming, usage, public, audio)
+# ---------------------------------------------------------------------------
+
+
+RERANK_DOCS = (
+    "Bourdieu définit le champ scientifique comme un espace de lutte pour le monopole de l'autorité scientifique.",
+    "La recette de la tarte aux pommes demande une pâte brisée et des pommes acidulées.",
+    "Latour et Woolgar observent la fabrication des faits dans un laboratoire de neuroendocrinologie.",
+)
+
+
+def probe_p22(ctx: ProbeContext) -> Dict[str, Any]:
+    """P22 : rerank (index, relevance_score, tri, alias, 65 textes, texte vide)."""
+    a: List[Dict[str, Any]] = []
+    query = "Comment la sociologie décrit-elle la production des savoirs scientifiques ?"
+
+    def rerank(slug: str, documents: List[str], model: str = RERANK_MODEL, **extra: Any) -> Exchange:
+        """POST /v1/rerank."""
+        body: Dict[str, Any] = {"model": model, "query": query, "documents": documents}
+        body.update(extra)
+        return ctx.call("P22", slug, "POST", "/rerank", kind="embed", retries=1, json_body=body)
+
+    ex = rerank("three_docs", list(RERANK_DOCS), top_n=2)
+    rows = ex.dig("results", default=[]) or []
+    rows = [r for r in rows if isinstance(r, dict)]
+    indices = [r.get("index") for r in rows]
+    scores = [r.get("relevance_score") for r in rows]
+    numeric = all(isinstance(s, (int, float)) and math.isfinite(s) for s in scores) and bool(scores)
+    _check(a, "3 textes : 200", ex.status == 200)
+    _check(a, "top_n=2 respecté", len(rows) == 2)
+    _check(a, "index entiers dans [0, 3)", bool(indices) and all(isinstance(i, int) and 0 <= i < 3 for i in indices))
+    _check(a, "scores numériques finis", numeric)
+    _check(a, "tri par score décroissant", numeric and scores == sorted(scores, reverse=True))
+    _check(a, "texte hors sujet (index 1) jamais en tête", bool(indices) and indices[0] != 1)
+    ex_alias = rerank("alias", list(RERANK_DOCS[:2]), model=RERANK_ALIAS)
+    ex_65 = rerank("batch_65", ["Texte numéro %d." % i for i in range(65)])
+    ex_empty = rerank("empty_doc", ["", RERANK_DOCS[0]])
+    constats = {
+        "statut": ex.status, "resultats": rows, "modele_servi": ex.dig("model"),
+        "usage": _usage(ex), "alias_statut": ex_alias.status, "alias_modele_servi": ex_alias.dig("model"),
+        "statut_65": ex_65.status, "extrait_65": (ex_65.text or "")[:300],
+        "statut_vide": ex_empty.status, "extrait_vide": (ex_empty.text or "")[:300],
+    }
+    resume = "rerank %s, %d résultats, 65 textes → %s, texte vide → %s" % (
+        ex.status, len(rows), ex_65.status, ex_empty.status)
+    return _result(a, resume, constats, inconclusive=ex.status is None)
+
+
+def parse_sse_text(text: str) -> Dict[str, Any]:
+    """Analyse un corps SSE de chat streamé (lignes ``data:``) sans réseau.
+
+    Args:
+        text: corps brut de la réponse.
+
+    Returns:
+        ``{chunks, deltas, done, usage, reasoning_fields, finish_reason, model, invalid}``.
+    """
+    out: Dict[str, Any] = {"chunks": 0, "deltas": [], "done": False, "usage": None,
+                           "reasoning_fields": [], "finish_reason": None, "model": None, "invalid": 0}
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            out["done"] = True
+            continue
+        try:
+            chunk = json.loads(payload)
+        except ValueError:
+            out["invalid"] += 1
+            continue
+        if not isinstance(chunk, dict):
+            out["invalid"] += 1
+            continue
+        out["chunks"] += 1
+        out["model"] = out["model"] or chunk.get("model")
+        if isinstance(chunk.get("usage"), dict):
+            out["usage"] = chunk["usage"]
+        for choice in chunk.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            if isinstance(delta.get("content"), str):
+                out["deltas"].append(delta["content"])
+            for name in ("reasoning_content", "reasoning"):
+                if delta.get(name) and name not in out["reasoning_fields"]:
+                    out["reasoning_fields"].append(name)
+            if choice.get("finish_reason"):
+                out["finish_reason"] = choice["finish_reason"]
+    return out
+
+
+def probe_p23(ctx: ProbeContext) -> Dict[str, Any]:
+    """P23 : chat streamé (fragments SSE, [DONE], usage final avec include_usage)."""
+    a: List[Dict[str, Any]] = []
+    payload = _chat_payload(RECODE_MODEL, "Réponds en une phrase : qu'est-ce qu'une archive ?",
+                            max_tokens=40, temperature=0.1, stream=True, stream_options={"include_usage": True})
+    ex = _chat(ctx, "P23", "stream_ministral", payload, retries=1)
+    parsed = parse_sse_text(ex.text)
+    content_type = (ex.headers.get("content-type") or "").lower()
+    _check(a, "200", ex.status == 200)
+    _check(a, "type text/event-stream", "text/event-stream" in content_type)
+    _check(a, "au moins un fragment de contenu", bool(parsed["deltas"]))
+    _check(a, "fin signalée par [DONE]", parsed["done"])
+    _check(a, "usage final présent (include_usage)", isinstance(parsed["usage"], dict))
+    payload_r = _chat_payload(NOTES_MODEL, "Combien font 17 × 23 ?", max_tokens=600, stream=True,
+                              stream_options={"include_usage": True}, reasoning_effort="low")
+    ex_r = _chat(ctx, "P23", "stream_gpt_oss", payload_r, kind="notes", retries=1)
+    parsed_r = parse_sse_text(ex_r.text)
+    constats = {
+        "statut": ex.status, "content_type": content_type, "fragments": parsed["chunks"],
+        "texte": "".join(parsed["deltas"])[:300], "done": parsed["done"], "usage": parsed["usage"],
+        "finish_reason": parsed["finish_reason"], "modele_servi": parsed["model"], "invalides": parsed["invalid"],
+        "gpt_oss": {"statut": ex_r.status, "fragments": parsed_r["chunks"], "done": parsed_r["done"],
+                    "champs_raisonnement": parsed_r["reasoning_fields"], "usage": parsed_r["usage"],
+                    "texte": "".join(parsed_r["deltas"])[:200], "finish_reason": parsed_r["finish_reason"]},
+    }
+    resume = "streaming %s, %d fragments, [DONE] %s, usage final %s, raisonnement gpt-oss : %s" % (
+        ex.status, parsed["chunks"], parsed["done"], isinstance(parsed["usage"], dict),
+        ", ".join(parsed_r["reasoning_fields"]) or "aucun champ")
+    return _result(a, resume, constats, inconclusive=ex.status is None)
+
+
+def probe_p24(ctx: ProbeContext) -> Dict[str, Any]:
+    """P24 : /v1/usage sur deux jours (seaux journaliers UTC, champs, pagination)."""
+    a: List[Dict[str, Any]] = []
+    end = int(ctx.wall())
+    start = end - 2 * 86400
+    ex = ctx.call("P24", "usage_2d", "GET", "/usage", params={"start_time": start, "end_time": end, "limit": 100})
+    data = ex.dig("data", default=[]) or []
+    buckets = [b for b in data if isinstance(b, dict)]
+    keys = sorted({k for b in buckets for k in b})
+    _check(a, "200", ex.status == 200)
+    _check(a, "liste de seaux", isinstance(data, list))
+    ex_missing = ctx.call("P24", "usage_no_dates", "GET", "/usage", params={"limit": 1})
+    ex_chat = ctx.call("P24", "usage_chat", "GET", "/usage",
+                       params={"start_time": start, "end_time": end, "endpoint": "/v1/chat/completions"})
+    constats = {"statut": ex.status, "n_seaux": len(buckets), "cles": keys,
+                "exemple": buckets[0] if buckets else None, "cles_racine": sorted(ex.body)
+                if isinstance(ex.body, dict) else None,
+                "sans_dates": _error_view(ex_missing) if not ex_missing.ok() else {"statut": ex_missing.status},
+                "filtre_chat": {"statut": ex_chat.status, "n": len(ex_chat.dig("data", default=[]) or [])}}
+    resume = "usage %s, %d seau(x), sans dates → %s" % (ex.status, len(buckets), ex_missing.status)
+    return _result(a, resume, constats, inconclusive=ex.status is None)
+
+
+def probe_p25(ctx: ProbeContext) -> Dict[str, Any]:
+    """P25 : collections publiques (lecture seule) et présence des modèles rerank et audio."""
+    a: List[Dict[str, Any]] = []
+    ex = ctx.call("P25", "public_collections", "GET", "/collections",
+                  params={"visibility": "public", "limit": 100, "offset": 0})
+    data = ex.dig("data", default=[]) or []
+    public = [c for c in data if isinstance(c, dict)]
+    _check(a, "collections publiques : 200", ex.status == 200)
+    models = ctx.models()
+    by_id = {m.get("id"): m for m in models}
+    aliases = {al for m in models for al in (m.get("aliases") or []) if isinstance(al, str)}
+    rerank = by_id.get(RERANK_MODEL) or {}
+    audio = by_id.get(AUDIO_MODEL) or {}
+    _check(a, "%s présent (text-classification)" % RERANK_MODEL, rerank.get("type") == "text-classification")
+    _check(a, "%s présent (automatic-speech-recognition)" % AUDIO_MODEL,
+           audio.get("type") == "automatic-speech-recognition")
+    constats = {
+        "statut": ex.status, "n_publiques": len(public),
+        "publiques": [{k: c.get(k) for k in ("id", "name", "visibility", "documents", "description")}
+                      for c in public[:100]],
+        "rerank": {k: rerank.get(k) for k in ("id", "type", "aliases", "max_context_length")},
+        "audio": {k: audio.get(k) for k in ("id", "type", "aliases", "max_context_length")},
+        "alias_rerank": RERANK_ALIAS in aliases, "alias_audio": AUDIO_ALIAS in aliases,
+        "ids": sorted(str(i) for i in by_id),
+    }
+    resume = "%d collection(s) publique(s), rerank %s, audio %s" % (
+        len(public), rerank.get("type") or "absent", audio.get("type") or "absent")
+    return _result(a, resume, constats, inconclusive=ex.status is None)
+
+
+def make_silence_wav(seconds: float = 1.0, rate: int = 16000) -> bytes:
+    """WAV mono 16 bits de silence (sonde P26, aucune donnée personnelle)."""
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(b"\x00\x00" * int(rate * seconds))
+    return buf.getvalue()
+
+
+def probe_p26(ctx: ProbeContext) -> Dict[str, Any]:
+    """P26 : transcription audio multipart (verbose_json : texte, segments, langue, usage)."""
+    a: List[Dict[str, Any]] = []
+    files = {"file": ("silence.wav", make_silence_wav(), "audio/wav"),
+             "model": (None, AUDIO_MODEL), "language": (None, "fr"), "response_format": (None, "verbose_json")}
+    ex = ctx.call("P26", "verbose_json", "POST", "/audio/transcriptions", files=files, kind="notes", retries=1)
+    body = ex.body if isinstance(ex.body, dict) else {}
+    segments = body.get("segments")
+    _check(a, "200", ex.status == 200)
+    _check(a, "champ text présent", isinstance(body.get("text"), str))
+    constats = {"statut": ex.status, "cles": sorted(body)[:30], "segments_type": type(segments).__name__,
+                "n_segments": len(segments) if isinstance(segments, list) else None,
+                "cles_segment": sorted(segments[0])[:30] if isinstance(segments, list) and segments
+                and isinstance(segments[0], dict) else None,
+                "langue": body.get("language"), "duree": body.get("duration"), "usage": body.get("usage"),
+                "erreur": None if ex.ok() else _error_view(ex)}
+    resume = "transcription %s, segments %s" % (ex.status, constats["n_segments"])
+    return _result(a, resume, constats, inconclusive=ex.status is None)
+
+
 SIMPLE_PROBES: Dict[str, Callable[[ProbeContext], Dict[str, Any]]] = {
     "P1": probe_p1, "P2": probe_p2, "P3": probe_p3, "P4": probe_p4, "P5": probe_p5, "P6": probe_p6,
     "P7": probe_p7, "P8": probe_p8, "P9": probe_p9, "P10": probe_p10, "P11": probe_p11, "P12": probe_p12,
-    "P13": probe_p13, "P20": probe_p20, "P21": probe_p21,
+    "P13": probe_p13, "P20": probe_p20, "P21": probe_p21, "P22": probe_p22, "P23": probe_p23,
+    "P24": probe_p24, "P25": probe_p25, "P26": probe_p26,
 }
 COLLECTION_PROBES: Dict[str, Callable[[ProbeContext], Dict[str, Any]]] = {
     "P14": probe_p14, "P15": probe_p15, "P16": probe_p16, "P17": probe_p17, "P18": probe_p18, "P19": probe_p19,
@@ -2943,7 +3175,7 @@ def build_client(api_key: str, transport: Optional[httpx.BaseTransport] = None,
 
 
 def run_probes(ctx: ProbeContext, selected: Sequence[str]) -> Optional[str]:
-    """Exécute les sondes choisies dans l'ordre P1…P21 ; renvoie le message d'arrêt éventuel."""
+    """Exécute les sondes choisies dans l'ordre P1…P26 ; renvoie le message d'arrêt éventuel."""
     ordered = [pid for pid in PROBE_ORDER if pid in set(selected)]
     group = [pid for pid in ordered if pid in COLLECTION_PROBES]
     group_done = False
@@ -2970,7 +3202,7 @@ def parse_only(value: str) -> List[str]:
     ids = [part.strip().upper() for part in value.split(",") if part.strip()]
     unknown = [pid for pid in ids if pid not in PROBE_ORDER]
     if unknown or not ids:
-        raise argparse.ArgumentTypeError("sondes inconnues : %s (attendu P1 à P21)" % ", ".join(unknown or [value]))
+        raise argparse.ArgumentTypeError("sondes inconnues : %s (attendu P1 à P26)" % ", ".join(unknown or [value]))
     return ids
 
 
@@ -2979,7 +3211,7 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="albert_probe.py",
                                      description="Sondes live de l'API Albert (exige ALBERT_LIVE=1 dans le shell).")
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--all", action="store_true", help="exécuter P1 à P21")
+    mode.add_argument("--all", action="store_true", help="exécuter P1 à P26")
     mode.add_argument("--only", type=parse_only, help="liste de sondes, par exemple P2,P5")
     mode.add_argument("--cleanup", action="store_true", help="supprimer les collections ragpy-probe-*")
     parser.add_argument("--dry-run", action="store_true", help="avec --cleanup : lister sans supprimer")

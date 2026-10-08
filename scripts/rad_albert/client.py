@@ -32,11 +32,12 @@ import itertools
 import json
 import logging
 import math
+import os
 import dataclasses
 import threading
 import time
 from datetime import date
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import quote
 
 import httpx
@@ -71,8 +72,14 @@ MAX_CHUNKS_PER_POST = 64
 PAGE_LIMIT = 100
 """Taille de page maximale des listes (D14 : 101 → 422)."""
 
-SEARCH_METHODS = ("semantic", "lexical", "hybrid")
-"""Méthodes de recherche acceptées (``exact`` n'existe pas, D17)."""
+MAX_AUDIO_BYTES = 20 * 1024 * 1024
+"""Taille maximale d'un fichier envoyé à ``/v1/audio/transcriptions`` (20 Mo)."""
+
+AUDIO_EXTENSIONS = {".mp3": "audio/mpeg", ".wav": "audio/wav"}
+"""Formats acceptés par la transcription Albert (mp3 et wav), avec leur type MIME."""
+
+AUDIO_JSON_FORMATS = ("json", "verbose_json", "diarized_json")
+"""Formats de réponse JSON de la transcription (les formats texte ne sont pas utilisés)."""
 
 CHUNKS_PER_EMBED_REQUEST = 32
 """Chunks vectorisés par requête d'embeddings côté serveur (D19 : 64 chunks = 2 requêtes)."""
@@ -107,7 +114,8 @@ ENDPOINTS: Tuple[Tuple[str, str], ...] = (
     ("DELETE", "/v1/documents/{document_id}"),
     ("GET", "/v1/documents/{document_id}/chunks"),
     ("POST", "/v1/documents/{document_id}/chunks"),
-    ("POST", "/v1/search"),
+    ("GET", "/v1/usage"),
+    ("POST", "/v1/audio/transcriptions"),
 )
 """Points d'accès appelés par ce client (méthode, gabarit relatif à la racine du service)."""
 
@@ -1561,98 +1569,183 @@ class AlbertClient:
         ids = data.get("ids") if isinstance(data, Mapping) else None
         return [int(i) for i in ids] if isinstance(ids, list) else []
 
-    # ------------------------------------------------------------------ recherche
-    def search(
+    # ------------------------------------------------------------------ usage (R2)
+    def usage(
         self,
-        query: str,
+        start_time: Any,
+        end_time: Any,
         *,
-        collection_ids: Optional[Iterable[Any]] = None,
-        document_ids: Optional[Iterable[Any]] = None,
-        method: str = "semantic",
-        limit: int = 10,
-        offset: int = 0,
-        rff_k: Optional[int] = None,
-        score_threshold: Optional[float] = None,
-        metadata_filters: Optional[Mapping[str, Any]] = None,
-        timeout: Optional[float] = None,
+        endpoint: Optional[str] = None,
+        models: Optional[Sequence[str]] = None,
+        key_id: Any = None,
+        page_size: int = PAGE_LIMIT,
     ) -> List[Dict[str, Any]]:
-        """``POST /v1/search`` ; ``method`` toujours envoyée, ``query`` obligatoire (D17).
+        """``GET /v1/usage`` : seaux journaliers UTC entre deux dates Unix explicites (P24).
 
         Args:
-            query: requête (non vide).
-            collection_ids: collections (100 au plus).
-            document_ids: documents (100 au plus).
-            method: ``semantic``, ``lexical`` ou ``hybrid``.
-            limit: 1 à 100.
-            offset: décalage.
-            rff_k: constante RRF (nom ``rff_k``), envoyée si fournie.
-            score_threshold: seuil, accepté **seulement** en ``semantic``.
-            metadata_filters: filtre de comparaison ou composé (2 à 4 filtres).
-            timeout: défaut ``ALBERT_TIMEOUT_COLLECTIONS``.
+            start_time: début (secondes Unix, obligatoire : 422 sinon).
+            end_time: fin (secondes Unix, obligatoire).
+            endpoint: filtre de point d'accès (``/v1/chat/completions``…).
+            models: noms de routeurs (modèles).
+            key_id: filtre par clé.
+            page_size: taille de page (100 au plus).
 
         Returns:
-            Les résultats (``{"method", "score", "chunk"}``).
+            Les seaux ``usage.bucket`` (toutes les pages).
 
         Raises:
-            AlbertInputError: requête vide, méthode inconnue, seuil hors
-                ``semantic``, bornes dépassées (aucun envoi).
+            AlbertInputError: dates absentes, non entières ou inversées.
         """
-        if not isinstance(query, str) or not query.strip():
-            raise AlbertInputError("Recherche Albert : query obligatoire (D17).", reason="bad_request")
-        method_name = str(method or "").strip().lower()
-        if method_name not in SEARCH_METHODS:
-            raise AlbertInputError(
-                f"Recherche Albert : méthode {method!r} inconnue (semantic, lexical ou hybrid).",
-                reason="bad_request",
-            )
-        if score_threshold is not None and method_name != "semantic":
-            raise AlbertInputError(
-                "Recherche Albert : score_threshold n'est accepté qu'avec method='semantic'.",
-                reason="bad_request",
-            )
-        if not 1 <= int(limit) <= PAGE_LIMIT:
-            raise AlbertInputError("Recherche Albert : limit doit être compris entre 1 et 100.", reason="bad_request")
-        body: Dict[str, Any] = {"query": query, "method": method_name, "limit": int(limit), "offset": int(offset)}
-        for field, values in (("collection_ids", collection_ids), ("document_ids", document_ids)):
-            if values is not None:
-                ids = [_as_int(v, field) for v in values]
-                if len(ids) > PAGE_LIMIT:
-                    raise AlbertInputError(f"Recherche Albert : {field} limité à 100 ids.", reason="bad_request")
-                body[field] = ids
-        if rff_k is not None:
-            body["rff_k"] = int(rff_k)
-        if score_threshold is not None:
-            body["score_threshold"] = float(score_threshold)
-        if metadata_filters is not None:
-            body["metadata_filters"] = dict(metadata_filters)
-        path = "/v1/search"
+        start = _as_int(start_time, "start_time") if not isinstance(start_time, int) else start_time
+        end = _as_int(end_time, "end_time") if not isinstance(end_time, int) else end_time
+        if isinstance(start, bool) or isinstance(end, bool) or start < 0 or end < start:
+            raise AlbertInputError("Usage Albert : dates Unix invalides (début <= fin).", reason="bad_request")
+        params: Dict[str, Any] = {"start_time": int(start), "end_time": int(end), "endpoint": endpoint}
+        if models:
+            params["models"] = [str(m) for m in models]
+        if key_id is not None:
+            params["key_id"] = _as_int(key_id, "key_id")
+        return self._paginate("/v1/usage", params, limit=page_size)
 
-        def handle(data: Any, latency: float) -> List[Dict[str, Any]]:
-            """Enregistre l'usage et renvoie les résultats."""
-            rows = data.get("data") if isinstance(data, Mapping) else None
+    # ------------------------------------------------------------------ audio (R2)
+    def transcribe(
+        self,
+        audio: Union[bytes, bytearray],
+        filename: str,
+        *,
+        model: Any = None,
+        language: Optional[str] = None,
+        prompt: Optional[str] = None,
+        response_format: str = "verbose_json",
+        temperature: Optional[float] = None,
+        timeout: Optional[float] = None,
+        semaphore: Any = None,
+    ) -> Dict[str, Any]:
+        """``POST /v1/audio/transcriptions`` (multipart) : transcription d'un fichier mp3 ou wav.
+
+        Contrôles avant envoi : fichier non vide de 20 Mo au plus, extension
+        ``.mp3`` ou ``.wav`` (convertir les autres formats avant, par ffmpeg),
+        format de réponse JSON (``json``, ``verbose_json``, ``diarized_json``),
+        type du modèle ``automatic-speech-recognition``. La langue vide laisse
+        la détection au modèle. Le limiteur ``audio`` s'applique ; le ledger
+        enregistre l'appel (rôle ``audio``).
+
+        Args:
+            audio: contenu du fichier.
+            filename: nom du fichier (extension utilisée pour le type).
+            model: modèle (défaut ``ALBERT_AUDIO_MODEL``).
+            language: code ISO 639-1 (défaut ``ALBERT_AUDIO_LANGUAGE``, ``''`` = détection).
+            prompt: amorce (vocabulaire, noms propres).
+            response_format: ``json``, ``verbose_json`` ou ``diarized_json``.
+            temperature: température (0 à 1).
+            timeout: délai HTTP (défaut ``ALBERT_TIMEOUT_AUDIO``).
+            semaphore: sémaphore(s) tenu(s) pendant l'envoi.
+
+        Returns:
+            ``{"text", "segments", "language", "duration", "model", "response_model", "usage"}``
+            (``segments`` : liste de ``{"start", "end", "text"[, "speaker"]}``).
+
+        Raises:
+            AlbertInputError: entrée refusée (aucun envoi).
+            AlbertResponseError: réponse sans texte.
+        """
+        data = bytes(audio or b"")
+        if not data:
+            raise AlbertInputError("Transcription Albert : fichier audio vide.", reason="bad_request")
+        if len(data) > MAX_AUDIO_BYTES:
+            raise AlbertInputError(
+                f"Transcription Albert : {len(data) / (1024 * 1024):.1f} Mo, 20 Mo au plus par fichier "
+                "(découper l'enregistrement en segments).",
+                reason="payload_too_large",
+            )
+        name = str(filename or "").strip() or "audio.mp3"
+        extension = os.path.splitext(name)[1].lower()
+        if extension not in AUDIO_EXTENSIONS:
+            raise AlbertInputError(
+                f"Transcription Albert : format {extension or 'inconnu'} refusé (mp3 ou wav ; convertir par ffmpeg).",
+                reason="bad_request",
+            )
+        fmt = str(response_format or "verbose_json").strip().lower()
+        if fmt not in AUDIO_JSON_FORMATS:
+            raise AlbertInputError(
+                f"Transcription Albert : format de réponse {fmt!r} non pris en charge ({', '.join(AUDIO_JSON_FORMATS)}).",
+                reason="bad_request",
+            )
+        wire = self.wire_model(model if model is not None and str(model).strip() else self.cfg.audio_model)
+        catalog.check_endpoint_type(wire, "audio")
+        lang = self.cfg.audio_language if language is None else str(language).strip().lower()
+        files: Dict[str, Any] = {
+            "file": (os.path.basename(name), data, AUDIO_EXTENSIONS[extension]),
+            "model": (None, wire),
+            "response_format": (None, fmt),
+        }
+        if lang:
+            files["language"] = (None, lang)
+        if prompt:
+            files["prompt"] = (None, str(prompt)[:1000])
+        if temperature is not None:
+            files["temperature"] = (None, str(float(temperature)))
+        path = "/v1/audio/transcriptions"
+
+        def handle(payload: Any, latency: float) -> Dict[str, Any]:
+            """Normalise la transcription et enregistre l'usage."""
+            if not isinstance(payload, Mapping) or not isinstance(payload.get("text"), str):
+                raise AlbertResponseError(
+                    "Transcription Albert : réponse sans texte.", reason="bad_request", endpoint=path
+                )
+            segments: List[Dict[str, Any]] = []
+            for raw in payload.get("segments") or []:
+                if not isinstance(raw, Mapping):
+                    continue
+                start, end = raw.get("start"), raw.get("end")
+                if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (start, end)):
+                    continue
+                segment = {"start": float(start), "end": float(end), "text": str(raw.get("text") or "").strip()}
+                if raw.get("speaker") is not None:
+                    segment["speaker"] = str(raw.get("speaker"))
+                segments.append(segment)
             self.ledger.record(
-                endpoint=path, usage=data, role="search", latency_s=latency, status=200,
-                items=len(rows) if isinstance(rows, list) else 0,
+                endpoint=path, model=wire, response_model=payload.get("model"), usage=payload, role="audio",
+                latency_s=latency, request_id=payload.get("id"), status=200, items=1,
             )
-            return list(rows or [])
+            duration = payload.get("duration")
+            return {
+                "text": payload["text"].strip(),
+                "segments": segments,
+                "language": payload.get("language") or (lang or None),
+                "duration": float(duration) if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                else None,
+                "model": wire,
+                "response_model": payload.get("model"),
+                "usage": extract_usage(payload),
+            }
 
-        return self._call(
-            "POST",
-            path,
-            timeout=float(timeout if timeout is not None else self.cfg.timeout_collections),
-            json_body=body,
-            handler=handle,
-        )
+        try:
+            return self._call(
+                "POST",
+                path,
+                timeout=float(timeout if timeout is not None else self.cfg.timeout_audio),
+                role="audio",
+                files=files,
+                semaphore=semaphore,
+                handler=handle,
+            )
+        except (AlbertTransientError, AlbertAuthError, AlbertPermanentError):
+            self.ledger.record_error(endpoint=path, model=wire)
+            raise
+
 
 
 __all__ = [
+    "AUDIO_EXTENSIONS",
+    "AUDIO_JSON_FORMATS",
     "CHUNKS_PER_EMBED_REQUEST",
     "ENDPOINTS",
+    "MAX_AUDIO_BYTES",
     "MAX_CHUNKS_PER_POST",
     "MAX_EMBED_BATCH",
     "PAGE_LIMIT",
     "PUSH_LEDGER_ENDPOINT",
-    "SEARCH_METHODS",
     "USER_AGENT",
     "AlbertClient",
     "AlbertInputError",

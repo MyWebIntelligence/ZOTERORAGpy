@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import patch, MagicMock
 import os
 import json
 import time # Keep time for potential sleep in retries, though mocks might bypass it
@@ -163,8 +163,8 @@ class TestRadVectorDB(unittest.TestCase):
     @patch('rad_vectordb.Pinecone') # Mock the Pinecone class constructor
     @patch('rad_vectordb.prepare_vectors_for_pinecone')
     @patch('rad_vectordb.upsert_batch_to_pinecone')
-    @patch('builtins.open', new_callable=mock_open) # Mock open for reading JSON
-    def test_insert_to_pinecone_success(self, mock_file_open, mock_upsert, mock_prepare_vectors, MockPineconeClass):
+    @patch('rad_vectordb.load_json') # Contenu du fichier JSON (lu en flux par load_json)
+    def test_insert_to_pinecone_success(self, mock_load_json, mock_upsert, mock_prepare_vectors, MockPineconeClass):
         # --- Setup Mocks ---
         # Mock Pinecone class and its methods
         mock_pc_instance = MockPineconeClass.return_value
@@ -180,7 +180,7 @@ class TestRadVectorDB(unittest.TestCase):
 
         # Mock reading from JSON file
         sample_data = [self.sample_chunk_dense_only, self.sample_chunk_with_sparse]
-        mock_file_open.return_value.read.return_value = json.dumps(sample_data)
+        mock_load_json.return_value = json.loads(json.dumps(sample_data))
         
         # Mock prepare_vectors_for_pinecone
         prepared_vectors_batch1 = [{"id": "doc1_chunk1", "values": [0.1]*10}]
@@ -212,7 +212,7 @@ class TestRadVectorDB(unittest.TestCase):
         MockPineconeClass.assert_called_once_with(api_key="fake_api_key")
         mock_pc_instance.list_indexes.assert_called_once()
         mock_pc_instance.Index.assert_called_once_with("articles")
-        mock_file_open.assert_called_once_with("dummy_path.json", 'r', encoding='utf-8')
+        mock_load_json.assert_called_once_with("dummy_path.json")
         
         # prepare_vectors_for_pinecone is called once per batch within the document loop
         # In this setup, we have one "document" (implicit from sample_data) with 2 chunks.
@@ -225,8 +225,8 @@ class TestRadVectorDB(unittest.TestCase):
 
     @patch('rad_vectordb.Pinecone')
     @patch('rad_vectordb.upsert_batch_to_pinecone')
-    @patch('builtins.open', new_callable=mock_open)
-    def test_insert_to_pinecone_forwards_namespace(self, mock_file_open, mock_upsert, MockPineconeClass):
+    @patch('rad_vectordb.load_json')  # contenu du fichier (lu en flux)
+    def test_insert_to_pinecone_forwards_namespace(self, mock_load_json, mock_upsert, MockPineconeClass):
         """Un namespace explicite est transmis tel quel à chaque upsert."""
         mock_pc_instance = MockPineconeClass.return_value
         mock_index_instance = MagicMock()
@@ -234,7 +234,7 @@ class TestRadVectorDB(unittest.TestCase):
         index_description = MagicMock()
         index_description.name = "articles"
         mock_pc_instance.list_indexes.return_value = MagicMock(indexes=[index_description])
-        mock_file_open.return_value.read.return_value = json.dumps([self.sample_chunk_dense_only])
+        mock_load_json.return_value = json.loads(json.dumps([self.sample_chunk_dense_only]))
         mock_upsert.return_value = True
 
         with patch('os.path.exists', return_value=True):
@@ -302,14 +302,14 @@ class TestRadVectorDB(unittest.TestCase):
         self.assertIn("Index 'articles' does not exist", result["message"])
 
     @patch('rad_vectordb.Pinecone')
-    @patch('builtins.open', new_callable=mock_open)
-    def test_insert_to_pinecone_json_decode_error(self, mock_file_open, MockPineconeClass):
+    @patch('rad_vectordb.load_json')  # contenu du fichier (lu en flux)
+    def test_insert_to_pinecone_json_decode_error(self, mock_load_json, MockPineconeClass):
         mock_pc_instance = MockPineconeClass.return_value
         MockIndexDescription = MagicMock()
         MockIndexDescription.name = "articles"
         mock_pc_instance.list_indexes.return_value = MagicMock(indexes=[MockIndexDescription])
         
-        mock_file_open.return_value.read.return_value = "invalid json" # Simulate bad JSON
+        mock_load_json.side_effect = json.JSONDecodeError("Expecting value", "invalid json", 0)  # JSON invalide
         
         with patch('os.path.exists') as mock_exists:
             mock_exists.return_value = True
@@ -320,15 +320,15 @@ class TestRadVectorDB(unittest.TestCase):
     @patch('rad_vectordb.Pinecone')
     @patch('rad_vectordb.prepare_vectors_for_pinecone')
     @patch('rad_vectordb.upsert_batch_to_pinecone')
-    @patch('builtins.open', new_callable=mock_open)
-    def test_insert_to_pinecone_upsert_fails(self, mock_file_open, mock_upsert, mock_prepare, MockPineconeClass):
+    @patch('rad_vectordb.load_json')  # contenu du fichier (lu en flux)
+    def test_insert_to_pinecone_upsert_fails(self, mock_load_json, mock_upsert, mock_prepare, MockPineconeClass):
         mock_pc_instance = MockPineconeClass.return_value
         MockIndexDescription = MagicMock()
         MockIndexDescription.name = "articles"
         mock_pc_instance.list_indexes.return_value = MagicMock(indexes=[MockIndexDescription])
         
         sample_data = [self.sample_chunk_dense_only]
-        mock_file_open.return_value.read.return_value = json.dumps(sample_data)
+        mock_load_json.return_value = json.loads(json.dumps(sample_data))
         mock_prepare.return_value = [{"id": "doc1_chunk1", "values": [0.1]*10}]
         mock_upsert.return_value = False # Simulate upsert failure
 
@@ -343,15 +343,15 @@ class TestRadVectorDB(unittest.TestCase):
     @patch('rad_vectordb.Pinecone')
     @patch('rad_vectordb.prepare_vectors_for_pinecone')
     @patch('rad_vectordb.upsert_batch_to_pinecone')
-    @patch('builtins.open', new_callable=mock_open)
-    def test_insert_to_pinecone_no_valid_vectors(self, mock_file_open, mock_upsert, mock_prepare, MockPineconeClass):
+    @patch('rad_vectordb.load_json')  # contenu du fichier (lu en flux)
+    def test_insert_to_pinecone_no_valid_vectors(self, mock_load_json, mock_upsert, mock_prepare, MockPineconeClass):
         mock_pc_instance = MockPineconeClass.return_value
         MockIndexDescription = MagicMock()
         MockIndexDescription.name = "articles"
         mock_pc_instance.list_indexes.return_value = MagicMock(indexes=[MockIndexDescription])
 
         sample_data = [self.sample_chunk_no_embedding] # Data that will result in no vectors
-        mock_file_open.return_value.read.return_value = json.dumps(sample_data)
+        mock_load_json.return_value = json.loads(json.dumps(sample_data))
         mock_prepare.return_value = [] # prepare_vectors returns empty list
 
         with patch('os.path.exists') as mock_exists:
@@ -369,7 +369,7 @@ class TestRadVectorDB(unittest.TestCase):
     # insert_to_weaviate_hybrid
 
     @patch('rad_vectordb.weaviate')
-    @patch('builtins.open', new_callable=mock_open)
+    @patch('rad_vectordb.load_json')  # contenu du fichier (lu en flux)
     def test_insert_to_weaviate_hybrid_success(self, mock_file, mock_weaviate_module):
         # Mock Weaviate client and collection
         mock_client = MagicMock()
@@ -398,7 +398,7 @@ class TestRadVectorDB(unittest.TestCase):
 
         # Mock file reading
         sample_data = [self.sample_chunk_dense_only, self.sample_chunk_with_sparse]
-        mock_file.return_value.read.return_value = json.dumps(sample_data)
+        mock_file.return_value = json.loads(json.dumps(sample_data))
 
         with patch('os.path.exists') as mock_exists:
             mock_exists.return_value = True
@@ -463,13 +463,13 @@ class TestRadVectorDB(unittest.TestCase):
     @patch('rad_vectordb.qdrant_client.QdrantClient') # Path to QdrantClient where it's used
     @patch('rad_vectordb.prepare_points_for_qdrant')
     @patch('rad_vectordb.upsert_batch_to_qdrant')
-    @patch('builtins.open', new_callable=mock_open)
+    @patch('rad_vectordb.load_json')  # contenu du fichier (lu en flux)
     def test_insert_to_qdrant_success_collection_exists(self, mock_file, mock_upsert, mock_prepare, MockQdrantClientClass):
         mock_qdrant_client_instance = MockQdrantClientClass.return_value
         mock_qdrant_client_instance.get_collection.return_value = MagicMock() # Simulate collection exists
 
         sample_data = [self.sample_chunk_dense_only]
-        mock_file.return_value.read.return_value = json.dumps(sample_data)
+        mock_file.return_value = json.loads(json.dumps(sample_data))
         
         prepared_points = [rad_vectordb.models.PointStruct(id=rad_vectordb.generate_uuid("doc1_chunk1"), vector=[0.1]*10, payload={})]
         mock_prepare.return_value = prepared_points
@@ -496,7 +496,7 @@ class TestRadVectorDB(unittest.TestCase):
     @patch('rad_vectordb.qdrant_client.QdrantClient')
     @patch('rad_vectordb.prepare_points_for_qdrant')
     @patch('rad_vectordb.upsert_batch_to_qdrant')
-    @patch('builtins.open', new_callable=mock_open)
+    @patch('rad_vectordb.load_json')  # contenu du fichier (lu en flux)
     def test_insert_to_qdrant_success_create_collection(self, mock_file, mock_upsert, mock_prepare, MockQdrantClientClass):
         mock_qdrant_client_instance = MockQdrantClientClass.return_value
         # Simulate collection does not exist by raising an exception that implies it
@@ -504,7 +504,7 @@ class TestRadVectorDB(unittest.TestCase):
         mock_qdrant_client_instance.get_collection.side_effect = Exception("Collection not found or generic error") 
 
         sample_data = [self.sample_chunk_dense_only] # Has embedding of len 10
-        mock_file.return_value.read.return_value = json.dumps(sample_data)
+        mock_file.return_value = json.loads(json.dumps(sample_data))
         
         prepared_points = [rad_vectordb.models.PointStruct(id=rad_vectordb.generate_uuid("doc1_chunk1"), vector=[0.1]*10, payload={})]
         mock_prepare.return_value = prepared_points

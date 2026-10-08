@@ -292,6 +292,7 @@ async def _collect(generator):
 # _call_llm_api
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("finish", ["stop", "length"])
+
 def test_none_content_no_attributeerror(finish, albert_on):
     albert_on.fake.chat_reply = {"content": None, "finish_reason": finish}
     with pytest.raises(AlbertTruncatedError):
@@ -347,12 +348,7 @@ def test_albert_never_calls_openai(failure, albert_on, fast_async_sleep):
 def test_parallel_positional_call_without_key_still_works(openai_calls, monkeypatch):
     _albert_env(monkeypatch, enabled=False)
     for func in (cfilter.pre_filter_citation, cfilter.filter_citation_with_llm, pcp.process_citations_parallel):
-        params = list(inspect.signature(func).parameters.values())
-        assert params[-2].name == "albert_api_key", func.__name__
-        assert params[-2].default is None, func.__name__
-        assert params[-1].name == "albert_usage_ledger", func.__name__
-        assert params[-1].kind is inspect.Parameter.KEYWORD_ONLY, func.__name__
-        assert params[-1].default is None, func.__name__
+        _assert_trailing_keyword_params(func)
     assert inspect.signature(cfilter._call_llm_api).parameters["albert_api_key"].default is None
     config = dict(PROJECT, model="gpt-4o-mini")
     citations = [_citation(1), _citation(2)]
@@ -607,3 +603,16 @@ def test_off_prefilter_parse_unchanged(reply, expected, enabled, monkeypatch):
     assert result is expected
     assert [call["client"] for call in calls] == ["openai"]
     assert fake.calls == []
+
+
+def _assert_trailing_keyword_params(func):
+    """``albert_api_key`` (défaut None) puis seulement des paramètres nommés à défaut None :
+    le journal Albert et la clé du serveur déclaré (sprint « configuration unifiée »)."""
+    params = list(inspect.signature(func).parameters.values())
+    names = [p.name for p in params]
+    index = names.index("albert_api_key")
+    assert params[index].default is None, func.__name__
+    trailing = params[index + 1:]
+    assert {p.name for p in trailing} == {"albert_usage_ledger", "server_api_key"}, func.__name__
+    for param in trailing:
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is None, (func.__name__, param.name)

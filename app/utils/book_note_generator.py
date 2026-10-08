@@ -902,6 +902,7 @@ async def _book_llm_call(
     albert_role: str,
     albert_response_format: Optional[Dict] = None,
     albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None,
 ) -> str:
     """
     Run one book-note LLM call in a slot of the global semaphore (`run_llm_slot`).
@@ -958,7 +959,7 @@ async def _book_llm_call(
             temperature=temperature,
             mode="book",
             openai_api_key=openai_api_key,
-            openrouter_api_key=openrouter_api_key,
+            openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
         ),
     )
 
@@ -978,6 +979,7 @@ async def _phase1_detect_structure(
     openrouter_api_key: Optional[str],
     albert_api_key: Optional[str] = None,
     albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None,
 ) -> Optional[Dict]:
     """
     Run Phase 1 LLM call. Returns parsed JSON or None on failure.
@@ -1026,7 +1028,7 @@ async def _phase1_detect_structure(
             model=model,
             temperature=0.0,
             openai_api_key=openai_api_key,
-            openrouter_api_key=openrouter_api_key,
+            openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
             albert_api_key=albert_api_key,
             albert_role=ALBERT_BOOK_STRUCTURE_ROLE,
             albert_response_format=ALBERT_BOOK_STRUCTURE_RESPONSE_FORMAT,
@@ -1358,6 +1360,7 @@ async def _phase2_analyse_chapter(
     openrouter_api_key: Optional[str],
     albert_api_key: Optional[str] = None,
     albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Run one Phase 2 LLM call. Returns (html_block, short_summary).
@@ -1401,7 +1404,7 @@ async def _phase2_analyse_chapter(
         model=model,
         temperature=0.2,
         openai_api_key=openai_api_key,
-        openrouter_api_key=openrouter_api_key,
+        openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
         albert_api_key=albert_api_key,
         albert_role=ALBERT_BOOK_NOTE_ROLE,
         albert_usage_ledger=albert_usage_ledger,
@@ -1459,6 +1462,7 @@ async def _phase3_synthesise(
     openrouter_api_key: Optional[str],
     albert_api_key: Optional[str] = None,
     albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Run Phase 3 LLM call. Returns (section_a_html, section_b_html).
@@ -1487,7 +1491,7 @@ async def _phase3_synthesise(
         model=model,
         temperature=0.2,
         openai_api_key=openai_api_key,
-        openrouter_api_key=openrouter_api_key,
+        openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
         albert_api_key=albert_api_key,
         albert_role=ALBERT_BOOK_NOTE_ROLE,
         albert_usage_ledger=albert_usage_ledger,
@@ -1649,6 +1653,7 @@ async def build_book_note_async(
     progress_cb: Optional[Callable[[str, int, int, str], Awaitable[None]]] = None,
     albert_api_key: Optional[str] = None,
     albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Generate a complete [LIVRE] reading note for a book.
@@ -1732,7 +1737,7 @@ async def build_book_note_async(
         pages=pages if page_based else None,
         model=model,
         openai_api_key=openai_api_key,
-        openrouter_api_key=openrouter_api_key,
+        openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
         albert_api_key=albert_api_key,
         albert_usage_ledger=albert_usage_ledger,
     )
@@ -1878,7 +1883,7 @@ async def build_book_note_async(
                 chapter, structure, book_meta, summaries, phase2_tpl,
                 model=model,
                 openai_api_key=openai_api_key,
-                openrouter_api_key=openrouter_api_key,
+                openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                 albert_api_key=albert_api_key,
                 albert_usage_ledger=albert_usage_ledger,
             )
@@ -1904,7 +1909,7 @@ async def build_book_note_async(
             structure, summaries, book_meta, phase3_tpl,
             model=model,
             openai_api_key=openai_api_key,
-            openrouter_api_key=openrouter_api_key,
+            openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
             albert_api_key=albert_api_key,
             albert_usage_ledger=albert_usage_ledger,
         )

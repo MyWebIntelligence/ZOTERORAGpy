@@ -1217,8 +1217,27 @@ async def delete_albert_collection(
     _audit_albert_deletion_outcome(db, entry, cid, success=error is None)
     if error is not None:
         return error
+    _mark_albert_corpora_deleted(db, cid)
     logger.info(f"Albert collection {cid} deleted by user {current_user.id}")
     return JSONResponse({"success": True, "deleted": cid})
+
+
+def _mark_albert_corpora_deleted(db: Session, collection_id: int) -> None:
+    """
+    Mark the corpora of a deleted collection ``deleted`` in the local registry (never raises).
+
+    Args:
+        db: Database session.
+        collection_id: The deleted Albert collection.
+    """
+    try:
+        from scripts.rad_albert.config import AlbertConfig
+        from app.services.albert_access import mark_collection_deleted
+
+        mark_collection_deleted(db, AlbertConfig.from_env().base_url, collection_id)
+    except Exception as exc:
+        logger.error(f"Albert corpus registry not updated after deleting collection {collection_id}: "
+                     f"{type(exc).__name__}")
 
 
 def _audit_albert_deletion_request(db: Session, current_user: User, collection_id: int) -> Optional[Any]:

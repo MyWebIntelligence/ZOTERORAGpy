@@ -10,6 +10,8 @@ services:
         # OCR local (Docling) — mettre INSTALL_LOCAL_OCR=true dans .env pour
         # installer les deps lourdes, puis `docker compose up -d --build`.
         INSTALL_LOCAL_OCR: "${INSTALL_LOCAL_OCR:-false}"
+        # Audio Albert (sprint R2) : ffmpeg pour convertir et découper les enregistrements.
+        INSTALL_FFMPEG: "${INSTALL_FFMPEG:-false}"
     container_name: ragpy
     restart: unless-stopped
     # Limites ressources pour stabilité (P1-T2)
@@ -34,8 +36,11 @@ services:
       - ./logs:/app/logs
       # Sources pour traitement (optionnel)
       - ./sources:/app/sources
-    env_file:
-      - .env
+      # .env monté (lecture-écriture) plutôt que passé en env_file : l'application
+      # le relit quand il change (page Paramètres comprise) ; un env_file figerait
+      # ses valeurs dans l'environnement du conteneur (sprint « configuration unifiée »).
+      # Le fichier doit exister sur l'hôte avant docker compose up.
+      - ./.env:/app/.env
     environment:
       - APP_URL=${APP_URL:-http://localhost:8000}
       - ENABLE_METRICS=${ENABLE_METRICS:-true}
@@ -44,6 +49,10 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       # Limiteur Albert partagé entre processus et conteneurs (audit A12) ; repli local si Redis tombe
       - ALBERT_LIMITER_BACKEND=${ALBERT_LIMITER_BACKEND:-redis}
+      # Lus par la commande de démarrage de l'image (avant Python) : transmis ici.
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-1}
+      - UVICORN_TIMEOUT_KEEP_ALIVE=${UVICORN_TIMEOUT_KEEP_ALIVE:-120}
+      - UVICORN_LIMIT_CONCURRENCY=${UVICORN_LIMIT_CONCURRENCY:-100}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/detailed"]
       interval: 30s
@@ -125,6 +134,7 @@ services:
       dockerfile: Dockerfile
       args:
         INSTALL_LOCAL_OCR: "${INSTALL_LOCAL_OCR:-false}"
+        INSTALL_FFMPEG: "${INSTALL_FFMPEG:-false}"
     container_name: ragpy-celery-worker
     restart: unless-stopped
     # Sans -Q : le worker consomme toutes les files de CELERY_QUEUES
@@ -135,8 +145,11 @@ services:
       - ./uploads:/app/uploads
       - ./logs:/app/logs
       - ./sources:/app/sources
-    env_file:
-      - .env
+      # .env monté (lecture-écriture) plutôt que passé en env_file : l'application
+      # le relit quand il change (page Paramètres comprise) ; un env_file figerait
+      # ses valeurs dans l'environnement du conteneur (sprint « configuration unifiée »).
+      # Le fichier doit exister sur l'hôte avant docker compose up.
+      - ./.env:/app/.env
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
@@ -144,6 +157,14 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # L'image hérite du HEALTHCHECK web (curl :8000/health), que ce service
+    # n'ouvre pas : contrôle de santé propre, sinon « unhealthy » permanent.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d celery@$$HOSTNAME --timeout 10 | grep -q pong"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -163,14 +184,22 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-    env_file:
-      - .env
+      # .env monté (lecture-écriture) plutôt que passé en env_file : l'application
+      # le relit quand il change (page Paramètres comprise) ; un env_file figerait
+      # ses valeurs dans l'environnement du conteneur (sprint « configuration unifiée »).
+      # Le fichier doit exister sur l'hôte avant docker compose up.
+      - ./.env:/app/.env
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       redis:
         condition: service_healthy
+    # L'image hérite du HEALTHCHECK web (curl :8000/health), que beat n'ouvre
+    # pas ; beat n'expose aucune sonde : contrôle désactivé (le redémarrage
+    # reste assuré par restart: unless-stopped).
+    healthcheck:
+      disable: true
 
   flower:
     build:
@@ -193,6 +222,14 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # L'image hérite du HEALTHCHECK web (curl :8000/health), que ce service
+    # n'ouvre pas : contrôle de santé propre, sinon « unhealthy » permanent.
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:5555/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
 volumes:
   redis_data:

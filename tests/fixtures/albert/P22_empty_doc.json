@@ -1,0 +1,36 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/rerank",
+    "body_summary": {
+      "model": "bge-reranker-v2-m3",
+      "query": "Comment la sociologie décrit-elle la production des savoirs scientifiques ?",
+      "documents": [
+        "",
+        "Bourdieu définit le champ scientifique comme un espace de lutte pour le monopole de l'autorité scientifique."
+      ]
+    }
+  },
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "type": "string_too_short",
+        "loc": [
+          "body",
+          "documents",
+          0
+        ],
+        "msg": "String should have at least 1 character",
+        "input": "",
+        "ctx": {
+          "min_length": 1
+        }
+      }
+    ]
+  },
+  "synthetic": false
+}

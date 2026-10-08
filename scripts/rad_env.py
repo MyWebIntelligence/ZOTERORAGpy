@@ -57,7 +57,12 @@ SECRET_ENV_SUFFIX = "_API_KEY"
 # les retire de l'environnement non-admin (même tuple que
 # ``credentials.SERVER_SECRET_ENV_VARS`` ; un test le vérifie). Protégés dès que
 # ``RAGPY_DOTENV_DENY`` est présent, pour qu'un ``.env`` ne les réinjecte pas.
-SERVER_SECRET_ENV_VARS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "JWT_SECRET_KEY_PREVIOUS", "RESEND_API_KEY")
+SERVER_SECRET_ENV_VARS = (
+    # Secrets serveur, et clé du serveur local (sprint « configuration unifiée »),
+    # réservée aux administrateurs. Les clés Anthropic, Google, DeepSeek, Qwen et
+    # GLM sont des identifiants personnels depuis le lot L9. Ordre alphabétique.
+    "FLOWER_PASSWORD", "JWT_SECRET_KEY", "JWT_SECRET_KEY_PREVIOUS", "LOCAL_API_KEY", "RESEND_API_KEY",
+)
 
 
 def parse_deny_list(value: Optional[str]) -> FrozenSet[str]:
@@ -77,6 +82,10 @@ def parse_deny_list(value: Optional[str]) -> FrozenSet[str]:
     if not value:
         return frozenset()
     return frozenset(name.strip() for name in value.split(",") if name.strip())
+
+
+ENV_FILE_VAR = "RAGPY_ENV_FILE"
+"""Chemin d'un autre ``.env`` (même rôle que dans ``scripts/rad_settings/access.py``)."""
 
 
 def load_dotenv_guarded(*args, **kwargs) -> bool:
@@ -109,6 +118,11 @@ def load_dotenv_guarded(*args, **kwargs) -> bool:
         La valeur de retour de ``dotenv.load_dotenv`` (``True`` si au moins une
         variable a été lue dans le fichier).
     """
+    # Autre fichier .env désigné par RAGPY_ENV_FILE (tests hermétiques, conteneurs) :
+    # utilisé seulement quand l'appelant ne donne pas de chemin.
+    env_file = os.environ.get(ENV_FILE_VAR, "").strip()
+    if env_file and not args and "dotenv_path" not in kwargs and "stream" not in kwargs:
+        kwargs["dotenv_path"] = env_file
     raw_deny = os.environ.get(DOTENV_DENY_ENV_VAR)
     if raw_deny is None:
         return dotenv.load_dotenv(*args, **kwargs)

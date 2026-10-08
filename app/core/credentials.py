@@ -32,6 +32,7 @@ from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from app.config import settings
 from app.models.user import User
+from scripts.rad_settings.access import refresh_environ
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,14 @@ CREDENTIAL_KEYS = [
     # from UI/JSON listings when disabled: see visible_credential_keys().
     # ALBERT_BASE_URL is server configuration, never a user credential.
     "albert_api_key",
+    # Servers added by the « configuration unifiée » sprint (lot L9): personal
+    # keys, listed only when the administrator declares the server address in
+    # block 1 of the .env (see visible_credential_keys()).
+    "anthropic_api_key",
+    "google_api_key",
+    "deepseek_api_key",
+    "qwen_api_key",
+    "glm_api_key",
     # Pinecone
     "pinecone_api_key",
     "pinecone_env",
@@ -141,6 +150,11 @@ CREDENTIAL_ENV_MAPPING = {
     "mistral_model": "MISTRAL_OCR_MODEL",
     "mistral_url": "MISTRAL_API_BASE_URL",
     "albert_api_key": "ALBERT_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "google_api_key": "GOOGLE_API_KEY",
+    "deepseek_api_key": "DEEPSEEK_API_KEY",
+    "qwen_api_key": "QWEN_API_KEY",
+    "glm_api_key": "GLM_API_KEY",
     "pinecone_api_key": "PINECONE_API_KEY",
     "pinecone_env": "PINECONE_ENV",
     "weaviate_api_key": "WEAVIATE_API_KEY",
@@ -161,6 +175,11 @@ CREDENTIAL_ERROR_MESSAGES = {
     "mistral_model": "Modèle Mistral OCR requis.",
     "mistral_url": "URL API Mistral requise.",
     "albert_api_key": "Clé API Albert (DINUM) requise. Configurez-la dans Paramètres > Mes Identifiants.",
+    "anthropic_api_key": "Clé API Anthropic requise pour ce serveur. Configurez-la dans Paramètres > Mes Identifiants.",
+    "google_api_key": "Clé API Google Gemini requise pour ce serveur. Configurez-la dans Paramètres > Mes Identifiants.",
+    "deepseek_api_key": "Clé API DeepSeek requise pour ce serveur. Configurez-la dans Paramètres > Mes Identifiants.",
+    "qwen_api_key": "Clé API Qwen (Alibaba Cloud) requise pour ce serveur. Configurez-la dans Paramètres > Mes Identifiants.",
+    "glm_api_key": "Clé API GLM (Z.ai) requise pour ce serveur. Configurez-la dans Paramètres > Mes Identifiants.",
     "pinecone_api_key": "Clé API Pinecone requise. Configurez-la dans Paramètres > Mes Identifiants.",
     "pinecone_env": "Environnement Pinecone requis (ex: us-east-1).",
     "weaviate_api_key": "Clé API Weaviate requise. Configurez-la dans Paramètres > Mes Identifiants.",
@@ -176,6 +195,18 @@ CREDENTIAL_ERROR_MESSAGES = {
 # Credential shown in UI/JSON listings only when Albert is enabled (see albert_enabled()).
 _ALBERT_CREDENTIAL_KEY = "albert_api_key"
 
+# Personal keys of the servers added by the « configuration unifiée » sprint
+# (lot L9): credential key -> address variable of block 1. Each one is shown in
+# UI/JSON listings, and accepted by PUT /users/me/credentials, only when the
+# administrator declares that address (see server_credential_declared()).
+SERVER_CREDENTIAL_BASE_URLS = {
+    "anthropic_api_key": "ANTHROPIC_API_BASE_URL",
+    "google_api_key": "GOOGLE_API_BASE_URL",
+    "deepseek_api_key": "DEEPSEEK_API_BASE_URL",
+    "qwen_api_key": "QWEN_API_BASE_URL",
+    "glm_api_key": "GLM_API_BASE_URL",
+}
+
 # Master switch of the Albert integration (server configuration).
 _ALBERT_SWITCH_ENV_VAR = "ALBERT_ENABLED"
 
@@ -189,7 +220,12 @@ DOTENV_DENY_ENV_VAR = "RAGPY_DOTENV_DENY"
 # do not inherit them (JWT_SECRET_KEY also derives the Fernet key that decrypts
 # every stored user credential). They are only stripped from the inherited env:
 # RAGPY_DOTENV_DENY keeps its contract (mapped *_API_KEY names only).
-SERVER_SECRET_ENV_VARS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "JWT_SECRET_KEY_PREVIOUS", "RESEND_API_KEY")
+SERVER_SECRET_ENV_VARS = (
+    # Secrets serveur, et clé du serveur local (sprint « configuration unifiée »),
+    # réservée aux administrateurs. Les clés Anthropic, Google, DeepSeek, Qwen et
+    # GLM sont des identifiants personnels depuis le lot L9. Ordre alphabétique.
+    "FLOWER_PASSWORD", "JWT_SECRET_KEY", "JWT_SECRET_KEY_PREVIOUS", "LOCAL_API_KEY", "RESEND_API_KEY",
+)
 
 
 @functools.lru_cache(maxsize=16)
@@ -240,14 +276,32 @@ def albert_enabled() -> bool:
     return _parse_albert_switch(raw)
 
 
+def server_credential_declared(credential_key: str) -> bool:
+    """
+    Tell whether the server of a lot L9 personal key is declared in block 1.
+
+    Args:
+        credential_key: A key of ``SERVER_CREDENTIAL_BASE_URLS`` (any other key
+            answers True: it is not gated by a server address).
+
+    Returns:
+        True when the address variable of that server is set (environment read
+        at call time).
+    """
+    var = SERVER_CREDENTIAL_BASE_URLS.get(credential_key)
+    return var is None or bool((os.environ.get(var) or "").strip())
+
+
 def visible_credential_keys() -> List[str]:
     """
     List the credential keys that may be exposed in UI forms and JSON responses.
 
     ``albert_api_key`` stays registered in ``CREDENTIAL_KEYS`` (so storage and
     the non-admin purge always cover it), but it is hidden from listings unless
-    the server enables Albert (``albert_enabled()``). The environment is read
-    at call time.
+    the server enables Albert (``albert_enabled()``). Likewise the personal
+    keys of the servers of ``SERVER_CREDENTIAL_BASE_URLS`` are listed only when
+    their address is declared (``server_credential_declared()``). The
+    environment is read at call time.
 
     Returns:
         A new list following the order of ``CREDENTIAL_KEYS``.
@@ -255,7 +309,7 @@ def visible_credential_keys() -> List[str]:
     enabled = albert_enabled()
     return [
         key for key in CREDENTIAL_KEYS
-        if enabled or key != _ALBERT_CREDENTIAL_KEY
+        if (enabled or key != _ALBERT_CREDENTIAL_KEY) and server_credential_declared(key)
     ]
 
 
@@ -536,7 +590,9 @@ def build_subprocess_env(
         >>> env = build_subprocess_env(user, required_keys=["openai_api_key"])
         >>> process = await asyncio.create_subprocess_exec(*cmd, env=env)
     """
-    # Start with a copy of current environment
+    # Start with a copy of the current environment, resynchronised with the
+    # .env first (an edit made since startup reaches the script).
+    refresh_environ()
     env = os.environ.copy()
 
     # Get user's personal credentials

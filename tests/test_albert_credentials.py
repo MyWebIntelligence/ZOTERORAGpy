@@ -63,6 +63,7 @@ from app.core.credentials import (
     CREDENTIAL_ERROR_MESSAGES,
     CREDENTIAL_KEYS,
     DOTENV_DENY_ENV_VAR,
+    SERVER_CREDENTIAL_BASE_URLS,
     SERVER_SECRET_ENV_VARS,
     CredentialMissingError,
     albert_enabled,
@@ -145,6 +146,7 @@ SWITCH_VALUES_OFF = ("", " ", "0", "false", "no", "off", "2")
 
 # Secrets serveur factices (jamais utiles aux scripts du pipeline).
 FAKE_SERVER_SECRETS = {
+    "LOCAL_API_KEY": "fake-local-key-0001",
     "FLOWER_PASSWORD": "fake-flower-password-0001",
     "JWT_SECRET_KEY": "fake-jwt-secret-0001",
     "JWT_SECRET_KEY_PREVIOUS": "fake-jwt-previous-secret-0001",
@@ -456,7 +458,9 @@ def test_visible_credential_keys_follow_albert_switch(monkeypatch, value, expect
     assert albert_enabled() is expected
     visible = visible_credential_keys()
     assert ("albert_api_key" in visible) is expected
-    assert visible == [k for k in CREDENTIAL_KEYS if expected or k != "albert_api_key"]
+    # Clés des serveurs du lot L9 : listées seulement si leur adresse est déclarée (aucune ici).
+    assert visible == [k for k in CREDENTIAL_KEYS
+                       if (expected or k != "albert_api_key") and k not in SERVER_CREDENTIAL_BASE_URLS]
     assert settings_routes._admin_form_env_keys() == (
         HISTORICAL_FORM_ENV_KEYS[:6] + ["ALBERT_API_KEY"] + HISTORICAL_FORM_ENV_KEYS[6:]
         if expected else HISTORICAL_FORM_ENV_KEYS
@@ -585,7 +589,7 @@ def test_me_credentials_on_masked(web, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     keys = list(body)
-    assert keys == list(CREDENTIAL_KEYS)
+    assert keys == [k for k in CREDENTIAL_KEYS if k not in SERVER_CREDENTIAL_BASE_URLS]
     assert keys.index("albert_api_key") == keys.index("mistral_url") + 1
     entry = body["albert_api_key"]
     assert entry["has_value"] is True
@@ -1056,7 +1060,9 @@ def test_vector_db_listing_ignores_query_url_and_key(web, monkeypatch):
 # ---------------------------------------------------------------------------
 def test_pages_render_albert_blocks_only_when_on(web, monkeypatch):
     markers = {
-        "/pipeline": ('name="ALBERT_API_KEY"', "/api/albert/status", "Tester la connexion"),
+        # Clé Albert et test de connexion : page Paramètres (lot L8 du sprint « configuration
+        # unifiée ») et profil ; la page du pipeline garde ses blocs Albert (collections).
+        "/pipeline": ('id="albertParams"', "/api/albert/collections"),
         "/profile": ('id="cred_albert_api_key"', "'albert_api_key',"),
     }
     for switch, expected in ((None, False), ("0", False), ("1", True)):

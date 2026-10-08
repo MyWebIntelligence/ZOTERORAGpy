@@ -33,8 +33,15 @@ def get_token_from_request(
     Extracts a JWT token from the request.
 
     It checks for the token in the following order:
-    1. The `Authorization` header (as a "Bearer" token).
+    1. The `Authorization` header (as a "Bearer" token), when it decodes.
     2. The `access_token` cookie.
+
+    The pages send ``'Bearer ' + localStorage.getItem('access_token')``: a
+    missing or stale browser copy (``Bearer null``) must not hide a valid
+    cookie, otherwise `/login` (which reads the cookie) sends the user back
+    to `/`, whose API calls answer 401 again — an endless redirect loop. An
+    undecodable header therefore yields to the cookie; with no cookie it is
+    still returned, so the caller reports it as invalid.
 
     Args:
         request: The incoming FastAPI `Request` object.
@@ -43,16 +50,16 @@ def get_token_from_request(
     Returns:
         The extracted token string if found, otherwise None.
     """
-    # D'abord vérifier le header Authorization
-    if credentials and credentials.credentials:
-        return credentials.credentials
+    header_token = credentials.credentials if credentials and credentials.credentials else None
+    if header_token and decode_token(header_token):
+        return header_token
 
     # Ensuite vérifier le cookie
     token = request.cookies.get("access_token")
     if token:
         return token
 
-    return None
+    return header_token
 
 
 async def get_current_user(

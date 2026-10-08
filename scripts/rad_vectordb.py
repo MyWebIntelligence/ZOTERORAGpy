@@ -30,8 +30,10 @@ except ImportError as exc:  # pragma: no cover - only triggered when dependency 
 # que le write-path rad_chunk. Import robuste contexte package (Celery/tests) vs CLI.
 try:
     from scripts import rad_dedup
+    from scripts.rad_json_stream import load_json
 except ImportError:
     import rad_dedup
+    from rad_json_stream import load_json
 # ----------------------------------------------------------------------
 # Environment variable helper with validation
 # ----------------------------------------------------------------------
@@ -327,8 +329,9 @@ def insert_to_pinecone(embeddings_json_file, index_name="articles", pinecone_api
     
     all_chunks = []
     try:
-        with open(embeddings_json_file, 'r', encoding='utf-8') as f:
-            all_chunks = json.load(f)
+        # Lecture en flux (jamais tout le fichier dans une chaîne : un fichier de
+        # 1,8 Go faisait tuer le processus dans un conteneur limité à 8 Go).
+        all_chunks = load_json(embeddings_json_file)
         print(f"Chargement des embeddings depuis {embeddings_json_file} réussi. {len(all_chunks)} chunks chargés.")
     except json.JSONDecodeError as e:
         msg = f"Erreur de décodage JSON dans le fichier {embeddings_json_file}: {e}"
@@ -1448,8 +1451,7 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
     file_space = None
     space_checked = False
     try:
-        with open(embeddings_json_file, 'r', encoding='utf-8') as f_pre:
-            preloaded_chunks = json.load(f_pre)
+        preloaded_chunks = load_json(embeddings_json_file)  # lecture en flux
     except Exception:
         preloaded_chunks = None
     if preloaded_chunks is not None:
@@ -1514,8 +1516,7 @@ def insert_to_weaviate_hybrid(embeddings_json_file, url, api_key, class_name="Ar
         # Charger les chunks avec embeddings (déjà lus par la garde locale)
         print(f"Chargement des embeddings depuis {embeddings_json_file}")
         if preloaded_chunks is None:
-            with open(embeddings_json_file, 'r', encoding='utf-8') as f:
-                all_chunks = json.load(f)
+            all_chunks = load_json(embeddings_json_file)
         else:
             all_chunks = preloaded_chunks
 
@@ -1829,8 +1830,7 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
             # valide (historique).
             vector_size = None
             temp_chunks = []
-            with open(embeddings_json_file, 'r', encoding='utf-8') as f_temp:
-                 temp_chunks = json.load(f_temp)
+            temp_chunks = load_json(embeddings_json_file)  # lecture en flux
             temp_space, temp_error = _check_vector_space(temp_chunks, target_desc=target_desc_space,
                                                          drop_foreign=False)
             if temp_error:
@@ -1845,6 +1845,7 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
                         vector_size = len(chunk["embedding"])
                         break
 
+            temp_chunks = None  # libéré avant la lecture complète ci-dessous (pas deux copies en mémoire)
             if vector_size is None:
                  print("Erreur: Impossible de déterminer la taille du vecteur à partir du fichier JSON.")
                  if client: client.close()
@@ -1868,8 +1869,7 @@ def insert_to_qdrant(embeddings_json_file, collection_name, qdrant_url=None, qdr
     # Charger les chunks avec embeddings
     print(f"Chargement des embeddings depuis {embeddings_json_file}")
     try:
-        with open(embeddings_json_file, 'r', encoding='utf-8') as f:
-            all_chunks = json.load(f)
+        all_chunks = load_json(embeddings_json_file)  # lecture en flux
     except Exception as e:
         print(f"Erreur lors du chargement du fichier {embeddings_json_file}: {e}")
         traceback.print_exc()
@@ -2387,8 +2387,7 @@ def _insert_to_albert(embeddings_json_file, collection_id, collection_name, albe
     dedup_cfg = rad_dedup.DedupConfig.from_env()
 
     try:
-        with open(embeddings_json_file, "r", encoding="utf-8") as f:
-            all_chunks = json.load(f)
+        all_chunks = load_json(embeddings_json_file)  # lecture en flux
     except Exception as exc:
         msg = f"Erreur lors du chargement du fichier {embeddings_json_file}: {exc}"
         print(msg)

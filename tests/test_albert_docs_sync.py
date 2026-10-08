@@ -5,9 +5,14 @@ Invariants couverts (``.claude/tasks/SPRINT_albert.md``, lot 8) :
 * 32 : ``ALBERT_LIVE`` n'apparaît dans aucun fichier d'environnement d'exemple
   (interrupteur réservé au shell) ;
 * 33 : toute variable Albert lue par le code est enregistrée dans
-  ``ENV_REGISTRY``, présente dans le bloc Albert du ``.env.example`` racine
-  avec son défaut, désactivée par défaut, et documentée dans
-  ``.claude/docs/albert.md``.
+  ``ENV_REGISTRY``, présente une seule fois dans le ``.env.example`` racine
+  (active ou en commentaire, selon le registre unique
+  ``scripts/rad_settings/registry.py``) avec son défaut, désactivée par
+  défaut, et documentée dans ``.claude/docs/albert.md``.
+
+Sprint « configuration unifiée » (lot L2) : ``.env.example`` est généré depuis
+le registre unique et rangé par blocs numérotés ; ``scripts/.env.example``,
+lu par aucun code, est supprimé.
 
 S'y ajoutent des contrôles de cohérence entre le guide et le code (points
 relevés au lot 8) : exceptions du bloc Albert quand ``ALBERT_ENABLED=0``,
@@ -45,10 +50,11 @@ from scripts.rad_albert.config import ENV_REGISTRY, FIELD_ENV_NAMES, AlbertConfi
 REPO = Path(__file__).resolve().parents[1]
 ROOT_ENV_EXAMPLE = REPO / ".env.example"
 SCRIPTS_ENV_EXAMPLE = REPO / "scripts" / ".env.example"
+"""Supprimé au lot L2 du sprint « configuration unifiée » : ne doit pas revenir."""
 ALBERT_DOC = REPO / ".claude" / "docs" / "albert.md"
 
-ALBERT_BLOCK_HEADER = "# ===== ALBERT API (DINUM) — OPT-IN, OFF PAR DÉFAUT ====="
-FLOWER_LINE = "# Flower monitoring credentials"
+EXAMPLE_LINE_RE = re.compile(r"^(#\s*)?([A-Z][A-Z0-9_]*)=(.*)$")
+"""Affectation active (``NOM=valeur``) ou en commentaire (``# NOM=valeur``)."""
 
 LIVE_SWITCH = "ALBERT_" + "LIVE"
 """Interrupteur des tests live : shell uniquement, jamais enregistré ni écrit."""
@@ -174,39 +180,33 @@ def _env_example_lines() -> List[str]:
     return ROOT_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
 
 
-def _assignment_index(lines: List[str]) -> Dict[str, int]:
-    """Index de la première affectation ``NOM=`` de chaque variable du fichier."""
-    pattern = re.compile(r"^([A-Z][A-Z0-9_]*)=")
-    index: Dict[str, int] = {}
-    for position, line in enumerate(lines):
-        match = pattern.match(line)
-        if match and match.group(1) not in index:
-            index[match.group(1)] = position
-    return index
+def _example_assignments(lines: List[str]) -> Dict[str, List[Tuple[bool, str]]]:
+    """Affectations du ``.env.example`` : nom → ``[(en commentaire, valeur brute)]``."""
+    found: Dict[str, List[Tuple[bool, str]]] = {}
+    for line in lines:
+        match = EXAMPLE_LINE_RE.match(line)
+        if match:
+            found.setdefault(match.group(2), []).append((bool(match.group(1)), match.group(3)))
+    return found
 
 
 def test_every_registered_var_in_env_example():
-    """Chaque variable de ``ENV_REGISTRY`` figure une seule fois dans le bloc
-    Albert du ``.env.example`` racine (avant ``# Flower…``), avec son défaut."""
-    lines = _env_example_lines()
-    assert lines.count(ALBERT_BLOCK_HEADER) == 1
-    assert lines.count(FLOWER_LINE) == 1
-    header_at = lines.index(ALBERT_BLOCK_HEADER)
-    flower_at = lines.index(FLOWER_LINE)
-    assert header_at < flower_at
+    """Chaque variable de ``ENV_REGISTRY`` figure une seule fois dans le
+    ``.env.example`` racine, active ou en commentaire selon le registre unique,
+    avec son défaut."""
+    from scripts.rad_settings import registry as unified
 
-    positions = _assignment_index(lines)
-    values = dotenv_values(ROOT_ENV_EXAMPLE)
-    missing = [name for name in _registry_names() if name not in positions]
+    found = _example_assignments(_env_example_lines())
+    missing = [name for name in _registry_names() if name not in found]
     assert missing == []
-    outside = [name for name in _registry_names() if not header_at < positions[name] < flower_at]
-    assert outside == []
-    duplicated = [
-        name for name in _registry_names()
-        if sum(1 for line in lines if line.startswith(name + "=")) != 1
-    ]
+    duplicated = [name for name in _registry_names() if len(found[name]) != 1]
     assert duplicated == []
-    wrong_default = [name for name, default, _meaning in ENV_REGISTRY if values.get(name) != default]
+    wrong_render = [
+        name for name in _registry_names()
+        if found[name][0][0] != (unified.BY_NAME[name].render == "commented")
+    ]
+    assert wrong_render == []
+    wrong_default = [name for name, default, _meaning in ENV_REGISTRY if found[name][0][1] != default]
     assert wrong_default == []
 
 
@@ -229,20 +229,23 @@ def test_every_albert_env_read_in_code_is_registered():
 
 
 def test_albert_live_absent_from_env_examples():
-    """``ALBERT_LIVE`` n'apparaît dans aucun des deux ``.env.example``, sous
-    aucune casse (invariant 32)."""
-    for path in (ROOT_ENV_EXAMPLE, SCRIPTS_ENV_EXAMPLE):
-        text = path.read_text(encoding="utf-8")
-        assert LIVE_SWITCH.lower() not in text.lower(), path.name
+    """``ALBERT_LIVE`` n'apparaît pas dans le ``.env.example``, sous aucune
+    casse (invariant 32) ; ``scripts/.env.example`` n'existe plus."""
+    text = ROOT_ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert LIVE_SWITCH.lower() not in text.lower()
+    assert not SCRIPTS_ENV_EXAMPLE.exists()
 
 
 def test_albert_defaults_off():
     """Albert est désactivé par défaut : exemples, registre et configuration."""
     values = dotenv_values(ROOT_ENV_EXAMPLE)
     assert values.get("ALBERT_ENABLED") == "0"
-    assert values.get("OCR_ENABLE_ALBERT") == "0"
-    assert values.get("ALBERT_API_KEY") == ""
-    assert values.get("EMBEDDING_PROVIDER") == "openai"
+    # Sélecteur historique de l'OCR (lot L5) : en commentaire, à 0.
+    assert _example_assignments(_env_example_lines())["OCR_ENABLE_ALBERT"] == [(True, "0")]
+    assert "ALBERT_API_KEY" not in values
+    assert _example_assignments(_env_example_lines())["ALBERT_API_KEY"] == [(True, "")]
+    # Sélecteur historique des embeddings (lot L6) : en commentaire, à openai.
+    assert _example_assignments(_env_example_lines())["EMBEDDING_PROVIDER"] == [(True, "openai")]
     assert values.get("DEDUP_SIM_THRESHOLD_BGE_M3") == ""
 
     defaults = {name: default for name, default, _meaning in ENV_REGISTRY}
@@ -257,10 +260,10 @@ def test_albert_defaults_off():
     assert cfg_example.enabled is False
     assert cfg_example.ocr_enabled is False
 
-    scripts_lines = SCRIPTS_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
-    assert scripts_lines[0].startswith("#")
-    assert ".env.example" in scripts_lines[0]
-    assert not any(re.match(r"^(ALBERT_|OCR_ENABLE_ALBERT=|EMBEDDING_PROVIDER=)", line) for line in scripts_lines)
+    # Plus de gabarit réduit pour les scripts : un scripts/.env remplacerait le
+    # .env racine (find_dotenv le trouverait en premier).
+    assert not SCRIPTS_ENV_EXAMPLE.exists()
+    assert not (REPO / "scripts" / ".env").exists()
 
 
 def test_docs_mention_required_topics():
@@ -316,10 +319,12 @@ LEDGER_WRITE_MARKERS = ("write_jsonl(", "USAGE_FILENAME", "albert_usage.jsonl")
 
 
 def _albert_block_preamble() -> List[str]:
-    """Lignes de commentaire du bloc Albert du ``.env.example``, avant ``ALBERT_ENABLED=``."""
+    """Commentaires collés au-dessus de ``ALBERT_ENABLED=`` dans le ``.env.example``."""
     lines = _env_example_lines()
-    start = lines.index(ALBERT_BLOCK_HEADER)
-    end = next(i for i in range(start, len(lines)) if lines[i].startswith("ALBERT_ENABLED="))
+    end = next(i for i, line in enumerate(lines) if line.startswith("ALBERT_ENABLED="))
+    start = end
+    while start > 0 and lines[start - 1].startswith("#") and not lines[start - 1].startswith(("# ---", "# =====")):
+        start -= 1
     return lines[start:end]
 
 

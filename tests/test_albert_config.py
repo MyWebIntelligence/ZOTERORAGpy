@@ -106,7 +106,9 @@ def test_defaults_off_never_reads_key():
     assert cfg.enabled is False
     assert cfg.ocr_enabled is False
     assert "ALBERT_API_KEY" not in env.accessed
-    assert env.accessed == set(FIELD_ENV_NAMES.values())
+    # Sprint « configuration unifiée » (lot L6) : la superposition des couples
+    # EMBEDDING/AUDIO lit seulement LLM_DEFAULT_SERVER en mode historique.
+    assert env.accessed == set(FIELD_ENV_NAMES.values()) | {"LLM_DEFAULT_SERVER"}
     assert all(FAKE_ALBERT_KEY not in repr(getattr(cfg, f.name)) for f in fields(cfg))
     assert (FAKE_ALBERT_KEY in repr(cfg)) is False
     assert not any("key" in f.name for f in fields(cfg))

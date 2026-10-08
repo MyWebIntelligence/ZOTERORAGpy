@@ -24,10 +24,11 @@ import logging
 import os
 from pathlib import Path
 from typing import List, Optional
-from dotenv import load_dotenv
+from scripts.rad_settings.access import load_into_environ
 
-# Charger les variables d'environnement
-load_dotenv()
+# Charger le .env sans écraser l'environnement réel ; refresh_environ() le relit
+# ensuite à chaque requête quand il change (sprint « configuration unifiée », L3).
+load_into_environ()
 
 # Chemins de base
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -127,13 +128,6 @@ class Settings:
     PASSWORD_RESET_EXPIRE_HOURS: int = int(
         os.getenv("PASSWORD_RESET_EXPIRE_HOURS", "1")
     )
-
-    # API Keys (existantes)
-    OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
-    MISTRAL_API_KEY: Optional[str] = os.getenv("MISTRAL_API_KEY")
-    PINECONE_API_KEY: Optional[str] = os.getenv("PINECONE_API_KEY")
-    WEAVIATE_API_KEY: Optional[str] = os.getenv("WEAVIATE_API_KEY")
-    QDRANT_API_KEY: Optional[str] = os.getenv("QDRANT_API_KEY")
 
     # User Registration Settings
     # Sandbox mode: when True, new users are blocked until admin approval

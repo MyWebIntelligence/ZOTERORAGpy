@@ -35,8 +35,10 @@ import numpy as np
 # Gardes d'espace vectoriel (stdlib) : même import double que les autres scripts
 # (paquet ``scripts.`` pour l'application et les tests, module plat en CLI).
 try:
+    from scripts.rad_json_stream import load_json
     from scripts.rad_providers import check_uniform_space
 except ImportError:
+    from rad_json_stream import load_json
     from rad_providers import check_uniform_space
 
 # Configure logging
@@ -634,8 +636,7 @@ def run_clustering_pipeline(
     if not os.path.exists(embeddings_json_path):
         raise FileNotFoundError(f"Embeddings file not found: {embeddings_json_path}")
 
-    with open(embeddings_json_path, "r", encoding="utf-8") as f:
-        chunks = json.load(f)
+    chunks = load_json(embeddings_json_path)  # lecture en flux (fichiers de plusieurs Go)
 
     logger.info(f"Loaded {len(chunks)} chunks from {embeddings_json_path}")
 

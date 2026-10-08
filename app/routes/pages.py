@@ -34,20 +34,38 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 router = APIRouter(tags=["Pages"])
 
 
+def _albert_audio_enabled() -> bool:
+    """Tell whether the audio import (``ALBERT_AUDIO_ENABLED``) is enabled; only called while Albert is on."""
+    try:
+        from scripts.rad_albert.config import AlbertConfig
+
+        return bool(AlbertConfig.from_env().audio_enabled)
+    except Exception:
+        return False
+
+
 def get_template_context(request: Request, user: Optional[User] = None, **kwargs) -> dict:
     """Creates the base template context.
 
     ``albert_enabled`` (``credentials.albert_enabled()``, the parser shared
     with ``AlbertConfig``, read at each request) gates the
     inline Albert blocks of the templates; while it is False the rendered HTML
-    is unchanged.
+    is unchanged. ``unified_mode`` (sprint
+    « configuration unifiée », lot L9: ``LLM_DEFAULT_SERVER`` declared) gates
+    the server fields of the steps and the « Mes choix de modèles » card;
+    while it is False the rendered HTML is unchanged.
     """
+    from app.services.user_settings import unified_mode
+
+    albert_on = albert_enabled()
     context = {
         "request": request,
         "current_user": user,
         "show_sidebar": kwargs.get("show_sidebar", False),
         "flash_messages": kwargs.get("flash_messages", []),
-        "albert_enabled": albert_enabled(),
+        "albert_enabled": albert_on,
+        "albert_audio_enabled": albert_on and _albert_audio_enabled(),
+        "unified_mode": unified_mode(),
     }
     context.update(kwargs)
     return context
@@ -145,11 +163,25 @@ async def profile_page(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_user)
 ):
-    """User profile page"""
+    """User profile page.
+
+    Sprint « configuration unifiée » (lot L9): ``server_credentials`` lists the
+    personal keys of the servers declared in block 1 (Anthropic, Google…), and
+    ``unified_mode`` shows the « Mes choix de modèles » card. Both are empty
+    or False in historical mode, where the page is unchanged.
+    """
     if not current_user:
         return RedirectResponse(url="/login", status_code=302)
 
-    context = get_template_context(request, current_user)
+    from app.core.credentials import SERVER_CREDENTIAL_BASE_URLS, server_credential_declared
+    from scripts.rad_settings.models import SERVER_DEFS
+
+    labels = {f"{sdef.key}_api_key": sdef.label for sdef in SERVER_DEFS}
+    context = get_template_context(
+        request, current_user,
+        server_credentials=[{"key": key, "label": labels.get(key, key)}
+                            for key in SERVER_CREDENTIAL_BASE_URLS if server_credential_declared(key)],
+    )
     return templates.TemplateResponse("user/profile.html", context)
 
 
@@ -227,7 +259,7 @@ async def admin_settings_page(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_user)
 ):
-    """Admin settings page"""
+    """Page Paramètres : toutes les variables du .env, dans son ordre (lot L8)."""
     if not current_user:
         return RedirectResponse(url="/login", status_code=302)
 
@@ -235,8 +267,7 @@ async def admin_settings_page(
         return RedirectResponse(url="/", status_code=302)
 
     context = get_template_context(request, current_user, show_sidebar=True)
-    # Reuse admin dashboard for now
-    return templates.TemplateResponse("admin/dashboard.html", context)
+    return templates.TemplateResponse("admin/settings.html", context)
 
 
 # --- Project pages ---
@@ -268,13 +299,27 @@ async def project_detail_page(
     # Get project owner
     owner = db.query(User).filter(User.id == project.owner_id).first()
 
+    # Sprint « configuration unifiée » (lot L9): effective couple of the
+    # citations filter for this user and declared servers (unified mode only).
+    from app.services.user_settings import (
+        declared_server_choices, effective_services, get_user_settings, unified_mode,
+    )
+
+    choice_kwargs = {}
+    if unified_mode():
+        choice_kwargs = {
+            "citations_choice": effective_services(get_user_settings(db, current_user))["citations"],
+            "declared_servers": declared_server_choices(),
+        }
+
     context = get_template_context(
         request,
         current_user,
         project=project,
         owner=owner,
         user_role=user_role or "admin",
-        default_llm_model=DEFAULT_LLM_MODEL
+        default_llm_model=DEFAULT_LLM_MODEL,
+        **choice_kwargs
     )
     return templates.TemplateResponse("user/project_detail.html", context)
 

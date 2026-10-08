@@ -47,6 +47,7 @@ from app.utils import zotero_client, llm_note_generator, zotero_parser
 
 # Import authentication and database modules
 from app.config import enforce_secure_settings, settings
+from scripts.rad_settings.access import SettingsIncompleteError, enforce_complete, refresh_environ
 from app.database.init_db import init_database
 from app.database.session import get_db
 
@@ -64,6 +65,10 @@ from app.routes.settings import router as settings_router
 from app.routes.celery_tasks import router as celery_router
 from app.routes.citations import router as citations_router, session_router as citation_sessions_router
 from app.routes.background_tasks import router as background_tasks_router
+from app.routes.albert_corpora import router as albert_corpora_router
+from app.routes.albert_audio import router as albert_audio_router
+from app.routes.admin_settings import router as admin_settings_router
+from app.routes.user_settings import router as user_settings_router
 
 from app.middleware.auth import get_optional_user, get_current_active_user
 from app.core.credentials import get_credential_or_env, get_user_credentials
@@ -121,8 +126,10 @@ async def lifespan(app: FastAPI):
     Args:
         app (FastAPI): The FastAPI application instance.
     """
-    # Startup: refuse insecure production settings (audit A09), then the database
+    # Startup: refuse insecure production settings (audit A09) and an incomplete
+    # .env (sprint « configuration unifiée », D3), then the database
     enforce_secure_settings()
+    enforce_complete_settings()
     logger.info("Initializing database...")
     init_database()
     logger.info("Database initialized successfully")
@@ -141,6 +148,38 @@ async def lifespan(app: FastAPI):
     logger.info("Stopping cleanup scheduler...")
     cleanup_scheduler.stop()
     logger.info("Application shutting down...")
+
+class SettingsRefreshMiddleware:
+    """Relit le ``.env`` quand il a changé, avant chaque requête HTTP.
+
+    Middleware ASGI pur (n'enveloppe pas les réponses en flux SSE). Coût sans
+    changement : un ``stat`` du fichier (``scripts/rad_settings/access.py``).
+    """
+
+    def __init__(self, app):
+        """Enveloppe l'application ASGI ``app`` (nom imposé par Starlette)."""
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        """Rafraîchit l'environnement pour les requêtes HTTP, puis délègue."""
+        if scope.get("type") == "http":
+            refresh_environ()
+        await self.app(scope, receive, send)
+
+
+def enforce_complete_settings() -> None:
+    """Refuse le démarrage si une variable obligatoire manque au ``.env`` (D3).
+
+    Désactivé par ``RAGPY_SETTINGS_STRICT=0`` (tests, dépannage). Le message
+    donne la commande qui écrit les variables manquantes avec leur valeur
+    actuelle.
+    """
+    try:
+        enforce_complete()
+    except SettingsIncompleteError as exc:
+        logger.critical("%s", exc)
+        raise
+
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
@@ -162,6 +201,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.add_middleware(SettingsRefreshMiddleware)
+
 # Mount static files
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
@@ -182,6 +223,12 @@ app.include_router(celery_router)
 app.include_router(citations_router)
 app.include_router(citation_sessions_router)
 app.include_router(background_tasks_router)
+# Albert (DINUM) search, sourced answers and corpora: invisible (404) while ALBERT_ENABLED=0.
+app.include_router(albert_corpora_router)
+app.include_router(albert_audio_router)
+# Page Paramètres de l'administrateur (sprint « configuration unifiée », lot L8)
+app.include_router(admin_settings_router)
+app.include_router(user_settings_router)
 
 # --- Prometheus Metrics Instrumentation ---
 if PROMETHEUS_AVAILABLE and os.getenv('ENABLE_METRICS', 'true').lower() in ('true', '1', 'yes'):

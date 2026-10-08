@@ -58,7 +58,7 @@ from typing import TYPE_CHECKING, Dict, Union, List, Optional, Tuple, Any
 from pathlib import Path
 from pydantic import BaseModel, field_validator
 from openai import OpenAI
-from dotenv import load_dotenv
+from scripts.rad_settings.access import load_into_environ
 
 from app.utils.llm_note_generator import (
     ALBERT_ACCOUNT_ERRORS,
@@ -70,7 +70,10 @@ from app.utils.llm_note_generator import (
     _get_albert_client,
     _get_llm_clients,
     albert_wire_id,
+    compat_server,
     get_llm_semaphore,
+    is_compat,
+    make_compat_client,
     resolve_llm_route,
 )
 
@@ -78,7 +81,7 @@ if TYPE_CHECKING:  # annotations only: the usage module is never imported here a
     from scripts.rad_albert.usage import UsageLedger
 
 # Load environment variables
-load_dotenv()
+load_into_environ()
 
 logger = logging.getLogger(__name__)
 
@@ -534,7 +537,8 @@ def _call_llm_api(
     openrouter_api_key: Optional[str] = None,
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> str:
     """
     Call LLM API (synchronous wrapper for OpenAI/OpenRouter/Albert).
@@ -567,22 +571,29 @@ def _call_llm_api(
             albert_usage_ledger=albert_usage_ledger
         )
 
-    openai_client, openrouter_client, default_model = _get_llm_clients(
-        openai_api_key=openai_api_key,
-        openrouter_api_key=openrouter_api_key
-    )
+    if is_compat(resolution.provider):
+        # Declared server (sprint « configuration unifiée ») : OpenAI-compatible
+        # client on the declared address, key of the same server. No fallback.
+        client = make_compat_client(resolution.provider, server_api_key)
+        model = resolution.wire_model
+        logger.info(f"Using declared server {compat_server(resolution.provider)} with model: {model}")
+    else:
+        openai_client, openrouter_client, default_model = _get_llm_clients(
+            openai_api_key=openai_api_key,
+            openrouter_api_key=openrouter_api_key
+        )
 
-    # Determine which client to use
-    if resolution.provider == PROVIDER_OPENROUTER:  # OpenRouter format
-        if not openrouter_client:
-            raise ValueError("OpenRouter client not available (missing OPENROUTER_API_KEY)")
-        client = openrouter_client
-        logger.info(f"Using OpenRouter with model: {model}")
-    else:  # OpenAI
-        if not openai_client:
-            raise ValueError("OpenAI client not available (missing OPENAI_API_KEY)")
-        client = openai_client
-        logger.info(f"Using OpenAI with model: {model}")
+        # Determine which client to use
+        if resolution.provider == PROVIDER_OPENROUTER:  # OpenRouter format
+            if not openrouter_client:
+                raise ValueError("OpenRouter client not available (missing OPENROUTER_API_KEY)")
+            client = openrouter_client
+            logger.info(f"Using OpenRouter with model: {model}")
+        else:  # OpenAI
+            if not openai_client:
+                raise ValueError("OpenAI client not available (missing OPENAI_API_KEY)")
+            client = openai_client
+            logger.info(f"Using OpenAI with model: {model}")
 
     # Make API call
     try:
@@ -776,7 +787,8 @@ async def pre_filter_citation(
     openrouter_api_key: Optional[str] = None,
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> bool:
     """
     Pré-filtrage rapide basé uniquement sur titre/abstract/source.
@@ -851,7 +863,7 @@ RÉPONSE:"""
             title,
             model=model,
             openai_api_key=openai_api_key,
-            openrouter_api_key=openrouter_api_key,
+            openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
             albert_api_key=albert_api_key,
             albert_usage_ledger=albert_usage_ledger
         )
@@ -869,7 +881,7 @@ RÉPONSE:"""
                     model=model,
                     temperature=0.1,  # Très déterministe
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key
+                    openrouter_api_key=openrouter_api_key, server_api_key=server_api_key
                 )
             )
 
@@ -898,7 +910,8 @@ async def _pre_filter_citation_albert(
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
     albert_api_key: Optional[str],
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> bool:
     """
     Branche Albert du pré-filtre : ``run_llm_slot`` et lecture par jeton exact.
@@ -965,7 +978,8 @@ async def filter_citation_with_llm(
     openrouter_api_key: Optional[str] = None,
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> Union[Dict, str]:
     """
     Filter citation using LLM with global concurrency control.
@@ -1044,7 +1058,7 @@ async def filter_citation_with_llm(
             prompt,
             model=model,
             openai_api_key=openai_api_key,
-            openrouter_api_key=openrouter_api_key,
+            openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
             albert_api_key=albert_api_key,
             albert_usage_ledger=albert_usage_ledger
         )
@@ -1069,7 +1083,7 @@ async def filter_citation_with_llm(
                         model=model,
                         temperature=0.2,
                         openai_api_key=openai_api_key,
-                        openrouter_api_key=openrouter_api_key
+                        openrouter_api_key=openrouter_api_key, server_api_key=server_api_key
                     )
                 )
 
@@ -1174,7 +1188,8 @@ async def _filter_citation_with_albert(
     openai_api_key: Optional[str],
     openrouter_api_key: Optional[str],
     albert_api_key: Optional[str],
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> Union[Dict, str]:
     """
     Albert branch of ``filter_citation_with_llm`` (``run_llm_slot``, no outer loop).

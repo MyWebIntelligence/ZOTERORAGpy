@@ -46,6 +46,14 @@ from scripts import rad_env  # noqa: E402
 from scripts.rad_albert import limiter as albert_limiter  # noqa: E402
 from scripts.rad_albert import preflight as albert_preflight  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _real_dotenv_lookup(monkeypatch):
+    """Ces tests éprouvent la recherche du ``.env`` elle-même : sans le fichier
+    neutre que le conftest désigne par ``RAGPY_ENV_FILE`` (tests hermétiques)."""
+    monkeypatch.delenv("RAGPY_ENV_FILE", raising=False)
+
+
 rc = golden.rc
 lng = golden.lng
 cfilter = golden.cfilter
@@ -66,7 +74,10 @@ HIGH_RATES = {
     "ALBERT_EMBED_RPM": "1000000",
     "ALBERT_CHAT_TPM": "1000000000",
 }
-SERVER_SECRETS = ("FLOWER_PASSWORD", "JWT_SECRET_KEY", "JWT_SECRET_KEY_PREVIOUS", "RESEND_API_KEY")
+SERVER_SECRETS = (
+    "FLOWER_PASSWORD", "JWT_SECRET_KEY", "JWT_SECRET_KEY_PREVIOUS", "LOCAL_API_KEY", "RESEND_API_KEY",
+)
+"""Secrets serveur, et clé du serveur local (administrateurs seuls ; les autres clés de serveur sont personnelles depuis le lot L9)."""
 FAKE_SERVER_DOTENV = {
     "FLOWER_PASSWORD": "fake-flower-dotenv-0001",
     "JWT_SECRET_KEY": "fake-jwt-dotenv-0001",

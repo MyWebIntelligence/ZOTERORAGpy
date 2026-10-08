@@ -18,10 +18,10 @@ import re
 import logging
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
-from dotenv import load_dotenv
+from scripts.rad_settings.access import load_into_environ
 
 # Load environment variables from .env file
-load_dotenv()
+load_into_environ()
 
 logger = logging.getLogger(__name__)
 

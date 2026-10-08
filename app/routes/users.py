@@ -11,6 +11,7 @@ Key Features:
 - Credential Management: Manage personal API keys (masked for security).
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
@@ -18,11 +19,14 @@ from app.models.user import User
 from app.models.audit import AuditAction, create_audit_log
 from app.schemas.user import UserResponse, UserUpdate, UserCredentialsResponse, UserCredentialsUpdate, CredentialValue
 from app.middleware.auth import get_current_active_user
+from app.core.url_policy import PERSONAL_URL_KEYS, personal_url_error
 from app.core.credentials import (
     get_masked_credentials,
     update_user_credentials,
     albert_enabled,
     visible_credential_keys,
+    SERVER_CREDENTIAL_BASE_URLS,
+    server_credential_declared,
 )
 
 # Identifiant Albert : masque des reponses et ignore en ecriture quand Albert est desactive.
@@ -216,6 +220,21 @@ async def update_my_credentials(
     # Albert desactive : la cle Albert n'est ni ecrite ni effacee.
     if not albert_enabled():
         updates.pop(ALBERT_CREDENTIAL_KEY, None)
+    # Serveur non declare au bloc 1 du .env (lot L9) : sa cle est ignoree.
+    for key in SERVER_CREDENTIAL_BASE_URLS:
+        if not server_credential_declared(key):
+            updates.pop(key, None)
+
+    # Adresses contactees par le serveur au nom d'un non-administrateur (lot L9,
+    # surface SSRF) : https public obligatoire ; refus global, rien n'est ecrit.
+    if not current_user.is_admin:
+        invalid = {
+            key: reason for key in PERSONAL_URL_KEYS
+            if updates.get(key) and (reason := personal_url_error(updates[key]))
+        }
+        if invalid:
+            detail = " ; ".join(f"{key} : {reason}" for key, reason in invalid.items())
+            return JSONResponse(status_code=400, content={"detail": detail, "invalid_keys": sorted(invalid)})
 
     if not updates:
         return {"message": "Aucune modification"}

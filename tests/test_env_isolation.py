@@ -33,6 +33,14 @@ for _p in (RAGPY_ROOT, SCRIPTS_DIR):
 from scripts import rad_env  # noqa: E402
 from tests.albert_fakes import FAKE_ALBERT_KEY  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _real_dotenv_lookup(monkeypatch):
+    """Ces tests éprouvent la recherche du ``.env`` elle-même : sans le fichier
+    neutre que le conftest désigne par ``RAGPY_ENV_FILE`` (tests hermétiques)."""
+    monkeypatch.delenv("RAGPY_ENV_FILE", raising=False)
+
+
 DENY_VAR = "RAGPY_DOTENV_DENY"
 
 # Contenu du .env factice : deux secrets et une variable de configuration.

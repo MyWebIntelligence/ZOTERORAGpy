@@ -66,6 +66,18 @@ RUN if [ "$INSTALL_LOCAL_OCR" = "true" ]; then \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# AUDIO (sprint Albert R2) — ffmpeg, OPTIONNEL : conversion (m4a, ogg, flac…) et
+# découpage des enregistrements longs avant la transcription Albert. Sans lui,
+# seuls les mp3 et wav de 20 Mo au plus sont transcrits. Activer :
+# INSTALL_FFMPEG=true dans .env puis docker compose up -d --build.
+ARG INSTALL_FFMPEG=false
+RUN if [ "$INSTALL_FFMPEG" = "true" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+        && rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "ffmpeg non installé (INSTALL_FFMPEG=false)"; \
+    fi
+
 # Téléchargement du modèle spaCy français
 RUN python -m spacy download fr_core_news_md
 

@@ -459,13 +459,9 @@ LEDGER_ENTRY_POINTS = (
 def test_ledger_is_trailing_keyword_only_default_none():
     """Le journal est le dernier paramètre, nommé seulement, ``None`` par défaut, après la clé Albert."""
     for func in LEDGER_ENTRY_POINTS:
-        params = list(inspect.signature(func).parameters.values())
-        assert params[-1].name == "albert_usage_ledger", func.__name__
-        assert params[-1].kind is inspect.Parameter.KEYWORD_ONLY, func.__name__
-        assert params[-1].default is None, func.__name__
-        # La clé Albert reste juste avant : les appels positionnels historiques ne bougent pas.
-        assert params[-2].name == "albert_api_key", func.__name__
-        assert params[-2].default is None, func.__name__
+        # La clé Albert reste le dernier paramètre positionnel : les appels positionnels
+        # historiques ne bougent pas ; journal et clé du serveur déclaré sont nommés seulement.
+        _assert_trailing_keyword_params(func)
 
 
 def test_positional_calls_without_ledger_still_work(albert_on):
@@ -825,3 +821,16 @@ def test_g11_golden_unchanged_with_ledger_argument(enabled, monkeypatch):
     _assert_matches_golden_json("g11_llm_call_kwargs.json", entries)
     assert trap.touched == []
     assert builds == [] and fake.calls == []
+
+
+def _assert_trailing_keyword_params(func):
+    """``albert_api_key`` (défaut None) puis seulement des paramètres nommés à défaut None :
+    le journal Albert et la clé du serveur déclaré (sprint « configuration unifiée »)."""
+    params = list(inspect.signature(func).parameters.values())
+    names = [p.name for p in params]
+    index = names.index("albert_api_key")
+    assert params[index].default is None, func.__name__
+    trailing = params[index + 1:]
+    assert {p.name for p in trailing} == {"albert_usage_ledger", "server_api_key"}, func.__name__
+    for param in trailing:
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is None, (func.__name__, param.name)

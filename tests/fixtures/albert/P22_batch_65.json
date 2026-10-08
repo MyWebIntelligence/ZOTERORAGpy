@@ -1,0 +1,27 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/rerank",
+    "body_summary": {
+      "model": "bge-reranker-v2-m3",
+      "query": "Comment la sociologie décrit-elle la production des savoirs scientifiques ?",
+      "documents": [
+        "Texte numéro 0.",
+        "Texte numéro 1.",
+        "Texte numéro 2.",
+        "… (+62 éléments, 65 au total)"
+      ]
+    }
+  },
+  "status": 413,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": {
+      "error": "batch size 65 > maximum allowed batch size 64",
+      "error_type": "Validation"
+    }
+  },
+  "synthetic": false
+}

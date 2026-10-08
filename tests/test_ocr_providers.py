@@ -20,6 +20,7 @@ Run with: pytest tests/test_ocr_providers.py -v
 """
 
 import os
+import re
 import subprocess
 import types
 from unittest import mock
@@ -35,6 +36,7 @@ from scripts.rad_dataframe import (
     _MistralOcr,
     _MistralTransientError,
     _MistralAuthError,
+    _MistralRetriesExhausted,
     OCRExtractionError,
     _classify_mistral_http_error,
     _ocr_density_warning,
@@ -581,6 +583,201 @@ class TestMistralPartialFlowsToOcrResult:
         assert result.provider == "mistral"
         assert result.partial is False
         assert result.error is None
+
+
+# ===========================================================================
+# HTTP 429 — dedicated ladder, shared cooldown, later pass for split parts
+# ===========================================================================
+
+@pytest.fixture(autouse=True)
+def _fresh_mistral_cooldown(monkeypatch):
+    """Every test starts without a shared Mistral cooldown (module state)."""
+    monkeypatch.setattr(rad, "_mistral_cooldown", {"until": 0.0})
+
+
+class _FakeClock:
+    """Stand-in for the ``time`` module: ``sleep`` records the delay and
+    advances ``monotonic``, so cooldown arithmetic is deterministic."""
+
+    def __init__(self):
+        """Start the clock at an arbitrary instant with no sleep recorded."""
+        self.now = 1000.0
+        self.sleeps = []
+
+    def monotonic(self):
+        """Return the fake current instant."""
+        return self.now
+
+    def sleep(self, seconds):
+        """Record ``seconds`` and move the clock forward by as much."""
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def __getattr__(self, name):
+        """Delegate any other attribute to the real ``time`` module."""
+        return getattr(rad.time, name)
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    """Fake clock, zero jitter and the default 429 ladder (10 s → 120 s)."""
+    clock = _FakeClock()
+    monkeypatch.setattr(rad, "time", clock)
+    monkeypatch.setattr(rad, "random", types.SimpleNamespace(uniform=lambda a, b: 0.0))
+    monkeypatch.setattr(rad, "MISTRAL_OCR_RETRY_BACKOFF", 3.0)
+    monkeypatch.setattr(rad, "MISTRAL_OCR_RETRY_MAX_BACKOFF", 60.0)
+    monkeypatch.setattr(rad, "MISTRAL_OCR_RATE_LIMIT_BACKOFF", 10.0)
+    monkeypatch.setattr(rad, "MISTRAL_OCR_RATE_LIMIT_MAX_BACKOFF", 120.0)
+    return clock
+
+
+def _transient(status: int, retry_after=None) -> _MistralTransientError:
+    """Transient Mistral error as the classifier builds it for ``status``."""
+    err = _MistralTransientError(f"Mistral OCR erreur transitoire {status}")
+    err.status = status
+    err.retry_after = retry_after
+    return err
+
+
+def _exhausted_429() -> _MistralRetriesExhausted:
+    """Part failure after every retry hit a 429."""
+    return _MistralRetriesExhausted("OCR Mistral échoué après 5 tentatives: 429", status=429)
+
+
+class TestRateLimitClassificationAndLadder:
+    def test_classifier_tags_the_http_status(self):
+        assert _classify_mistral_http_error(_http_error(429), "b.pdf").status == 429
+        assert _classify_mistral_http_error(_http_error(503), "b.pdf").status == 503
+
+    def test_rate_limit_ladder(self, fake_clock):
+        waits = [_mistral_retry_wait(a, rate_limited=True) for a in range(5)]
+        assert waits == [10.0, 20.0, 40.0, 80.0, 120.0]
+
+    def test_retry_after_uses_the_rate_limit_ceiling(self, fake_clock):
+        assert _mistral_retry_wait(0, retry_after=90.0, rate_limited=True) == 90.0
+        assert _mistral_retry_wait(0, retry_after=90.0) == 60.0
+
+
+class TestRateLimitRetryLoop:
+    def test_429_follows_the_rate_limit_ladder_then_succeeds(self, fake_clock, monkeypatch):
+        monkeypatch.setattr(rad, "MISTRAL_OCR_RETRIES", 2)
+        once = mock.Mock(side_effect=[_transient(429), _transient(429), "# ok"])
+        monkeypatch.setattr(rad, "_mistral_upload_and_ocr_once", once)
+        assert rad._mistral_upload_and_ocr("part.pdf") == "# ok"
+        assert fake_clock.sleeps == [10.0, 20.0]
+        assert rad._mistral_cooldown["until"] == 0.0   # lifted after the success
+
+    def test_429_exhaustion_carries_status_and_delays_the_next_call(self, fake_clock, monkeypatch):
+        monkeypatch.setattr(rad, "MISTRAL_OCR_RETRIES", 1)
+        once = mock.Mock(side_effect=[_transient(429), _transient(429), "# ok"])
+        monkeypatch.setattr(rad, "_mistral_upload_and_ocr_once", once)
+        with pytest.raises(_MistralRetriesExhausted) as excinfo:
+            rad._mistral_upload_and_ocr("part2.pdf")
+        assert excinfo.value.status == 429
+        assert isinstance(excinfo.value, OCRExtractionError)
+        assert fake_clock.sleeps == [10.0]
+        # The last 429 left a 20 s cooldown: the next part waits it out first.
+        assert rad._mistral_upload_and_ocr("part3.pdf") == "# ok"
+        assert fake_clock.sleeps == [10.0, 20.0]
+
+    def test_503_exhaustion_opens_no_cooldown(self, fake_clock, monkeypatch):
+        monkeypatch.setattr(rad, "MISTRAL_OCR_RETRIES", 1)
+        once = mock.Mock(side_effect=[_transient(503), _transient(503)])
+        monkeypatch.setattr(rad, "_mistral_upload_and_ocr_once", once)
+        with pytest.raises(_MistralRetriesExhausted) as excinfo:
+            rad._mistral_upload_and_ocr("part.pdf")
+        assert excinfo.value.status == 503
+        assert fake_clock.sleeps == [3.0]
+        assert rad._mistral_cooldown["until"] == 0.0
+
+    def test_cooldown_opened_by_another_thread_delays_the_attempt(self, fake_clock, monkeypatch):
+        rad._mistral_cooldown["until"] = fake_clock.now + 30.0
+        once = mock.Mock(return_value="# ok")
+        monkeypatch.setattr(rad, "_mistral_upload_and_ocr_once", once)
+        assert rad._mistral_upload_and_ocr("part.pdf") == "# ok"
+        assert fake_clock.sleeps == [30.0]
+
+
+class TestSplitRateLimitedParts:
+    @pytest.fixture(autouse=True)
+    def _passes(self, force_split, fake_clock, monkeypatch):
+        """Split path with one later pass after a 60 s delay, breaker at 2."""
+        monkeypatch.setattr(rad, "MISTRAL_SPLIT_RETRY_PASSES", 1)
+        monkeypatch.setattr(rad, "MISTRAL_SPLIT_RETRY_DELAY", 60.0)
+        monkeypatch.setattr(rad, "MISTRAL_SPLIT_MAX_RATE_LIMITED_PARTS", 2)
+
+    @staticmethod
+    def _parts_called(ocr_mock):
+        """Part numbers in call order, read from the temporary part names."""
+        names = [os.path.basename(c.args[0]) for c in ocr_mock.call_args_list]
+        return [int(re.search(r"_part_p(\d+)-", n).group(1)) for n in names]
+
+    def test_rate_limited_part_is_retried_after_the_others(self, tmp_path, fake_clock, monkeypatch):
+        ocr = mock.Mock(side_effect=[
+            "<!-- Page 1 -->\nAAA", _exhausted_429(), "<!-- Page 1 -->\nCCC",
+            "<!-- Page 1 -->\nBBB",
+        ])
+        monkeypatch.setattr(rad, "_mistral_upload_and_ocr", ocr)
+        out = _extract_text_with_mistral(_build_pdf(tmp_path, 3, "book"))
+        assert self._parts_called(ocr) == [1, 2, 3, 2]
+        assert fake_clock.sleeps == [60.0]
+        assert out.partial is False and out.error is None
+        assert (out.pages_done, out.pages_total) == (3, 3)
+        # Document order and global page numbering are preserved.
+        assert out.text.index("AAA") < out.text.index("BBB") < out.text.index("CCC")
+        assert "<!-- Page 2 -->\nBBB" in out.text
+
+    def test_part_still_rate_limited_is_reported_with_its_cause(self, tmp_path, monkeypatch):
+        ocr = mock.Mock(side_effect=[
+            "<!-- Page 1 -->\nAAA", _exhausted_429(), "<!-- Page 1 -->\nCCC", _exhausted_429(),
+        ])
+        monkeypatch.setattr(rad, "_mistral_upload_and_ocr", ocr)
+        out = _extract_text_with_mistral(_build_pdf(tmp_path, 3, "book"))
+        assert out.partial is True
+        assert (out.pages_done, out.pages_total) == (2, 3)
+        assert "OCR ÉCHOUÉ" in out.text
+        assert out.error == (
+            "OCR Mistral partiel : 1/3 parts en échec "
+            "(2/3 (pages 2-2, limite de débit 429))."
+        )
+
+    def test_other_exhausted_failure_is_not_retried(self, tmp_path, fake_clock, monkeypatch):
+        ocr = mock.Mock(side_effect=[
+            "<!-- Page 1 -->\nAAA",
+            _MistralRetriesExhausted("OCR Mistral échoué: 503", status=503),
+            "<!-- Page 1 -->\nCCC",
+        ])
+        monkeypatch.setattr(rad, "_mistral_upload_and_ocr", ocr)
+        out = _extract_text_with_mistral(_build_pdf(tmp_path, 3, "book"))
+        assert self._parts_called(ocr) == [1, 2, 3]
+        assert fake_clock.sleeps == []
+        assert out.partial is True
+        assert out.error == "OCR Mistral partiel : 1/3 parts en échec (2/3 (pages 2-2))."
+
+    def test_persistent_rate_limit_stops_the_pass(self, tmp_path, monkeypatch):
+        # Parts 1 and 2 exhaust on a 429: parts 3 and 4 are not sent in the
+        # first pass, and the later pass OCRs all four.
+        ocr = mock.Mock(side_effect=[
+            _exhausted_429(), _exhausted_429(),
+            "<!-- Page 1 -->\nP1", "<!-- Page 1 -->\nP2",
+            "<!-- Page 1 -->\nP3", "<!-- Page 1 -->\nP4",
+        ])
+        monkeypatch.setattr(rad, "_mistral_upload_and_ocr", ocr)
+        out = _extract_text_with_mistral(_build_pdf(tmp_path, 4, "book"))
+        assert self._parts_called(ocr) == [1, 2, 1, 2, 3, 4]
+        assert out.partial is False
+        assert (out.pages_done, out.pages_total) == (4, 4)
+
+    def test_no_later_pass_when_disabled(self, tmp_path, fake_clock, monkeypatch):
+        monkeypatch.setattr(rad, "MISTRAL_SPLIT_RETRY_PASSES", 0)
+        ocr = mock.Mock(side_effect=[
+            "<!-- Page 1 -->\nAAA", _exhausted_429(), "<!-- Page 1 -->\nCCC",
+        ])
+        monkeypatch.setattr(rad, "_mistral_upload_and_ocr", ocr)
+        out = _extract_text_with_mistral(_build_pdf(tmp_path, 3, "book"))
+        assert self._parts_called(ocr) == [1, 2, 3]
+        assert fake_clock.sleeps == []
+        assert out.partial is True
 
 
 # ===========================================================================

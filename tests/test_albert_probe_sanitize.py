@@ -397,7 +397,7 @@ def test_collection_group_cleans_up_on_account_error(tmp_path, monkeypatch):
     assert [r.method for r in fake.requests if r.url.path == "/v1/collections/500"] == ["DELETE", "GET"]
 
 
-# --- Run complet simulé (P1 à P21) ------------------------------------------------------
+# --- Run complet simulé (P1 à P26) ------------------------------------------------------
 
 KNOWN_CHAT_MODELS = {
     "gpt-oss-120b": "gpt-oss-120b", "openweight-large": "gpt-oss-120b",
@@ -411,7 +411,7 @@ RATE_HEADERS = {"x-ratelimit-limit-requests": "100", "x-ratelimit-remaining-requ
 
 
 class FullFakeAlbert(FakeAlbert):
-    """API simulée couvrant toutes les routes des sondes P1 à P21."""
+    """API simulée couvrant toutes les routes des sondes P1 à P26 (P22 à P26 par FakeAlbert)."""
 
     def __init__(self, ocr_access=False):
         """Ajoute documents, chunks et compteurs d'usage à l'état simulé."""
@@ -583,14 +583,14 @@ class FullFakeAlbert(FakeAlbert):
         return httpx.Response(200, json={"models": [{"id": "bge-m3", "status": "healthy"}]})
 
 
-def test_full_mocked_run_executes_21_probes_without_script_error(tmp_path, monkeypatch, capsys):
+def test_full_mocked_run_executes_26_probes_without_script_error(tmp_path, monkeypatch, capsys):
     fake = FullFakeAlbert(ocr_access=False)
     rc = run_main(["--all", "--out", "out", "--fixtures-dir", "fx", "--report", "rapport.md"], fake, monkeypatch,
                   tmp_path)
     captured = capsys.readouterr()
     assert FAKE_ALBERT_KEY not in captured.out and FAKE_ALBERT_KEY not in captured.err
     out = captured.out.strip().splitlines()
-    assert out[-1] == "SONDES: 21 exécutées, 0 erreur de script"
+    assert out[-1] == "SONDES: 26 exécutées, 0 erreur de script"
     assert rc == 0
     fx = tmp_path / "fx"
     decisions = json.loads((fx / "decisions.json").read_text(encoding="utf-8"))

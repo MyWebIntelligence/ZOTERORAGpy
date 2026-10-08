@@ -81,6 +81,9 @@ ROLE_BUCKETS: Mapping[str, str] = {
     "embed": "embed",
     "embeddings": "embed",
     "push": "embed",
+    "answer": "recode",
+    "vision": "recode",
+    "audio": "audio",
 }
 
 # Budget → champ de ``AlbertConfig`` donnant sa rafale de départ (concurrence du budget).
@@ -89,6 +92,7 @@ BUCKET_CONCURRENCY: Mapping[str, str] = {
     "notes": "notes_concurrency",
     "ocr": "ocr_concurrency",
     "embed": "embed_concurrency",
+    "audio": "audio_concurrency",
 }
 
 
@@ -499,7 +503,10 @@ class RedisWindowLimiter:
     Redis injoignable : repli sur un seau local (un seul WARNING par panne),
     puis nouvelle tentative Redis toutes les ``retry_interval`` secondes ;
     dès que Redis répond, la fenêtre partagée reprend et le seau local est
-    abandonné (un INFO le signale).
+    abandonné (un INFO le signale). Avec ``require_redis``
+    (``ALBERT_LIMITER_REQUIRE_REDIS=1``), aucun seau local : la panne lève
+    ``AlbertQuotaExhausted`` (arrêt explicite du job, aucun appel envoyé), car
+    un seau par processus ne garantit pas le plafond du compte.
 
     Attributes:
         name: nom du budget (partie des clés Redis ; même nom = fenêtre partagée).
@@ -526,6 +533,7 @@ class RedisWindowLimiter:
         sleep: Callable[[float], Any] = time.sleep,
         retry_interval: float = REDIS_RETRY_SECONDS,
         burst: Optional[float] = None,
+        require_redis: bool = False,
     ) -> None:
         """Prépare le limiteur (aucune connexion avant le premier ``acquire``).
 
@@ -545,7 +553,9 @@ class RedisWindowLimiter:
             retry_interval: délai (secondes) avant de retenter Redis après un
                 échec (défaut ``REDIS_RETRY_SECONDS``).
             burst: rafale de départ du seau local de repli (voir ``TokenBucket``).
+            require_redis: refuse tout repli local (panne Redis = arrêt explicite).
         """
+        self.require_redis = bool(require_redis)
         self.base_rpm = _positive(rpm)
         self.base_tpm = _positive(tpm)
         self.share = _share(share, process_share)
@@ -594,7 +604,23 @@ class RedisWindowLimiter:
         Un seul WARNING par panne : un nouvel échec de la tentative suivante
         garde le même seau local (son état est conservé) et n'est journalisé
         qu'en DEBUG.
+
+        Raises:
+            AlbertQuotaExhausted: ``require_redis`` est vrai (aucun repli local).
         """
+        if self.require_redis:
+            from .errors import AlbertQuotaExhausted  # import paresseux : module stdlib
+
+            logger.error(
+                "Limiteur Albert %s : Redis indisponible (%s) et ALBERT_LIMITER_REQUIRE_REDIS=1 : "
+                "aucun nouvel appel Albert.", self.name, type(exc).__name__,
+            )
+            raise AlbertQuotaExhausted(
+                "Limiteur partagé Albert indisponible (Redis injoignable) et "
+                "ALBERT_LIMITER_REQUIRE_REDIS=1 : aucun nouvel appel n'est envoyé ; "
+                "rétablir Redis puis relancer le traitement.",
+                endpoint=None,
+            ) from exc
         with self._lock:
             if self._fallback is None:
                 logger.warning(
@@ -759,7 +785,7 @@ def limiter_role(role: Any, model: Any = None) -> Any:
     Le budget suit le modèle envoyé : un modèle à raisonnement (gpt-oss, 10 RPM
     mesurés, D1) consomme le budget ``notes`` même sous un rôle du budget
     ``recode`` (``recode``, ``citation``, ``book_structure``, ``long_context``,
-    ``chat``). Tous les autres cas gardent le rôle donné : un repli ministral
+    ``chat``, ``answer``, ``vision``). Tous les autres cas gardent le rôle donné : un repli ministral
     du rôle ``notes`` reste sur ``notes`` ; OCR et embeddings ne changent jamais.
 
     Args:
@@ -791,6 +817,8 @@ def role_rates(role: Any, cfg: Any) -> Tuple[Optional[str], Optional[float], Opt
         return bucket, getattr(cfg, "ocr_rpm", None), None
     if bucket == "embed":
         return bucket, getattr(cfg, "embed_rpm", None), None
+    if bucket == "audio":
+        return bucket, getattr(cfg, "audio_rpm", None), None
     return None, None, None
 
 
@@ -859,14 +887,17 @@ def get_limiter(
     backend = getattr(cfg, "limiter_backend", "local")
     url = resolve_redis_url(cfg, env=env) if backend == "redis" else None
     dedicated = clock is not None or sleep is not None or redis_client is not None
-    key = (backend, bucket, rpm, tpm, share, url, burst)
+    require_redis = bool(getattr(cfg, "limiter_require_redis", False)) and backend == "redis"
+    key = (backend, bucket, rpm, tpm, share, url, burst, require_redis)
     if not dedicated:
         with _REGISTRY_LOCK:
             existing = _REGISTRY.get(key)
             if existing is not None:
                 return existing
     if backend == "redis":
-        kwargs: Dict[str, Any] = {"share": share, "url": url, "client": redis_client, "burst": burst}
+        kwargs: Dict[str, Any] = {
+            "share": share, "url": url, "client": redis_client, "burst": burst, "require_redis": require_redis,
+        }
         if clock is not None:
             kwargs["clock"] = clock
         if sleep is not None:

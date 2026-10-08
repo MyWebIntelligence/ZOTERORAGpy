@@ -126,7 +126,7 @@ def init_database():
     any manual schema adjustments.
     """
     # Import des modèles pour qu'ils soient enregistrés dans Base.metadata
-    from app.models import user, project, audit, pipeline_session, background_task  # noqa: F401
+    from app.models import user, project, audit, pipeline_session, background_task, albert_corpus, user_setting  # noqa: F401
 
     logger.info("Initializing database...")
 

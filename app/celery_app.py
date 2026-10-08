@@ -49,7 +49,14 @@ Usage:
 import os
 import logging
 from celery import Celery
+from celery.signals import task_prerun
 from kombu import Queue
+
+from scripts.rad_settings.access import load_into_environ, refresh_environ
+
+# Charger le .env (sans écraser l'environnement réel) : un worker lancé hors
+# Docker n'a pas d'env_file (sprint « configuration unifiée », L3).
+load_into_environ()
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +94,12 @@ celery_app = Celery(
         'app.tasks.monitoring'
     ]
 )
+
+@task_prerun.connect
+def _refresh_settings_before_task(**_kwargs):
+    """Relit le ``.env`` s'il a changé, avant chaque tâche."""
+    refresh_environ()
+
 
 # Celery configuration
 celery_app.conf.update(

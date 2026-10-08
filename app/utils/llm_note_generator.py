@@ -62,7 +62,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Optional
 from openai import OpenAI
-from dotenv import load_dotenv, dotenv_values, find_dotenv
+from dotenv import dotenv_values, find_dotenv
+
+from scripts.rad_settings.access import load_into_environ
 
 if TYPE_CHECKING:  # annotations only: the usage module is never imported here at runtime
     from scripts.rad_albert.usage import UsageLedger
@@ -82,6 +84,9 @@ try:
         PROVIDER_ALBERT,
         PROVIDER_OPENROUTER,
         ProviderResolution,
+        compat_server,
+        is_compat,
+        make_compat_client,
         resolve_llm_provider,
     )
 except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
@@ -99,11 +104,14 @@ except ImportError:  # scripts/ itself on sys.path (CLI import pattern)
         PROVIDER_ALBERT,
         PROVIDER_OPENROUTER,
         ProviderResolution,
+        compat_server,
+        is_compat,
+        make_compat_client,
         resolve_llm_provider,
     )
 
 # Load environment variables from .env file
-load_dotenv()
+load_into_environ()
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +245,9 @@ def resolve_default_llm_model(openrouter_model: Optional[str] = None) -> str:
 def _get_llm_clients(
     openai_api_key: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    openrouter_model: Optional[str] = None
+    openrouter_model: Optional[str] = None,
+    *,
+    server_api_key: Optional[str] = None
 ) -> Tuple[Optional[OpenAI], Optional[OpenAI], str]:
     """
     Initializes and returns LLM clients from explicit credentials only.
@@ -359,8 +369,15 @@ def resolve_llm_route(model: Optional[str]) -> ProviderResolution:
     Raises:
         AlbertDisabledError: ``albert/…`` requested while Albert is disabled.
         ValueError: ``albert/`` without a model identifier.
+        AlbertPolicyError: ``ALBERT_DATA_POLICY=albert_only`` and a model that
+            is not ``albert/<id>`` (defence in depth: the routes substitute the
+            Albert default first; no-op while ``compatible``).
     """
     text = "" if model is None else str(model)
+    if (os.environ.get("ALBERT_DATA_POLICY") or "").strip():
+        from app.core.albert_policy import require_albert_model
+
+        require_albert_model(text, "notes")
     albert_enabled = False
     if text[:len(ALBERT_PREFIX)].lower() == ALBERT_PREFIX:
         albert_enabled = AlbertConfig.from_env().enabled
@@ -1555,7 +1572,8 @@ def _generate_with_llm(
     openrouter_api_key: Optional[str] = None,
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> str:
     """
     Generate note content using LLM.
@@ -1600,41 +1618,49 @@ def _generate_with_llm(
             albert_usage_ledger=albert_usage_ledger,
         )
 
-    # Get clients from the credentials passed by the caller (no env fallback)
-    openai_client, openrouter_client, default_model = _get_llm_clients(
-        openai_api_key=openai_api_key,
-        openrouter_api_key=openrouter_api_key
-    )
-
-    # Use default model if no model specified
-    if not model:
-        model = default_model
-        logger.info(f"No model specified, using default: {model}")
-        resolution = resolve_llm_route(model)
-        if resolution.provider == PROVIDER_ALBERT:
-            return _generate_with_albert(
-                prompt, resolution.wire_model, temperature=temperature, mode=mode, albert_api_key=albert_api_key,
-                albert_usage_ledger=albert_usage_ledger,
-            )
-
-    # Detect which client to use (OpenRouter models have format "provider/model")
-    use_openrouter = resolution.provider == PROVIDER_OPENROUTER
-
-    if use_openrouter:
-        if not openrouter_client:
-            logger.warning(f"OpenRouter model '{model}' requested but client not initialized. Falling back to OpenAI.")
-            if not openai_client:
-                raise ValueError("No LLM client available (neither OpenAI nor OpenRouter). Check your API keys in Settings.")
-            active_client = openai_client
-            model = "gpt-4o-mini"
-        else:
-            active_client = openrouter_client
-            logger.info(f"Using OpenRouter with model: {model}")
+    # Declared server (sprint « configuration unifiée ») : routed model
+    # « @<server>:<model> », OpenAI-compatible client on the declared address,
+    # with the key of the same server passed by the caller. No fallback.
+    if resolution is not None and is_compat(resolution.provider):
+        active_client = make_compat_client(resolution.provider, server_api_key)
+        model = resolution.wire_model
+        logger.info(f"Using declared server {compat_server(resolution.provider)} with model: {model}")
     else:
-        if not openai_client:
-            raise ValueError("OpenAI client not initialized (OPENAI_API_KEY missing). Check your API keys in Settings.")
-        active_client = openai_client
-        logger.info(f"Using OpenAI with model: {model}")
+        # Get clients from the credentials passed by the caller (no env fallback)
+        openai_client, openrouter_client, default_model = _get_llm_clients(
+            openai_api_key=openai_api_key,
+            openrouter_api_key=openrouter_api_key, server_api_key=server_api_key
+        )
+
+        # Use default model if no model specified
+        if not model:
+            model = default_model
+            logger.info(f"No model specified, using default: {model}")
+            resolution = resolve_llm_route(model)
+            if resolution.provider == PROVIDER_ALBERT:
+                return _generate_with_albert(
+                    prompt, resolution.wire_model, temperature=temperature, mode=mode, albert_api_key=albert_api_key,
+                    albert_usage_ledger=albert_usage_ledger,
+                )
+
+        # Detect which client to use (OpenRouter models have format "provider/model")
+        use_openrouter = resolution.provider == PROVIDER_OPENROUTER
+
+        if use_openrouter:
+            if not openrouter_client:
+                logger.warning(f"OpenRouter model '{model}' requested but client not initialized. Falling back to OpenAI.")
+                if not openai_client:
+                    raise ValueError("No LLM client available (neither OpenAI nor OpenRouter). Check your API keys in Settings.")
+                active_client = openai_client
+                model = "gpt-4o-mini"
+            else:
+                active_client = openrouter_client
+                logger.info(f"Using OpenRouter with model: {model}")
+        else:
+            if not openai_client:
+                raise ValueError("OpenAI client not initialized (OPENAI_API_KEY missing). Check your API keys in Settings.")
+            active_client = openai_client
+            logger.info(f"Using OpenAI with model: {model}")
 
     # Set max_tokens based on mode
     max_tokens = NOTE_MODE_MAX_TOKENS.get(mode, 16000)
@@ -1777,7 +1803,8 @@ def build_note_html(
     openrouter_api_key: Optional[str] = None,
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> Tuple[str, str]:
     """
     Build a reading note in HTML format with a unique sentinel.
@@ -1833,7 +1860,7 @@ def build_note_html(
     # Get clients from the credentials passed by the caller (no env fallback)
     openai_client, openrouter_client, default_model = _get_llm_clients(
         openai_api_key=openai_api_key,
-        openrouter_api_key=openrouter_api_key
+        openrouter_api_key=openrouter_api_key, server_api_key=server_api_key
     )
 
     # Use default model if no model specified
@@ -1866,7 +1893,7 @@ def build_note_html(
                     model=model,
                     mode=mode,
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key,
+                    openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                     albert_api_key=albert_api_key,
                     albert_usage_ledger=albert_usage_ledger
                 )
@@ -1899,7 +1926,8 @@ def build_abstract_text(
     openrouter_api_key: Optional[str] = None,
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> str:
     """
     Build an abstract/summary text to enrich Zotero's abstractNote field.
@@ -1938,7 +1966,7 @@ def build_abstract_text(
     # Get clients from the credentials passed by the caller (no env fallback)
     openai_client, openrouter_client, default_model = _get_llm_clients(
         openai_api_key=openai_api_key,
-        openrouter_api_key=openrouter_api_key
+        openrouter_api_key=openrouter_api_key, server_api_key=server_api_key
     )
 
     # Use default model if no model specified
@@ -1975,7 +2003,7 @@ def build_abstract_text(
             model=model,
             mode="short",
             openai_api_key=openai_api_key,
-            openrouter_api_key=openrouter_api_key,
+            openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
             albert_api_key=albert_api_key,
             albert_usage_ledger=albert_usage_ledger
         )
@@ -2044,7 +2072,8 @@ async def build_note_html_async(
     openrouter_api_key: Optional[str] = None,
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> Tuple[str, str]:
     """
     Async version of build_note_html with global concurrency control.
@@ -2099,7 +2128,7 @@ async def build_note_html_async(
                     use_llm=use_llm,
                     mode=mode,
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key,
+                    openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                     albert_api_key=albert_api_key
                 )
             )
@@ -2116,7 +2145,8 @@ async def build_abstract_text_async(
     openrouter_api_key: Optional[str] = None,
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> str:
     """
     Async version of build_abstract_text with global concurrency control.
@@ -2156,7 +2186,7 @@ async def build_abstract_text_async(
                     text_content=text_content,
                     model=model,
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key,
+                    openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                     albert_api_key=albert_api_key
                 )
             )

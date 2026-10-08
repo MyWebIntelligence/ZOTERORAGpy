@@ -293,6 +293,34 @@ async def update_user(
     )
 
 
+def _albert_corpora_inventory(db: Session, user_id: int) -> list:
+    """
+    Albert collections still registered for a user (never raises).
+
+    Args:
+        db: Database session.
+        user_id: The user about to be deleted.
+
+    Returns:
+        ``[{corpus_id, collection_id, collection_name, base_url}]`` of the
+        corpora neither deleted nor orphaned (empty when Albert was never used).
+    """
+    try:
+        from app.models.albert_corpus import CORPUS_STATUS_DELETED, CORPUS_STATUS_ORPHANED, AlbertCorpus
+
+        rows = db.query(AlbertCorpus).filter(
+            AlbertCorpus.owner_user_id == user_id,
+            AlbertCorpus.status.notin_([CORPUS_STATUS_DELETED, CORPUS_STATUS_ORPHANED]),
+        ).all()
+    except Exception:
+        return []
+    return [
+        {"corpus_id": c.id, "collection_id": c.collection_id, "collection_name": c.collection_name,
+         "base_url": c.base_url}
+        for c in rows
+    ]
+
+
 @router.delete("/users/{user_id}")
 async def delete_user(
     user_id: int,
@@ -334,17 +362,45 @@ async def delete_user(
                 detail="Impossible de supprimer le dernier administrateur"
             )
 
+    # Corpus Albert (DINUM) : les textes déposés restent chez Albert après la
+    # suppression du compte. Sans confirmation explicite (?albert_data=keep),
+    # la suppression est refusée et l'inventaire des collections est renvoyé ;
+    # avec confirmation, l'inventaire est consigné dans l'audit.
+    albert_inventory = _albert_corpora_inventory(db, user.id)
+    if albert_inventory and request.query_params.get("albert_data", "").strip().lower() != "keep":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": (
+                    "Cet utilisateur possède des corpus Albert (DINUM) : leurs textes restent stockés chez Albert "
+                    "après la suppression du compte. Supprimez d'abord ces collections (avec la clé de "
+                    "l'utilisateur), ou confirmez la conservation avec albert_data=keep."
+                ),
+                "albert_collections": albert_inventory,
+            },
+        )
+
     # Log d'audit
+    details = {"email": user.email, "deleted_by": admin.email}
+    if albert_inventory:
+        details["albert_collections_kept"] = albert_inventory
     create_audit_log(
         db=db,
         action=AuditAction.USER_DELETE,
         user_id=admin.id,
         resource_type="user",
         resource_id=user.id,
-        details={"email": user.email, "deleted_by": admin.email},
+        details=details,
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("User-Agent")
     )
+
+    # Corpus Albert conservés : orphelins (l'identifiant de l'utilisateur, réutilisable
+    # par SQLite, ne doit plus donner accès à rien).
+    if albert_inventory:
+        from app.services.albert_access import orphan_user_corpora
+
+        orphan_user_corpora(db, user.id)
 
     # Supprimer l'utilisateur
     db.delete(user)

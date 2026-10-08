@@ -206,7 +206,8 @@ async def process_citations_parallel(
     max_concurrent_fetches: int = MAX_CONCURRENT_FETCHES,
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> AsyncGenerator[Tuple[str, Dict[str, Any]], None]:
     """
     Traite les citations en parallèle avec streaming SSE immédiat.
@@ -301,7 +302,7 @@ async def process_citations_parallel(
                 collection_description=config.get("collection_description", ""),
                 model=config.get("model", DEFAULT_LLM_MODEL),
                 openai_api_key=openai_api_key,
-                openrouter_api_key=openrouter_api_key,
+                openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                 albert_api_key=albert_api_key,
                 albert_usage_ledger=albert_usage_ledger
             )
@@ -336,7 +337,7 @@ async def process_citations_parallel(
                     collection_description=config.get("collection_description", ""),
                     model=config.get("model", DEFAULT_LLM_MODEL),
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key,
+                    openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                     albert_api_key=albert_api_key,
                     albert_usage_ledger=albert_usage_ledger
                 )
@@ -536,7 +537,8 @@ async def _filter_batch_parallel(
     openrouter_api_key: Optional[str],
     albert_api_key: Optional[str] = None,
     *,
-    albert_usage_ledger: Optional["UsageLedger"] = None
+    albert_usage_ledger: Optional["UsageLedger"] = None,
+    server_api_key: Optional[str] = None
 ) -> List[CitationProcessingResult]:
     """
     Filter un batch de citations avec LLM en parallèle.
@@ -602,7 +604,7 @@ async def _filter_batch_parallel(
                     collection_description=config.get("collection_description", ""),
                     model=config.get("model", "gpt-4o-mini"),
                     openai_api_key=openai_api_key,
-                    openrouter_api_key=openrouter_api_key,
+                    openrouter_api_key=openrouter_api_key, server_api_key=server_api_key,
                     albert_api_key=albert_api_key,
                     albert_usage_ledger=albert_usage_ledger
                 )

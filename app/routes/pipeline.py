@@ -98,30 +98,53 @@ class SessionListResponse(BaseModel):
 EMBEDDING_SPACE_FIELDS = ("embedding_provider", "embedding_model", "embedding_dim")
 
 
-def _embedding_space_fields(chunks) -> dict:
+def _session_file_counts(session_path: str) -> dict:
     """
-    Return the vector space fields present in a chunks file, if any.
+    Rows of ``output.csv`` and chunks of the JSON stage files of a session.
 
-    The first chunk carrying at least one of ``EMBEDDING_SPACE_FIELDS`` gives
-    the values (a file holds one space only: the connectors refuse mixed
-    files). Files of the default space have none of these fields, so the
-    result is empty and the session status JSON is unchanged.
+    Called through ``asyncio.to_thread``. The chunk files are read element by
+    element (``app/utils/json_stream.cached_summary``, cached per file
+    version); above 256 MB the count runs in the background and is ``None``
+    until it is ready (the page opens without waiting).
 
     Args:
-        chunks: The parsed chunks file (a list of dicts).
+        session_path: Session folder.
 
     Returns:
-        A dict holding the fields found (possibly empty).
+        ``{file name: {"exists", "count", "fields"}}`` (``count`` ``None`` when
+        unknown or unreadable, ``fields`` the embedding space fields found).
     """
-    if not isinstance(chunks, list):
-        return {}
-    for chunk in chunks:
-        if not isinstance(chunk, dict):
-            continue
-        found = {name: chunk[name] for name in EMBEDDING_SPACE_FIELDS if name in chunk}
-        if found:
-            return found
-    return {}
+    from app.utils.json_stream import cached_summary
+
+    counts = {}
+    csv_path = os.path.join(session_path, "output.csv")
+    entry = {"exists": os.path.exists(csv_path), "count": None, "fields": {}}
+    if entry["exists"]:
+        try:
+            import csv
+            import sys
+
+            import pandas as pd
+            pd.read_csv(csv_path, nrows=0)
+            # Records, not lines: a whole book's text spans thousands of lines in one quoted cell.
+            csv.field_size_limit(sys.maxsize)
+            with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                entry["count"] = sum(1 for _ in csv.reader(f)) - 1  # minus header
+        except Exception:
+            pass
+    counts["output.csv"] = entry
+    for name in ("output_chunks.json", "output_chunks_with_embeddings.json",
+                 "output_chunks_with_embeddings_sparse.json"):
+        path = os.path.join(session_path, name)
+        entry = {"exists": os.path.exists(path), "count": None, "fields": {}}
+        if entry["exists"]:
+            fields = () if name == "output_chunks.json" else EMBEDDING_SPACE_FIELDS
+            summary = cached_summary(path, fields)
+            if summary is not None:
+                entry["count"] = summary["count"]
+                entry["fields"] = summary["fields"]
+        counts[name] = entry
+    return counts
 
 
 def verify_project_access(db: Session, project_id: int, user: User) -> Project:
@@ -802,63 +825,26 @@ async def get_session_files(
     files_status["upload"]["files"] = all_files
     files_status["upload"]["completed"] = len(all_files) > 0
 
+    # Counts read off the event loop, chunk files streamed (never loaded whole :
+    # a 1.8 GB embeddings file got the web process killed by the memory limit).
+    counts = await asyncio.to_thread(_session_file_counts, session_path)
+
     # Check extraction (output.csv)
-    csv_path = os.path.join(session_path, "output.csv")
-    if os.path.exists(csv_path):
+    if counts["output.csv"]["exists"]:
         files_status["extraction"]["exists"] = True
         files_status["extraction"]["completed"] = True
-        try:
-            import pandas as pd
-            df = pd.read_csv(csv_path, nrows=0)
-            # Count rows more efficiently
-            with open(csv_path, 'r', encoding='utf-8-sig') as f:
-                row_count = sum(1 for _ in f) - 1  # minus header
-            files_status["extraction"]["row_count"] = row_count
-        except Exception:
-            pass
+        files_status["extraction"]["row_count"] = counts["output.csv"]["count"]
 
-    # Check chunking (output_chunks.json)
-    chunks_path = os.path.join(session_path, "output_chunks.json")
-    if os.path.exists(chunks_path):
-        files_status["chunking"]["exists"] = True
-        files_status["chunking"]["completed"] = True
-        try:
-            import json
-            with open(chunks_path, 'r', encoding='utf-8') as f:
-                chunks = json.load(f)
-            files_status["chunking"]["chunk_count"] = len(chunks)
-        except Exception:
-            pass
-
-    # Check dense embeddings (output_chunks_with_embeddings.json)
-    dense_path = os.path.join(session_path, "output_chunks_with_embeddings.json")
-    if os.path.exists(dense_path):
-        files_status["dense_embedding"]["exists"] = True
-        files_status["dense_embedding"]["completed"] = True
-        try:
-            import json
-            with open(dense_path, 'r', encoding='utf-8') as f:
-                chunks = json.load(f)
-            files_status["dense_embedding"]["chunk_count"] = len(chunks)
-            # embedding_* exposed only when present (non-default space)
-            files_status["dense_embedding"].update(_embedding_space_fields(chunks))
-        except Exception:
-            pass
-
-    # Check sparse embeddings (output_chunks_with_embeddings_sparse.json)
-    sparse_path = os.path.join(session_path, "output_chunks_with_embeddings_sparse.json")
-    if os.path.exists(sparse_path):
-        files_status["sparse_embedding"]["exists"] = True
-        files_status["sparse_embedding"]["completed"] = True
-        try:
-            import json
-            with open(sparse_path, 'r', encoding='utf-8') as f:
-                chunks = json.load(f)
-            files_status["sparse_embedding"]["chunk_count"] = len(chunks)
-            # embedding_* exposed only when present (non-default space)
-            files_status["sparse_embedding"].update(_embedding_space_fields(chunks))
-        except Exception:
-            pass
+    for stage, name in (("chunking", "output_chunks.json"),
+                        ("dense_embedding", "output_chunks_with_embeddings.json"),
+                        ("sparse_embedding", "output_chunks_with_embeddings_sparse.json")):
+        if counts[name]["exists"]:
+            files_status[stage]["exists"] = True
+            files_status[stage]["completed"] = True
+            files_status[stage]["chunk_count"] = counts[name]["count"]
+            if stage != "chunking":
+                # embedding_* exposed only when present (non-default space)
+                files_status[stage].update(counts[name]["fields"])
 
     # Determine current stage
     current_stage = "upload"

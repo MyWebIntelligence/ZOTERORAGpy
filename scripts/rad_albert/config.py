@@ -35,7 +35,7 @@ import os
 import re
 from dataclasses import dataclass, fields as dataclass_fields
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,12 @@ OCR_MODES = ("auto", "chat", "ocr")
 REASONING_EFFORTS = ("low", "medium", "high")
 LIMITER_BACKENDS = ("local", "redis")
 TOKEN_ESTIMATORS = ("chars", "tiktoken")
+DATA_POLICIES = ("compatible", "albert_only")
+"""Politiques d'inférence : ``compatible`` (défaut, fournisseurs historiques
+conservés) ou ``albert_only`` (Albert et traitement local seulement)."""
+
+AUDIO_MAX_MB = 20.0
+"""Taille maximale (Mo) d'un fichier envoyé à ``/v1/audio/transcriptions``."""
 
 EMBED_BATCH_MAX = 64
 """Plafond serveur d'un lot d'embeddings (D12 : 65 donne un 413)."""
@@ -138,6 +144,40 @@ def _env_choice(value: Any, default: str, choices: Iterable[str]) -> str:
         return default
     text = text.lower()
     return text if text in tuple(choices) else default
+
+
+_POLICY_WARNED: set = set()
+_STRICT_ALIASES = ("albert_only", "albertonly", "strict", "albert", "souverain")
+
+
+def normalise_data_policy(value: Any) -> str:
+    """Politique d'inférence normalisée ; une valeur inconnue **échoue fermée**.
+
+    ``compatible`` (ou vide) donne ``compatible`` ; ``albert_only`` et ses
+    variantes (casse, tirets, espaces : ``albert-only``, ``Albert Only``,
+    ``strict``) donnent ``albert_only`` ; toute autre valeur donne aussi
+    ``albert_only``, avec un WARNING unique : une faute de frappe dans un
+    interrupteur de conformité ne doit jamais rouvrir les fournisseurs externes.
+
+    Args:
+        value: valeur brute de ``ALBERT_DATA_POLICY``.
+
+    Returns:
+        ``compatible`` ou ``albert_only``.
+    """
+    text = _env_str(value, None)
+    if text is None:
+        return "compatible"
+    key = re.sub(r"[\s-]+", "_", text.lower())
+    if key == "compatible":
+        return "compatible"
+    if key not in _STRICT_ALIASES and key not in _POLICY_WARNED:
+        _POLICY_WARNED.add(key)
+        logger.warning(
+            "ALBERT_DATA_POLICY=%r inconnue : politique albert_only appliquée par précaution "
+            "(valeurs admises : compatible, albert_only).", text,
+        )
+    return "albert_only"
 
 
 def _at_least(value: Any, minimum: float, default: Any) -> Any:
@@ -340,6 +380,22 @@ def validate_metadata_fields(fields: Any, dedup_meta_fields: Any) -> Tuple[str, 
 _REWRITE_WARNED: set = set()
 
 
+def _settings_overlay(env: Mapping[str, str]) -> Dict[str, str]:
+    """Variables ``ALBERT_*`` imposées par les couples serveur + modèle déclarés (lot L6).
+
+    Import paresseux à double motif (``scripts.`` ou chemin des scripts) ;
+    paquet absent : aucune superposition.
+    """
+    try:
+        from scripts.rad_settings.capabilities import albert_overlay
+    except ImportError:
+        try:
+            from rad_settings.capabilities import albert_overlay
+        except ImportError:
+            return {}
+    return albert_overlay(env)
+
+
 @dataclass(frozen=True)
 class AlbertConfig:
     """Tous les drapeaux ``ALBERT_*`` du sprint, figés. Défauts = Albert OFF.
@@ -402,6 +458,23 @@ class AlbertConfig:
     usage_log: bool = True
     preflight: bool = True
     token_estimator: str = "chars"
+    # Sprint R2 : politique, audio, reprises OCR (recherche, réponses sourcées et rerank
+    # retirés le 2026-10-03 : RAGpy prépare les corpus, les questions sont posées ailleurs).
+    data_policy: str = "compatible"
+    limiter_require_redis: bool = False
+    audio_enabled: bool = False
+    audio_model: str = "whisper-large-v3"
+    audio_rpm: int = 45
+    audio_concurrency: int = 1
+    audio_language: str = "fr"
+    audio_segment_seconds: int = 600
+    timeout_audio: float = 300.0
+    ocr_checkpoint: bool = True
+
+    @property
+    def strict(self) -> bool:
+        """Vrai pour la politique ``albert_only`` (Albert et traitement local seulement)."""
+        return self.data_policy == "albert_only"
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "AlbertConfig":
@@ -420,10 +493,18 @@ class AlbertConfig:
         Returns:
             L'instance figée.
 
+        Mode unifié (sprint « configuration unifiée », lot L6) : les couples
+        ``EMBEDDING_*`` et ``AUDIO_*`` déclarés imposent leurs
+        variables ``ALBERT_*`` (``rad_settings.capabilities.albert_overlay``).
+
         Raises:
-            ValueError: Albert ON avec une ``ALBERT_BASE_URL`` refusée.
+            ValueError: Albert ON avec une ``ALBERT_BASE_URL`` refusée, ou couple
+                de service déclaré invalide (``ServiceConfigError``).
         """
         env = os.environ if env is None else env
+        overlay = _settings_overlay(env)
+        if overlay:
+            env = {**env, **overlay}
         d = cls()
 
         def get(field_name: str) -> Any:
@@ -531,6 +612,20 @@ class AlbertConfig:
             usage_log=_env_bool(get("usage_log"), d.usage_log),
             preflight=_env_bool(get("preflight"), d.preflight),
             token_estimator=_env_choice(get("token_estimator"), d.token_estimator, TOKEN_ESTIMATORS),
+            data_policy=normalise_data_policy(get("data_policy")),
+            limiter_require_redis=_env_bool(get("limiter_require_redis"), d.limiter_require_redis),
+            audio_enabled=_env_bool(get("audio_enabled"), d.audio_enabled),
+            audio_model=_env_str(get("audio_model"), d.audio_model),
+            audio_rpm=_at_least(_env_int(get("audio_rpm"), d.audio_rpm), 1, d.audio_rpm),
+            audio_concurrency=_at_least(
+                _env_int(get("audio_concurrency"), d.audio_concurrency), 1, d.audio_concurrency
+            ),
+            audio_language=_audio_language(get("audio_language"), d.audio_language),
+            audio_segment_seconds=_bounded_int(
+                get("audio_segment_seconds"), d.audio_segment_seconds, 30, 3600
+            ),
+            timeout_audio=_positive_timeout(get("timeout_audio"), d.timeout_audio),
+            ocr_checkpoint=_env_bool(get("ocr_checkpoint"), d.ocr_checkpoint),
         )
 
 
@@ -538,6 +633,27 @@ def _positive_timeout(value: Any, default: float) -> float:
     """Délai HTTP strictement positif ; ``default`` sinon."""
     number = _env_float(value, default)
     return number if number > 0 else default
+
+
+def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
+    """Entier compris entre ``low`` et ``high`` (bornes incluses) ; ``default`` sinon."""
+    number = _env_int(value, default)
+    return number if low <= number <= high else default
+
+
+_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}$|^[a-z]{4,20}$")
+
+
+def _audio_language(value: Any, default: str) -> str:
+    """Langue de transcription : code ISO 639-1 (``fr``) ou nom anglais (``french``),
+    en minuscules ; ``auto`` ou une valeur vide laissent la détection au modèle (``''``)."""
+    text = _env_str(value, None)
+    if text is None:
+        return default
+    text = text.lower()
+    if text == "auto":
+        return ""
+    return text if _LANGUAGE_RE.match(text) else default
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +715,16 @@ FIELD_ENV_NAMES: Mapping[str, str] = MappingProxyType(
         "usage_log": "ALBERT_USAGE_LOG",
         "preflight": "ALBERT_PREFLIGHT",
         "token_estimator": "ALBERT_TOKEN_ESTIMATOR",
+        "data_policy": "ALBERT_DATA_POLICY",
+        "limiter_require_redis": "ALBERT_LIMITER_REQUIRE_REDIS",
+        "audio_enabled": "ALBERT_AUDIO_ENABLED",
+        "audio_model": "ALBERT_AUDIO_MODEL",
+        "audio_rpm": "ALBERT_AUDIO_RPM",
+        "audio_concurrency": "ALBERT_AUDIO_CONCURRENCY",
+        "audio_language": "ALBERT_AUDIO_LANGUAGE",
+        "audio_segment_seconds": "ALBERT_AUDIO_SEGMENT_SECONDS",
+        "timeout_audio": "ALBERT_TIMEOUT_AUDIO",
+        "ocr_checkpoint": "ALBERT_OCR_CHECKPOINT",
     }
 )
 """Champ d'``AlbertConfig`` → variable d'environnement lue par ``from_env``."""
@@ -716,6 +842,26 @@ ENV_REGISTRY: Tuple[Tuple[str, str, str], ...] = (
      "1 = contrôle du compte et des modèles (/v1/me, /v1/models) avant un traitement Albert."),
     ("ALBERT_TOKEN_ESTIMATOR", "chars",
      "Estimation des tokens d'entrée du limiteur (chars = longueur / 3)."),
+    ("ALBERT_DATA_POLICY", "compatible",
+     "compatible = fournisseurs historiques conservés ; albert_only = inférence Albert et traitement local seulement (OpenAI, OpenRouter et Mistral direct refusés) ; valeur inconnue = albert_only."),
+    ("ALBERT_OCR_CHECKPOINT", "1",
+     "1 = reprise page par page de l'OCR LightOnOCR (pages validées gardées dans le dossier de sortie, jamais renvoyées)."),
+    ("ALBERT_LIMITER_REQUIRE_REDIS", "0",
+     "1 = avec ALBERT_LIMITER_BACKEND=redis, refuse tout nouvel appel tant que Redis est injoignable (au lieu du seau local)."),
+    ("ALBERT_AUDIO_ENABLED", "0",
+     "1 = import et transcription d'enregistrements audio par Albert (whisper-large-v3)."),
+    ("ALBERT_AUDIO_MODEL", "whisper-large-v3",
+     "Modèle de transcription (type automatic-speech-recognition, id épinglé)."),
+    ("ALBERT_AUDIO_RPM", "45",
+     "Requêtes par minute du rôle audio."),
+    ("ALBERT_AUDIO_CONCURRENCY", "1",
+     "Segments audio transcrits simultanément par processus."),
+    ("ALBERT_AUDIO_LANGUAGE", "fr",
+     "Langue des enregistrements (code ISO 639-1 ; auto = détection par le modèle)."),
+    ("ALBERT_AUDIO_SEGMENT_SECONDS", "600",
+     "Durée (secondes) des segments découpés par ffmpeg pour les fichiers longs (30 à 3600)."),
+    ("ALBERT_TIMEOUT_AUDIO", "300",
+     "Délai HTTP (secondes) de la transcription d'un segment."),
 )
 """(nom, défaut, sens) de chaque variable Albert lue par le code (hors ``ALBERT_LIVE``)."""
 

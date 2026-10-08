@@ -185,6 +185,24 @@
                         </div>
                         <div class="form-hint">API souveraine de l'Etat (DINUM), reservee aux agents publics eligibles ; la cle expire au plus tard un an apres sa creation</div>
                     </div>
+                </div>{% endif %}{% if server_credentials %}
+
+                <!-- Autres serveurs declares par l'administrateur (lot L9) -->
+                <div class="credentials-section">
+                    <h3 class="credentials-section-title">
+                        <i class="bi bi-hdd-network"></i>
+                        Autres serveurs
+                    </h3>
+                    {% for cred in server_credentials %}
+                    <div class="form-group">
+                        <label for="cred_{{ cred.key }}" class="form-label">{{ cred.label }} API Key</label>
+                        <div class="input-with-status">
+                            <input type="password" class="form-input" id="cred_{{ cred.key }}" autocomplete="off">
+                            <span class="credential-status" id="status_{{ cred.key }}"></span>
+                        </div>
+                    </div>
+                    {% endfor %}
+                    <div class="form-hint">Serveurs dont l'administrateur a declare l'adresse ; votre cle sert quand un de vos choix de modeles les designe.</div>
                 </div>{% endif %}
 
                 <!-- Vector Databases -->
@@ -302,7 +320,38 @@
                 </div>
             </form>
         </div>
-    </div>
+    </div>{% if unified_mode %}
+
+    <!-- Mes choix de modeles (sprint « configuration unifiee », lot L9) -->
+    <div class="card" id="models">
+        <div class="card-header">
+            <h2 class="card-title">
+                <i class="bi bi-sliders"></i>
+                Mes choix de modèles
+            </h2>
+        </div>
+        <div class="card-body">
+            <p class="credentials-intro text-secondary">
+                Pour chaque service, choisissez un serveur et un modèle. Laissés vides, ils suivent la
+                configuration du serveur (affichée en grisé). Le nom du modèle est envoyé tel quel au serveur
+                retenu ; un modèle seul utilise le serveur par défaut. Le champ d'une étape l'emporte sur ces choix.
+            </p>
+            <form id="modelChoicesForm">
+                <div id="modelChoicesRows"></div>
+                <div class="form-hint" id="modelChoicesError" style="color: var(--color-danger, #c0392b);"></div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-check-lg"></i>
+                        Enregistrer mes choix
+                    </button>
+                    <button type="button" class="btn btn-secondary" onclick="loadModelChoices()">
+                        <i class="bi bi-arrow-clockwise"></i>
+                        Reinitialiser
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>{% endif %}
 
     <!-- Change Password -->
     <div class="card">
@@ -738,7 +787,8 @@ async function deleteAccount() {
 const credentialKeys = [
     'openai_api_key', 'openrouter_api_key', 'openrouter_model',
     'mistral_api_key', 'mistral_model', 'mistral_url',{% if albert_enabled %}
-    'albert_api_key',{% endif %}
+    'albert_api_key',{% endif %}{% for cred in server_credentials %}
+    '{{ cred.key }}',{% endfor %}
     'pinecone_api_key', 'pinecone_env',
     'weaviate_api_key', 'weaviate_url',
     'qdrant_api_key', 'qdrant_url',
@@ -838,6 +888,186 @@ function scrollToCredentials() {
 // Load profile and credentials on page load
 loadProfile();
 loadCredentials();
-scrollToCredentials();
+scrollToCredentials();{% if unified_mode %}
+
+// --- Mes choix de modeles (lot L9) ---
+
+let modelChoicesState = null;
+
+function authHeaders(extra) {
+    return Object.assign({'Authorization': 'Bearer ' + localStorage.getItem('access_token')}, extra || {});
+}
+
+function serviceVars(service) {
+    const prefix = service === 'ocr' ? 'OCR' : 'LLM_' + service.toUpperCase();
+    return {server: prefix + '_SERVER', model: prefix + '_MODEL'};
+}
+
+function renderModelChoices(state) {
+    const rows = document.getElementById('modelChoicesRows');
+    rows.textContent = '';
+    Object.keys(state.labels).forEach(service => {
+        const vars = serviceVars(service);
+        const eff = state.services[service] || {};
+        const group = document.createElement('div');
+        group.className = 'credentials-section';
+        const title = document.createElement('h3');
+        title.className = 'credentials-section-title';
+        title.textContent = state.labels[service];
+        group.appendChild(title);
+        const row = document.createElement('div');
+        row.className = 'form-row';
+
+        const serverGroup = document.createElement('div');
+        serverGroup.className = 'form-group';
+        const serverLabel = document.createElement('label');
+        serverLabel.className = 'form-label';
+        serverLabel.htmlFor = 'choice_' + vars.server;
+        serverLabel.textContent = 'Serveur';
+        const select = document.createElement('select');
+        select.className = 'form-select';
+        select.id = 'choice_' + vars.server;
+        select.dataset.name = vars.server;
+        const inherit = document.createElement('option');
+        inherit.value = '';
+        inherit.textContent = 'Configuration du serveur' + (eff.server_label && !state.settings[vars.server] ? ' (' + eff.server_label + ')' : '');
+        select.appendChild(inherit);
+        const family = service === 'ocr' ? 'ocr' : 'chat';
+        const servers = state.servers.filter(srv => !srv.families || srv.families.includes(family));
+        if (service === 'ocr') servers.push({key: 'local', label: 'Moteurs internes (docling, pymupdf)', url: 'local'});
+        servers.forEach(srv => {
+            const opt = document.createElement('option');
+            opt.value = srv.url;
+            opt.textContent = srv.label + (srv.url === 'local' ? '' : ' — ' + srv.url);
+            select.appendChild(opt);
+        });
+        select.value = state.settings[vars.server] || '';
+        serverGroup.appendChild(serverLabel);
+        serverGroup.appendChild(select);
+
+        const modelGroup = document.createElement('div');
+        modelGroup.className = 'form-group';
+        const modelLabel = document.createElement('label');
+        modelLabel.className = 'form-label';
+        modelLabel.htmlFor = 'choice_' + vars.model;
+        modelLabel.textContent = 'Modèle';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'form-input';
+        input.id = 'choice_' + vars.model;
+        input.dataset.name = vars.model;
+        input.autocomplete = 'off';
+        input.value = state.settings[vars.model] || '';
+        input.placeholder = eff.model || '';
+        modelGroup.appendChild(modelLabel);
+        modelGroup.appendChild(input);
+
+        row.appendChild(serverGroup);
+        row.appendChild(modelGroup);
+        group.appendChild(row);
+        const hint = document.createElement('div');
+        hint.className = 'form-hint';
+        if (eff.error) {
+            hint.textContent = 'Configuration incomplète : ' + eff.error;
+        } else if (eff.legacy) {
+            hint.textContent = service === 'ocr' ? 'Aucun moteur déclaré : chaîne OCR historique.' : 'Mode historique.';
+        } else {
+            hint.textContent = 'Effectif : ' + (eff.model || '?') + ' sur ' + (eff.server_label || eff.server || '?');
+        }
+        group.appendChild(hint);
+        rows.appendChild(group);
+    });
+}
+
+async function loadModelChoices() {
+    document.getElementById('modelChoicesError').textContent = '';
+    try {
+        const response = await fetch('/users/me/settings', {headers: authHeaders()});
+        if (!response.ok) return;
+        modelChoicesState = await response.json();
+        renderModelChoices(modelChoicesState);
+    } catch (error) {
+        console.error('Error loading model choices:', error);
+    }
+}
+
+document.getElementById('modelChoicesForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    if (!modelChoicesState) return;
+    const changes = {};
+    document.querySelectorAll('#modelChoicesRows [data-name]').forEach(el => {
+        const value = el.value.trim();
+        if (value !== (modelChoicesState.settings[el.dataset.name] || '')) {
+            changes[el.dataset.name] = value;
+        }
+    });
+    if (Object.keys(changes).length === 0) {
+        showToast('Aucune modification a enregistrer', 'info');
+        return;
+    }
+    const errorBox = document.getElementById('modelChoicesError');
+    errorBox.textContent = '';
+    try {
+        const response = await fetch('/users/me/settings', {
+            method: 'PUT',
+            headers: authHeaders({'Content-Type': 'application/json'}),
+            body: JSON.stringify({changes: changes})
+        });
+        const data = await response.json();
+        if (response.ok) {
+            modelChoicesState = data;
+            renderModelChoices(data);
+            showToast('Choix enregistres', 'success');
+        } else {
+            errorBox.textContent = Object.entries(data.errors || {}).map(([k, v]) => k + ' : ' + v).join(' ; ')
+                || data.detail || 'Erreur lors de la mise a jour';
+        }
+    } catch (error) {
+        console.error('Error saving model choices:', error);
+        showToast('Erreur lors de la sauvegarde', 'error');
+    }
+});
+
+// « Vider » : efface une valeur enregistree (une chaine vide la supprime).
+function addCredentialClearButtons() {
+    credentialKeys.forEach(key => {
+        const input = document.getElementById('cred_' + key);
+        if (!input || document.getElementById('clear_' + key)) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.id = 'clear_' + key;
+        btn.className = 'btn btn-secondary btn-sm';
+        btn.textContent = 'Vider';
+        btn.title = 'Effacer la valeur enregistree';
+        btn.addEventListener('click', async () => {
+            try {
+                const response = await fetch('/users/me/credentials', {
+                    method: 'PUT',
+                    headers: authHeaders({'Content-Type': 'application/json'}),
+                    body: JSON.stringify({[key]: ''})
+                });
+                if (response.ok) {
+                    showToast('Valeur effacee : ' + key, 'success');
+                    input.placeholder = '';
+                    loadCredentials();
+                } else {
+                    const data = await response.json();
+                    showToast(data.detail || 'Erreur lors de la mise a jour', 'error');
+                }
+            } catch (error) {
+                console.error('Error clearing credential:', error);
+                showToast('Erreur lors de la sauvegarde', 'error');
+            }
+        });
+        const anchor = input.closest('.input-with-status') || input;
+        anchor.insertAdjacentElement('afterend', btn);
+    });
+}
+
+addCredentialClearButtons();
+loadModelChoices();
+if (window.location.hash === '#models') {
+    document.getElementById('models').scrollIntoView({behavior: 'smooth', block: 'start'});
+}{% endif %}
 </script>
 {% endblock %}

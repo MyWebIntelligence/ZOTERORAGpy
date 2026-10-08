@@ -359,6 +359,25 @@ def resolve_chat_model(model: Optional[str]) -> Any:
     return _albert_modules().resolve_llm_provider(model or DEFAULT_CHUNKING_MODEL, albert_enabled=albert_enabled())
 
 
+def policy_chat_model(model: Optional[str]) -> Optional[str]:
+    """Recoding model allowed by ``ALBERT_DATA_POLICY`` (unchanged while ``compatible``).
+
+    Args:
+        model: Recoding model entered (empty: default).
+
+    Returns:
+        The model; with ``albert_only``, an empty model becomes the Albert
+        default of the recoding role.
+
+    Raises:
+        AlbertPolicyError: Model of another provider with ``albert_only``, or
+            ``albert_only`` while Albert is disabled (``ValueError`` subclass).
+    """
+    from app.core.albert_policy import apply_chat_policy
+
+    return apply_chat_policy(model, "recode")
+
+
 def chunking_selects_albert(model: Optional[str]) -> bool:
     """True when the recoding model selects Albert (``albert/<id>``, Albert ON).
 
@@ -410,8 +429,14 @@ def resolve_embedding_provider(value: Optional[str]) -> Optional[str]:
         AlbertDisabledError: ``albert`` requested while Albert is disabled.
         ValueError: Unknown provider while Albert is enabled.
     """
+    from app.core.albert_policy import apply_embedding_policy, check_configuration, strict_policy
+
     albert_disabled_error = _albert_modules().AlbertDisabledError
     requested = (value or "").strip()
+    if strict_policy():
+        # albert_only: bge-m3 only (empty -> albert); refused while Albert is disabled.
+        check_configuration()
+        return apply_embedding_policy(requested)
     if not albert_enabled():
         if requested.lower() == ALBERT_DB_CHOICE:
             raise albert_disabled_error(
@@ -428,18 +453,58 @@ def resolve_embedding_provider(value: Optional[str]) -> Optional[str]:
     return name
 
 
+def user_ocr_values(user: User, *, session_factory: Optional[Callable[[], Any]] = None) -> Dict[str, str]:
+    """Personal OCR choices of ``user`` (lot L9: ``OCR_SERVER``, ``OCR_MODEL``), read in the worker.
+
+    Args:
+        user: The submitting user.
+        session_factory: Session factory (default: ``SessionLocal`` of this module).
+
+    Returns:
+        The non-empty personal OCR choices (empty dict when none, unreadable,
+        or in historical mode, where no personal choice applies).
+    """
+    from app.services.user_settings import get_user_settings, unified_mode
+
+    if not unified_mode():
+        return {}
+
+    factory = session_factory or SessionLocal
+    try:
+        db = factory()
+        try:
+            values = get_user_settings(db, user)
+        finally:
+            db.close()
+    except Exception as exc:  # the .env choice still applies; never a silent other engine
+        logger.warning(f"Personal OCR choices of user {getattr(user, 'id', '?')} unreadable: {type(exc).__name__}")
+        return {}
+    return {k: v for k, v in values.items() if k in ("OCR_SERVER", "OCR_MODEL")}
+
+
 def ocr_albert_active(user: User) -> bool:
-    """True when the Albert OCR link runs for ``user`` (Albert ON, OCR on, key).
+    """True when the Albert OCR runs for ``user`` (Albert ON, then explicit engine or historical link).
+
+    Explicit OCR (``OCR_MODEL`` declared, sprint « configuration unifiée »):
+    True when the engine or its declared fallback is Albert. Historical chain:
+    ``OCR_ENABLE_ALBERT`` and an Albert key available to the user.
 
     Args:
         user: The submitting user.
 
     Returns:
-        True when ``ALBERT_ENABLED``, ``OCR_ENABLE_ALBERT`` and an Albert key
-        available to the user are all set (nothing is read while Albert is OFF).
+        True when the Albert OCR may run (nothing is read while Albert is OFF).
     """
     if not albert_enabled():
         return False
+    from app.services.ocr_target import explicit_ocr_target, explicit_ocr_uses_albert
+
+    try:
+        choice = explicit_ocr_target(user_ocr_values(user))
+    except ValueError:
+        choice = None  # refused configuration: the submission reports it
+    if choice is not None:
+        return explicit_ocr_uses_albert(choice)
     if not albert_setting("ocr_enabled"):
         return False
     return bool(get_credential_or_env(user, ALBERT_CREDENTIAL_KEY))
@@ -465,6 +530,8 @@ def build_task_env(
     model: Optional[str] = None,
     db_choice: Optional[str] = None,
     embedding_provider: Optional[str] = None,
+    embedding_server: Optional[str] = None,
+    embedding_model: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the subprocess environment of a pipeline stage for ``user``.
 
@@ -487,6 +554,8 @@ def build_task_env(
         model: Recoding model (chunking only).
         db_choice: Target database (vectordb only).
         embedding_provider: Resolved dense provider (dense only, None = default).
+        embedding_server: Server field of the dense step (lot L6, unified mode).
+        embedding_model: Model field of the dense step (lot L6, unified mode).
 
     Returns:
         The environment returned by ``build_subprocess_env``.
@@ -494,7 +563,59 @@ def build_task_env(
     Raises:
         CredentialMissingError: A required credential is missing.
         AlbertDisabledError: Albert selected while it is disabled.
-        ValueError: Unknown stage, database or provider.
+        ValueError: Unknown stage, database or provider; invalid embedding
+            couple (``ServiceConfigError``) or refused by the policy.
+    """
+    from app.core.albert_policy import check_configuration, restrict_subprocess_env, strict_policy
+
+    if stage == STAGE_DENSE:
+        # Couple EMBEDDING_SERVER + EMBEDDING_MODEL (sprint « configuration
+        # unifiée », lot L6) : seule la clé du serveur retenu est exigée.
+        from app.services.embedding_target import explicit_embedding_env, explicit_embedding_target
+
+        choice = explicit_embedding_target(embedding_server, embedding_model)
+        if choice is not None:
+            return explicit_embedding_env(user, choice)
+
+    if stage == STAGE_EXTRACTION:
+        # OCR explicite (OCR_SERVER + OCR_MODEL, sprint « configuration unifiée ») :
+        # seule la clé du serveur déclaré est exigée, sans cascade.
+        from app.services.ocr_target import explicit_ocr_env, explicit_ocr_target
+
+        choice = explicit_ocr_target(user_ocr_values(user))
+        if choice is not None:
+            return explicit_ocr_env(user, choice)
+    if strict_policy():
+        # albert_only: refused while Albert is disabled; the inference keys of
+        # OpenAI, OpenRouter and Mistral never reach the script.
+        check_configuration()
+        if stage == STAGE_EXTRACTION:
+            keys = [ALBERT_CREDENTIAL_KEY] if ocr_albert_active(user) else []
+            return restrict_subprocess_env(build_subprocess_env(user, required_keys=keys))
+        return restrict_subprocess_env(_build_stage_env(user, stage, model=model, db_choice=db_choice,
+                                                        embedding_provider=embedding_provider))
+    return _build_stage_env(user, stage, model=model, db_choice=db_choice, embedding_provider=embedding_provider)
+
+
+def _build_stage_env(
+    user: User,
+    stage: str,
+    *,
+    model: Optional[str] = None,
+    db_choice: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+) -> Dict[str, str]:
+    """Environment of a pipeline stage under the historical credential rules (see ``build_task_env``).
+
+    Args:
+        user: The submitting user.
+        stage: One of ``STAGES``.
+        model: Recoding model (chunking only).
+        db_choice: Target database (vectordb only).
+        embedding_provider: Resolved dense provider (dense only).
+
+    Returns:
+        The environment returned by ``build_subprocess_env``.
     """
     if stage == STAGE_EXTRACTION:
         try:

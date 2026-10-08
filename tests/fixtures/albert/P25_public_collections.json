@@ -1,0 +1,149 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/collections?visibility=public&limit=100&offset=0",
+    "body_summary": null
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "object": "list",
+    "data": [
+      {
+        "object": "collection",
+        "id": 139226,
+        "name": "mediatech-legifrance",
+        "owner": "<masqué>",
+        "description": "L'intégral consolidé de la législation et de la réglementation nationale.\nIl est essentiellement constitué par :\n- les codes officiels ;\n- les lois, décrets-lois, ordonnances, décrets et une sélection d'arrêtés.\n- La consolidation des textes consiste lorsqu'un article de texte (ou de code) est modifié, à le réécrire en y intégrant la modification apportée. Les versions modifiées ou abrogées sont présentes dans le fonds documentaire au même titre que - les versions en vigueur.\n- cette collection est exhaustive pour les lois, décrets-lois, ordonnances, décrets depuis 1945.\nIl y a en plus une sélection d'arrêtés consolidés et une autre sélection des autres arrêtés, en version originale, accessible dans la base JORF depuis 1990.\nCette collection comprend les 73 codes officiels en vigueur consolidés (et les autres 29 abrogés).\nSeules certaines circulaires font l'objet d'une publication au Journal officiel ; pour l'essentiel, les circulaires ministérielles sont publiées dans le Bulletin officiel du ministère concerné (se reporter à la rubrique de leur site) ou sur le site Circulaires et instructions applicables (voir CIRCULAIRES sur data.gouv.fr).\nSource : https://www.legifrance.gouv.fr/",
+        "visibility": "public",
+        "created": 1774021032,
+        "updated": 1774440930,
+        "documents": 1821904,
+        "size": 623554245
+      },
+      {
+        "object": "collection",
+        "id": 139997,
+        "name": "mediatech-annuaire-services-publics-locaux",
+        "owner": "<masqué>",
+        "description": "La Base de données locales référence plus de 86 000 guichets publics locaux (mairies, organismes sociaux, services de l'état, etc.). Elle fournit leurs coordonnées (adresses, téléphones, site internet, horaires d'ouverture, coordonnées de géolocalisation). En complément, sont indexés plus de 36 000 fichiers des communes (conformes au Code Officiel Géographique de l'INSEE), précisant la compétence géographique des guichets.\nSource : https://www.data.gouv.fr/datasets/service-public-gouv-fr-annuaire-de-ladministration-base-de-donnees-locales",
+        "visibility": "public",
+        "created": 1774204108,
+        "updated": 1774440930,
+        "documents": 85865,
+        "size": 6092115
+      },
+      {
+        "object": "collection",
+        "id": 139998,
+        "name": "mediatech-annuaire-services-publics-nationaux",
+        "owner": "<masqué>",
+        "description": "Le Référentiel de l'organisation administrative de l'Etat, nouvelle appellation de la base, comprend toutes les institutions régies par la Constitution de la Ve République et les administrations qui en dépendent, soit environ 6000 organismes.\nLe périmètre couvre les services centraux de l'Etat, jusqu'au niveau des bureaux.\n\nLe référentiel comprend les missions, l'organisation hiérarchique des services, leurs coordonnées complètes et le nom de leur(s) responsable(s).\nSource : https://www.data.gouv.fr/datasets/referentiel-de-lorganisation-administrative-de-leta",
+        "visibility": "public",
+        "created": 1774204120,
+        "updated": 1774440930,
+        "documents": 7906,
+        "size": 489838
+      },
+      {
+        "object": "collection",
+        "id": 139999,
+        "name": "mediatech-dossiers-legislatifs",
+        "owner": "<masqué>",
+        "description": "Lois publiées depuis le début de la XIIe législature (juin 2002), les ordonnances publiées depuis 2002, et les lois en préparation (projets et propositions).\nLes dossiers législatifs permettent d'apporter des informations en amont et en aval de la promulgation des textes législatifs.\nLes dossiers législatifs portent sur les lois de l'article 39 de la Constitution. Lorsqu'il est décidé par une assemblée parlementaire de ne pas recourir à l'examen en forme simplifiée des textes relevant de l'article 53 de la Constitution, un dossier législatif est également ouvert.\nDepuis l'entrée en vigueur de la réforme constitutionnelle de 2008, les dossiers législatifs de propositions de loi ne sont ouverts qu'après l'adoption du texte par la première assemblée saisie.\nSource : https://www.data.gouv.fr/datasets/dole-les-dossiers-legislatifs",
+        "visibility": "public",
+        "created": 1774204124,
+        "updated": 1774440930,
+        "documents": 3581,
+        "size": 1374597
+      },
+      {
+        "object": "collection",
+        "id": 140006,
+        "name": "mediatech-decisions-conseil-constitutionnel",
+        "owner": "<masqué>",
+        "description": "Références de toutes les décisions du Conseil constitutionnel depuis sa création en 1958 et ces mêmes décisions en texte intégral selon le tableau suivant :\n\n** Contentieux des normes **\nDécisions constitutionnelles ( DC) depuis l'origine (1958), Question prioritaire de constitutionnalité ( QPC) depuis l'origine (2010), Contrôle des lois ( LP) du pays ( Nouvelle calédonie et Polynésie française) depuis l'origine (1958), Contrôle des lois d'outre mer (LOM) depuis l'origine (2007), les déclassements de textes (L) depuis l'origine (1958), les fins de non recevoir (FNR) depuis l'origine (1958),\n\n**Contentieux électoral et assimilé **\nAN depuis 1993, Sénat depuis 1993, Présidentielle depuis 1993, Référendum depuis 1993, Déchéance (D) depuis 1985, Incompatibilités (I) depuis l'origine (1958)\n\n**Autres **\nNominations (membres, rapporteurs adjoints, secrétaires généraux), organisation, autres décisions... depuis 1997\nArticle 16 depuis l'origine (1958)\n\nL'ensemble des décisions du Conseil constitutionnel est publié au Journal officiel de la République française ainsi qu'au recueil annuel des décisions du Conseil constitutionnel.\nSource : https://www.data.gouv.fr/datasets/constit-les-decisions-du-conseil-constitutionnel",
+        "visibility": "public",
+        "created": 1774204484,
+        "updated": 1774440930,
+        "documents": 7388,
+        "size": 13622071
+      },
+      {
+        "object": "collection",
+        "id": 140029,
+        "name": "mediatech-decisions-cnil",
+        "owner": "<masqué>",
+        "description": "Toutes les délibérations de la CNIL depuis l'origine, la première délibération ayant été rendue en 1979.\nLeurs modalités de publication sont définies par la loi Informatique et Libertés, par son décret d'application ainsi que par le règlement intérieur de la Commission.\n\nLes délibérations adoptées entre le 1er janvier 1979 et le 3 mai 2012 ont été publiées dans leur version mise à jour au plus tard le 4 mai 2012. Les délibérations adoptées postérieurement au 3 mai 2012 portent mention de leur date de publication effective.\nSource : https://echanges.dila.gouv.fr/OPENDATA/CNIL/",
+        "visibility": "public",
+        "created": 1774205340,
+        "updated": 1774440930,
+        "documents": 9896,
+        "size": 17118475
+      },
+      {
+        "object": "collection",
+        "id": 150277,
+        "name": "mediatech-fiches-travail-emploi",
+        "owner": "<masqué>",
+        "description": "Fiches pédagogiques du Ministère du travail sur les questions relatives au droit du travail.\nSource : https://travail-emploi.gouv.fr/",
+        "visibility": "public",
+        "created": 1774517616,
+        "updated": 1774517616,
+        "documents": 261,
+        "size": 1994707
+      },
+      {
+        "object": "collection",
+        "id": 150281,
+        "name": "mediatech-fiches-service-public",
+        "owner": "<masqué>",
+        "description": "Fiches issues du site Service-Public.gouv.fr, site à destination des usagers. C'est un service généraliste qui répond, le plus précisément possible, aux questions que se posent les particuliers ou les associations face aux situations ou difficultés les plus courantes, telles que : \"Ai-je droit à une aide au logement ?\", \"Quel est le coût d'un passeport ?\", \"Comment obtenir le formulaire de demande d'aide juridictionnelle ?\", \"Puis-je faire mon changement d'adresse en ligne ?\".\n\nLe site contient des fiches pratiques d'informations et des ressources utiles (formulaires, démarches en ligne, textes de référence, sites web publics, etc.) pour connaître et comprendre ses droits et obligations et réaliser des démarches administratives.\nSource : https://www.service-public.gouv.fr/",
+        "visibility": "public",
+        "created": 1774517688,
+        "updated": 1774517688,
+        "documents": 3563,
+        "size": 9861900
+      },
+      {
+        "object": "collection",
+        "id": 214712,
+        "name": "ref-crcn-edu",
+        "owner": "<masqué>",
+        "description": "CRCN-Édu — Cadre de référence des compétences numériques pour l'éducation (5 domaines, 16 compétences)",
+        "visibility": "public",
+        "created": 1779050446,
+        "updated": 1783355557,
+        "documents": 16,
+        "size": 3340
+      },
+      {
+        "object": "collection",
+        "id": 218761,
+        "name": "CRCN-2019-enrichi",
+        "owner": "<masqué>",
+        "description": "Document d'accompagnement CRCN (nov. 2019, actu. août 2020) — corpus enrichi : 208 chunks sémantiques (compétences×niveaux, fiches usages, grille, glossaire, sections) avec métadonnées de filtrage. Embeddings bge-m3.",
+        "visibility": "public",
+        "created": 1779898536,
+        "updated": 1783355492,
+        "documents": 9,
+        "size": 44195
+      },
+      {
+        "object": "collection",
+        "id": 219446,
+        "name": "programmes-scolaires-fr",
+        "owner": "<masqué>",
+        "description": "Programmes scolaires francais officiels en vigueur 2026 (cycles 1-4, lycee GT et pro, socle, reperes annuels). Sources eduscol + BO. Metadonnees de filtrage: cycle, discipline, niveau, theme, type_section. Embeddings bge-m3. Licence Ouverte 2.0.",
+        "visibility": "public",
+        "created": 1780042656,
+        "updated": 1783355357,
+        "documents": 639,
+        "size": 5248600
+      }
+    ]
+  },
+  "synthetic": false
+}

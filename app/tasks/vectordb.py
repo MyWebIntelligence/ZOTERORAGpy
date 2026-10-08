@@ -315,6 +315,8 @@ def _upload_to_albert(
     """
     db_choice = runner.ALBERT_DB_CHOICE
     manifest_source = None
+    manifest_start = None
+    env = None
     try:
         if _is_redelivered(task):
             # Albert writes are not idempotent under concurrency: a message
@@ -353,6 +355,8 @@ def _upload_to_albert(
             albert_ack_retention=True,
         )
         manifest_source = runner.albert_manifest_source(input_file)
+        from app.services.albert_access import manifest_offset
+        manifest_start = manifest_offset(manifest_source)
 
         result = runner.run_script(
             cmd,
@@ -418,6 +422,55 @@ def _upload_to_albert(
     finally:
         if manifest_source:
             runner.archive_albert_manifest(manifest_source, user_id, _albert_session_label(input_file))
+        if manifest_source and manifest_start is not None:
+            _register_albert_upload(user_id, manifest_source, manifest_start, input_file, env)
+
+
+def _register_albert_upload(user_id: int, manifest_path: str, offset: int, input_file: str, env) -> None:
+    """
+    Register the corpora written by this Celery upload run (never raises).
+
+    Same rule as the HTTP route (``processing._register_albert_corpus``):
+    manifest lines after ``offset``, documents rolled back excluded, under the
+    submitting user, with a fresh database session of the worker.
+
+    Args:
+        user_id: Submitting user.
+        manifest_path: Session manifest.
+        offset: Manifest size taken before the run.
+        input_file: Chunks file sent (bibliographic fields).
+        env: Subprocess environment of the run (its ``ALBERT_API_KEY`` gives the fingerprint).
+    """
+    db = None
+    try:
+        import hashlib
+
+        from app.services import albert_access
+        from scripts.rad_albert.config import AlbertConfig
+
+        key = ((env or {}).get("ALBERT_API_KEY") or "").strip()
+        fingerprint = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12] if key else None
+        db = runner.SessionLocal()
+        from app.models.user import User
+
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        if user is None:
+            return
+        corpora = albert_access.register_manifest_run(
+            db, user=user, manifest_path=manifest_path, offset=offset,
+            base_url=AlbertConfig.from_env().base_url, key_fingerprint=fingerprint,
+            session_folder=_albert_session_label(input_file), chunks_path=input_file,
+        )
+        if corpora:
+            logger.info(f"Albert corpus registry updated by Celery for user {user_id}: {[c.id for c in corpora]}")
+    except Exception as exc:
+        logger.error(f"Albert corpus registry not updated by Celery: {type(exc).__name__}: {exc}")
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def _update_session_status(

@@ -418,8 +418,13 @@ def _collect(
     done: Sequence[Future],
     pending: Dict[Future, int],
     results: Dict[int, PageResult],
+    on_page: Optional[Callable[[int, PageResult], Any]] = None,
 ) -> Optional[BaseException]:
-    """Range les pages terminées ; renvoie la première erreur qui interrompt la voie."""
+    """Range les pages terminées ; renvoie la première erreur qui interrompt la voie.
+
+    ``on_page(indice, résultat)`` est appelé pour chaque page réussie (point de
+    reprise) ; une erreur de ce rappel n'interrompt jamais l'OCR.
+    """
     abort: Optional[BaseException] = None
     for future in done:
         index = pending.pop(future)
@@ -443,6 +448,11 @@ def _collect(
             text=text.strip(),
             truncated=getattr(reply, "finish_reason", None) == "length" or bool(getattr(reply, "truncated", False)),
         )
+        if on_page is not None:
+            try:
+                on_page(index, results[index])
+            except Exception as exc:  # noqa: BLE001 — le point de reprise ne bloque jamais l'OCR
+                logger.warning("Point de reprise OCR : page %d non enregistrée (%s).", index + 1, type(exc).__name__)
     return abort
 
 
@@ -460,6 +470,7 @@ def _lightonocr_run(
     semaphore: Any,
     workers: int,
     render_fn: Callable[[Any, int, int], str],
+    on_page: Optional[Callable[[int, PageResult], Any]] = None,
 ) -> Dict[int, PageResult]:
     """OCR LightOnOCR des pages ``indices`` (à partir de 0) d'un ``fitz.Document`` ouvert.
 
@@ -494,10 +505,10 @@ def _lightonocr_run(
             pending[pool.submit(_ocr_one_page, client, image_b64, semaphore, stop)] = index
             while len(pending) >= window and abort is None:
                 done, _running = wait(list(pending), return_when=FIRST_COMPLETED)
-                abort = _collect(list(done), pending, results) or abort
+                abort = _collect(list(done), pending, results, on_page) or abort
         while pending and abort is None:
             done, _running = wait(list(pending), return_when=FIRST_COMPLETED)
-            abort = _collect(list(done), pending, results) or abort
+            abort = _collect(list(done), pending, results, on_page) or abort
     finally:
         if abort is not None:
             stop.set()
@@ -518,6 +529,7 @@ def ocr_pdf_lightonocr(
     semaphore: Any = None,
     concurrency: Optional[int] = None,
     render_fn: Callable[[Any, int, int], str] = render_page_png_b64,
+    checkpoint: Any = None,
 ) -> AlbertOcrOutcome:
     """OCR d'un PDF par LightOnOCR (``/v1/chat/completions``, une image par page).
 
@@ -535,6 +547,9 @@ def ocr_pdf_lightonocr(
         semaphore: sémaphore du processus (``ALBERT_OCR_SEMAPHORE``).
         concurrency: taille du pool (défaut ``cfg.ocr_concurrency``).
         render_fn: rastérisation ``(page, dpi, max_side) -> base64``.
+        checkpoint: point de reprise (``ocr_checkpoint.PageCheckpoint``) ou
+            ``None`` : les pages déjà validées sont relues sans appel, chaque
+            page réussie et non tronquée est enregistrée au fil de l'eau.
 
     Returns:
         ``AlbertOcrOutcome`` ; ``partial`` si des pages sont en échec ou tronquées.
@@ -553,13 +568,29 @@ def ocr_pdf_lightonocr(
         limit = _page_limit(total, max_pages)
         if limit <= 0:
             raise AlbertOcrFailed(provider, f"PDF sans page ({os.path.basename(pdf_path)}).")
+        cached = checkpoint.load(range(limit)) if checkpoint is not None else {}
+        todo = [index for index in range(limit) if index not in cached]
+        if cached:
+            logger.info(
+                "OCR Albert (LightOnOCR) : %d page(s) de %s reprise(s) depuis le point de reprise, "
+                "%d à transcrire.", len(cached), os.path.basename(pdf_path), len(todo),
+            )
         logger.info(
             "OCR Albert (LightOnOCR) : %d/%d page(s) de %s, %d envoi(s) simultané(s) au plus.",
-            limit, total, os.path.basename(pdf_path), workers,
+            len(todo), total, os.path.basename(pdf_path), workers,
         )
+
+        def remember(index: int, page: PageResult) -> None:
+            """Enregistre une page réussie et non tronquée dans le point de reprise."""
+            if checkpoint is not None and page.ok and not page.truncated:
+                checkpoint.save(index, page.text)
+
         results = _lightonocr_run(
-            doc, range(limit), client, cfg, semaphore=semaphore, workers=workers, render_fn=render_fn
-        )
+            doc, todo, client, cfg, semaphore=semaphore, workers=workers, render_fn=render_fn,
+            on_page=remember if checkpoint is not None else None,
+        ) if todo else {}
+        for index, text in cached.items():
+            results[index] = PageResult(ok=True, text=text)
 
     blocks: List[str] = []
     failed: List[int] = []

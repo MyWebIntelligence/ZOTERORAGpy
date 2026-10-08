@@ -1,0 +1,335 @@
+{% extends "base.html" %}
+
+{% block title %}Paramètres - Administration - RAGpy{% endblock %}
+
+{% set show_sidebar = true %}
+
+{% block extra_css %}
+<style>
+  .settings-toolbar { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 12px;
+    align-items: center; padding: 12px 0; background: var(--color-bg-primary); }
+  .settings-toolbar .form-input { max-width: 320px; }
+  .settings-status { font-size: 0.9rem; color: var(--color-text-secondary); }
+  .settings-status.error { color: #B42318; }
+  .settings-status.success { color: #067647; }
+  .settings-block { margin-bottom: 20px; }
+  .settings-block > summary { cursor: pointer; font-weight: 600; font-size: 1.05rem; padding: 10px 0; }
+  .settings-block-doc, .settings-sub-doc { color: var(--color-text-secondary); font-size: 0.85rem; white-space: pre-line; margin: 0 0 10px; }
+  .settings-sub { margin-bottom: 14px; }
+  .settings-sub-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+  .settings-sub-title { font-weight: 600; }
+  .settings-row { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 6px 16px; padding: 10px 0;
+    border-top: 1px solid var(--color-border); }
+  .settings-row:first-of-type { border-top: none; }
+  .settings-row.changed { background: rgba(255, 196, 0, 0.08); }
+  .settings-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; }
+  .settings-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .settings-badge { font-size: 0.7rem; padding: 1px 6px; border-radius: 6px; background: var(--color-bg-tertiary);
+    border: 1px solid var(--color-border); color: var(--color-text-secondary); }
+  .settings-badge.warn { background: #FFFAEB; border-color: #FEDF89; color: #B54708; }
+  .settings-badge.err { background: #FEF3F2; border-color: #FECDCA; color: #B42318; }
+  .settings-badge.lock { background: #F2F4F7; color: #344054; }
+  .settings-field { display: flex; flex-direction: column; gap: 4px; }
+  .settings-field .form-input { width: 100%; }
+  .settings-doc { font-size: 0.8rem; color: var(--color-text-secondary); white-space: pre-line; }
+  .settings-error { font-size: 0.8rem; color: #B42318; }
+  .settings-inline { display: flex; gap: 6px; align-items: center; }
+  .settings-test-result { font-size: 0.8rem; color: var(--color-text-secondary); }
+  .settings-hidden { display: none !important; }
+  @media (max-width: 760px) { .settings-row { grid-template-columns: 1fr; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-container">
+  <div class="page-header">
+    <div class="page-header-content">
+      <h1 class="page-title">Paramètres</h1>
+      <p class="page-subtitle">Toutes les variables du fichier <code id="settingsFile">.env</code>, dans son ordre.
+        Les clés ne sont jamais affichées : laisser un champ de clé vide la conserve.
+        Une modification « à chaud » s'applique au traitement suivant ; les autres demandent un redémarrage.</p>
+    </div>
+  </div>
+
+  <div class="settings-toolbar">
+    <input type="search" id="settingsFilter" class="form-input" placeholder="Filtrer (nom ou description)">
+    <label class="settings-inline"><input type="checkbox" id="settingsShowOptional"> Variables facultatives</label>
+    <button type="button" class="btn btn-primary" id="settingsSave" disabled>Enregistrer</button>
+    <span id="settingsStatus" class="settings-status">Chargement…</span>
+  </div>
+
+  <div id="settingsBlocks"></div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+  "use strict";
+
+  const API = "/api/admin/settings";
+  const MASK = "••••";
+  const SCOPE_LABELS = { user: "personnelle", server: "serveur", deploy: "déploiement", build: "construction" };
+  const APPLY_LABELS = { hot: "à chaud", restart: "redémarrage", recreate: "recréation des conteneurs", rebuild: "reconstruction de l'image" };
+  const BOOL_VALUES = { "01": ["0", "1"], truefalse: ["false", "true"], TRUEFALSE: ["FALSE", "TRUE"] };
+
+  const state = { data: null, original: new Map(), changes: new Map(), inputs: new Map(), errors: new Map(),
+                  modelCache: new Map() };
+
+  function headers(extra) {
+    const out = Object.assign({ "Accept": "application/json" }, extra || {});
+    const token = localStorage.getItem("access_token");
+    if (token) { out["Authorization"] = "Bearer " + token; }
+    return out;
+  }
+
+  function el(tag, attrs, children) {
+    const node = document.createElement(tag);
+    Object.entries(attrs || {}).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === false) { return; }
+      if (key === "text") { node.textContent = value; }
+      else if (key === "className") { node.className = value; }
+      else { node.setAttribute(key, value === true ? "" : String(value)); }
+    });
+    (children || []).forEach((child) => { if (child) { node.appendChild(child); } });
+    return node;
+  }
+
+  function setStatus(text, kind) {
+    const status = document.getElementById("settingsStatus");
+    status.textContent = text;
+    status.className = "settings-status" + (kind ? " " + kind : "");
+  }
+
+  function badge(text, kind, title) {
+    return el("span", { className: "settings-badge" + (kind ? " " + kind : ""), text: text, title: title });
+  }
+
+  function markChanged(setting, value) {
+    const original = state.original.get(setting.name);
+    const row = document.getElementById("row-" + setting.name);
+    if (value === original) { state.changes.delete(setting.name); row.classList.remove("changed"); }
+    else { state.changes.set(setting.name, value); row.classList.add("changed"); }
+    const count = state.changes.size;
+    const save = document.getElementById("settingsSave");
+    save.disabled = count === 0;
+    save.textContent = count ? `Enregistrer (${count})` : "Enregistrer";
+  }
+
+  function serverOptions(setting) {
+    const opts = [{ value: "", label: setting.name.endsWith("_SERVER") && setting.name !== "LLM_DEFAULT_SERVER" && setting.name !== "OCR_SERVER"
+      ? "(vide : serveur par défaut)" : "(vide)" }];
+    (state.data.servers || []).forEach((srv) => opts.push({ value: srv.url, label: `${srv.label} — ${srv.url}` }));
+    if (setting.family === "ocr") { opts.push({ value: "local", label: "local — moteurs internes (docling, pymupdf)" }); }
+    if (setting.value && !opts.some((o) => o.value === setting.value)) {
+      opts.push({ value: setting.value, label: setting.value + " (non déclaré au bloc 1)" });
+    }
+    return opts;
+  }
+
+  function serverFor(modelName) {
+    const own = modelName.replace(/_MODEL$/, "_SERVER");
+    const read = (name) => (state.changes.has(name) ? state.changes.get(name) : state.original.get(name)) || "";
+    const value = read(own);
+    if (value) { return value; }
+    return own.startsWith("LLM_") ? read("LLM_DEFAULT_SERVER") : "";
+  }
+
+  async function fillModels(input, datalist, setting) {
+    const server = serverFor(setting.name);
+    if (!server) { return; }
+    if (!state.modelCache.has(server)) {
+      try {
+        const resp = await fetch(`${API}/models?server=${encodeURIComponent(server)}`, { headers: headers(), credentials: "same-origin" });
+        const json = await resp.json();
+        state.modelCache.set(server, resp.ok ? (json.models || []) : []);
+      } catch (err) { state.modelCache.set(server, []); }
+    }
+    datalist.replaceChildren(...state.modelCache.get(server).map((id) => el("option", { value: id })));
+  }
+
+  function buildInput(setting) {
+    const disabled = Boolean(setting.locked);
+    let input;
+    if (setting.kind === "bool") {
+      input = el("select", { className: "form-input", disabled: disabled });
+      if (!setting.declared || setting.optional) { input.appendChild(el("option", { value: "", text: "(non déclarée)" })); }
+      (BOOL_VALUES[setting.bool_style] || ["0", "1"]).forEach((v) => input.appendChild(el("option", { value: v, text: v })));
+      input.value = setting.value;
+    } else if (setting.kind === "enum") {
+      input = el("select", { className: "form-input", disabled: disabled });
+      input.appendChild(el("option", { value: "", text: "(non déclarée)" }));
+      setting.choices.forEach((v) => input.appendChild(el("option", { value: v, text: v })));
+      input.value = setting.value;
+    } else if (setting.kind === "server") {
+      input = el("select", { className: "form-input", disabled: disabled });
+      serverOptions(setting).forEach((o) => input.appendChild(el("option", { value: o.value, text: o.label })));
+      input.value = setting.value;
+    } else if (setting.kind === "secret") {
+      input = el("input", { className: "form-input", type: "password", autocomplete: "new-password", disabled: disabled,
+                            placeholder: setting.has_value ? setting.value + " (laisser vide : inchangée)" : "(aucune)" });
+    } else {
+      input = el("input", { className: "form-input", type: "text", disabled: disabled, spellcheck: "false",
+                            inputmode: (setting.kind === "int" || setting.kind === "float") ? "decimal" : null,
+                            placeholder: setting.example || setting.default_rule || "" });
+      input.value = setting.value;
+    }
+    return input;
+  }
+
+  function buildRow(setting) {
+    const head = el("div", {}, [el("div", { className: "settings-name", text: setting.name })]);
+    const badges = el("div", { className: "settings-badges" });
+    badges.appendChild(badge(SCOPE_LABELS[setting.scope] || setting.scope, "", "portée"));
+    badges.appendChild(badge(APPLY_LABELS[setting.apply] || setting.apply, setting.apply === "hot" ? "" : "warn",
+                             "effet d'une modification"));
+    if (setting.locked) { badges.appendChild(badge("verrouillée", "lock", setting.locked)); }
+    if (setting.from_process) { badges.appendChild(badge("fixée par l'environnement du processus", "warn",
+      "Une valeur de l'environnement (Compose, shell) l'emporte sur le fichier.")); }
+    if (setting.pending_restart) { badges.appendChild(badge("redémarrage en attente", "warn")); }
+    if (!setting.declared && !setting.optional) { badges.appendChild(badge("non déclarée", "err",
+      "Obligatoire : env_tool sync --apply l'écrit avec la valeur actuelle du code.")); }
+    if (setting.level === "error") { badges.appendChild(badge("invalide", "err", setting.reason)); }
+    if (setting.level === "warning") { badges.appendChild(badge("à normaliser", "warn", setting.reason)); }
+    head.appendChild(badges);
+
+    const input = buildInput(setting);
+    const original = setting.kind === "secret" ? "" : setting.value;
+    state.original.set(setting.name, original);
+    state.inputs.set(setting.name, input);
+    const field = el("div", { className: "settings-field" });
+    if (setting.kind === "model") {
+      const listId = "models-" + setting.name;
+      const datalist = el("datalist", { id: listId });
+      input.setAttribute("list", listId);
+      input.addEventListener("focus", () => fillModels(input, datalist, setting));
+      field.appendChild(el("div", {}, [input, datalist]));
+    } else if (setting.kind === "secret" && !setting.locked) {
+      const clear = el("button", { type: "button", className: "btn btn-secondary btn-sm", text: "Vider",
+                                   title: "Supprimer la clé du fichier (valeur vide)" });
+      clear.addEventListener("click", () => { input.value = ""; input.placeholder = "(sera vidée)"; markChanged(setting, "\u0000clear"); });
+      field.appendChild(el("div", { className: "settings-inline" }, [input, clear]));
+    } else {
+      field.appendChild(input);
+    }
+    input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => {
+      if (setting.kind === "secret" && input.value === "") { markChanged(setting, original); return; }
+      markChanged(setting, input.value);
+    });
+    const doc = setting.doc || "";
+    const help = [doc, setting.locked ? "Verrouillée : " + setting.locked : "",
+                  setting.default_rule ? "Défaut du code : " + setting.default_rule : ""].filter(Boolean).join("\n");
+    if (help) { field.appendChild(el("div", { className: "settings-doc", text: help })); }
+    field.appendChild(el("div", { className: "settings-error", id: "err-" + setting.name }));
+    const row = el("div", { className: "settings-row", id: "row-" + setting.name,
+                            "data-optional": setting.optional ? "1" : "0",
+                            "data-search": (setting.name + " " + doc).toLowerCase() }, [head, field]);
+    return row;
+  }
+
+  function serverKeyOf(subTitle) {
+    const def = (state.data.server_defs || []).find((d) => subTitle.startsWith(d.label));
+    return def ? def.key : null;
+  }
+
+  async function testServer(key, out) {
+    out.textContent = "Test en cours…";
+    try {
+      const resp = await fetch(`${API}/test-server`, { method: "POST", credentials: "same-origin",
+        headers: headers({ "Content-Type": "application/json" }), body: JSON.stringify({ server: key }) });
+      const json = await resp.json();
+      if (!resp.ok) { out.textContent = json.detail || "Refus."; return; }
+      out.textContent = json.ok ? `Répond : ${json.models} modèle(s) listé(s) (${json.url}).`
+                                : `Échec : ${json.error} (${json.url})${json.has_key ? "" : " — aucune clé déclarée"}`;
+    } catch (err) { out.textContent = "Échec : " + err; }
+  }
+
+  function render() {
+    const root = document.getElementById("settingsBlocks");
+    root.replaceChildren();
+    document.getElementById("settingsFile").textContent = state.data.file + (state.data.file_exists ? "" : " (absent)");
+    state.data.blocks.forEach((block) => {
+      const details = el("details", { className: "settings-block", open: true },
+                         [el("summary", { text: `${block.key}. ${block.title}` })]);
+      if (block.doc) { details.appendChild(el("p", { className: "settings-block-doc", text: block.doc })); }
+      block.subblocks.forEach((sub) => {
+        const card = el("div", { className: "card settings-sub" });
+        const body = el("div", { className: "card-body" });
+        const headRow = el("div", { className: "settings-sub-head" },
+                           [el("span", { className: "settings-sub-title", text: `${sub.key} ${sub.title}` })]);
+        const key = block.key === "1" ? serverKeyOf(sub.title) : null;
+        if (key) {
+          const out = el("span", { className: "settings-test-result" });
+          const btn = el("button", { type: "button", className: "btn btn-secondary btn-sm", text: "Tester" });
+          btn.addEventListener("click", () => testServer(key, out));
+          headRow.appendChild(el("span", { className: "settings-inline" }, [out, btn]));
+        }
+        body.appendChild(headRow);
+        if (sub.doc) { body.appendChild(el("p", { className: "settings-sub-doc", text: sub.doc })); }
+        sub.settings.forEach((setting) => body.appendChild(buildRow(setting)));
+        card.appendChild(body);
+        details.appendChild(card);
+      });
+      root.appendChild(details);
+    });
+    applyFilter();
+  }
+
+  function applyFilter() {
+    const text = document.getElementById("settingsFilter").value.trim().toLowerCase();
+    const showOptional = document.getElementById("settingsShowOptional").checked;
+    document.querySelectorAll(".settings-row").forEach((row) => {
+      const hidden = (!showOptional && row.dataset.optional === "1" && !row.classList.contains("changed"))
+        || (text && !row.dataset.search.includes(text));
+      row.classList.toggle("settings-hidden", hidden);
+    });
+    document.querySelectorAll(".settings-sub").forEach((card) => {
+      card.classList.toggle("settings-hidden", !card.querySelector(".settings-row:not(.settings-hidden)"));
+    });
+    document.querySelectorAll(".settings-block").forEach((block) => {
+      block.classList.toggle("settings-hidden", !block.querySelector(".settings-sub:not(.settings-hidden)"));
+    });
+  }
+
+  async function load() {
+    try {
+      const resp = await fetch(API, { headers: headers(), credentials: "same-origin" });
+      if (!resp.ok) { setStatus("Accès refusé ou erreur (" + resp.status + ").", "error"); return; }
+      state.data = await resp.json();
+      state.changes.clear(); state.original.clear(); state.inputs.clear();
+      render();
+      setStatus("");
+    } catch (err) { setStatus("Chargement impossible : " + err, "error"); }
+  }
+
+  async function save() {
+    const changes = {};
+    state.changes.forEach((value, name) => { changes[name] = value === "\u0000clear" ? "" : value; });
+    document.querySelectorAll(".settings-error").forEach((node) => { node.textContent = ""; });
+    setStatus("Enregistrement…");
+    try {
+      const resp = await fetch(API, { method: "PUT", credentials: "same-origin",
+        headers: headers({ "Content-Type": "application/json" }), body: JSON.stringify({ changes }) });
+      const json = await resp.json();
+      if (!resp.ok) {
+        Object.entries(json.errors || {}).forEach(([name, message]) => {
+          const node = document.getElementById("err-" + name);
+          if (node) { node.textContent = message; }
+        });
+        setStatus("Rien n'a été écrit : corriger les champs signalés.", "error");
+        return;
+      }
+      const restart = (json.restart_required || []).length
+        ? " Redémarrage nécessaire pour : " + json.restart_required.join(", ") + "." : "";
+      await load();
+      setStatus(`${json.changed.length} variable(s) enregistrée(s).${restart}`, "success");
+    } catch (err) { setStatus("Échec de l'enregistrement : " + err, "error"); }
+  }
+
+  document.getElementById("settingsFilter").addEventListener("input", applyFilter);
+  document.getElementById("settingsShowOptional").addEventListener("change", applyFilter);
+  document.getElementById("settingsSave").addEventListener("click", save);
+  load();
+})();
+</script>
+{% endblock %}

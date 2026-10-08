@@ -1,0 +1,50 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/rerank",
+    "body_summary": {
+      "model": "openweight-rerank",
+      "query": "Comment la sociologie décrit-elle la production des savoirs scientifiques ?",
+      "documents": [
+        "Bourdieu définit le champ scientifique comme un espace de lutte pour le monopole de l'autorité scientifique.",
+        "La recette de la tarte aux pommes demande une pâte brisée et des pommes acidulées."
+      ]
+    }
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit-token": "None",
+    "x-ratelimit-remaining-token": "0",
+    "x-ratelimit-reset-token": "0s",
+    "x-ratelimit-limit-request": "500",
+    "x-ratelimit-remaining-request": "499",
+    "x-ratelimit-reset-requests": "59s"
+  },
+  "body": {
+    "object": "list",
+    "id": "request-c2b542733efb4114b47efdb2b024e670",
+    "results": [
+      {
+        "relevance_score": 0.0021074724,
+        "index": 0
+      },
+      {
+        "relevance_score": 1.6061611e-05,
+        "index": 1
+      }
+    ],
+    "model": "openweight-rerank",
+    "usage": {
+      "prompt_tokens": 55,
+      "completion_tokens": 0,
+      "total_tokens": 55,
+      "cost": 0.0,
+      "impacts": {
+        "kWh": 0.0,
+        "kgCO2eq": 0.0
+      }
+    }
+  },
+  "synthetic": false
+}

@@ -383,6 +383,11 @@ async def delete_project(
         user_agent=request.headers.get("User-Agent")
     )
 
+    # Corpus Albert partagés par ce projet : partage retiré (l'identifiant du projet,
+    # réutilisable par SQLite, ne doit plus donner de droits).
+    from app.services.albert_access import detach_project_corpora
+
+    detach_project_corpora(db, project.id)
     db.delete(project)
     db.commit()
 

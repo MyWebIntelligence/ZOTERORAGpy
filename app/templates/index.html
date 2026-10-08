@@ -862,176 +862,11 @@ do{% extends "base.html" %}
 {% endblock %}
 
 {% block content %}
-<!-- Settings Button -->
-<button id="settingsBtn" onclick="openModal('settingsModal')" title="Settings">
+<!-- Settings Button : page Paramètres (administrateurs) ou Mes identifiants -->
+<a id="settingsBtn" href="{{ '/admin/settings' if current_user and current_user.is_admin else '/profile#credentials' }}" title="Paramètres">
   <i class="bi bi-gear"></i>
-</button>
+</a>
 
-<!-- Settings Modal -->
-<div class="modal modal-lg" id="settingsModal">
-  <div class="modal-header">
-    <h3 class="modal-title">API Credentials</h3>
-    <button class="modal-close" onclick="closeModal('settingsModal')">
-      <i class="bi bi-x-lg"></i>
-    </button>
-  </div>
-  <div class="modal-body">
-    <form id="settingsForm">
-      <!-- OpenAI -->
-      <div class="card mb-4">
-        <div class="card-body">
-          <h4 class="text-brand mb-3"><i class="bi bi-robot"></i> OpenAI</h4>
-          <div class="form-group mb-0">
-            <label class="form-label" for="openaiKey">API Key</label>
-            <input type="text" class="form-input" id="openaiKey" name="OPENAI_API_KEY" autocomplete="off" placeholder="sk-...">
-          </div>
-        </div>
-      </div>
-
-      <!-- OpenRouter -->
-      <div class="card mb-4">
-        <div class="card-body">
-          <h4 class="text-brand mb-3"><i class="bi bi-arrow-left-right"></i> OpenRouter <span class="badge badge-neutral">Optional</span></h4>
-          <div class="form-group">
-            <label class="form-label" for="openrouterKey">API Key</label>
-            <input type="text" class="form-input" id="openrouterKey" name="OPENROUTER_API_KEY" autocomplete="off" placeholder="sk-or-v1-...">
-          </div>
-          <div class="form-group mb-0">
-            <label class="form-label" for="openrouterModel">Default Model</label>
-            <input type="text" class="form-input" id="openrouterModel" name="OPENROUTER_DEFAULT_MODEL" autocomplete="off" placeholder="google/gemini-2.5-flash">
-          </div>
-        </div>
-      </div>
-
-      <!-- Mistral -->
-      <div class="card mb-4">
-        <div class="card-body">
-          <h4 class="text-brand mb-3"><i class="bi bi-file-earmark-pdf"></i> Mistral <span class="badge badge-neutral">OCR</span></h4>
-          <div class="form-group">
-            <label class="form-label" for="mistralKey">API Key</label>
-            <input type="text" class="form-input" id="mistralKey" name="MISTRAL_API_KEY" autocomplete="off" placeholder="Mistral API Key">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="mistralModel">OCR Model</label>
-            <input type="text" class="form-input" id="mistralModel" name="MISTRAL_OCR_MODEL" autocomplete="off" placeholder="mistral-ocr-latest">
-          </div>
-          <div class="form-group mb-0">
-            <label class="form-label" for="mistralUrl">API Base URL</label>
-            <input type="text" class="form-input" id="mistralUrl" name="MISTRAL_API_BASE_URL" autocomplete="off" placeholder="https://api.mistral.ai">
-          </div>
-        </div>
-      </div>{% if albert_enabled %}
-
-      <!-- Albert (DINUM) -->
-      <div class="card mb-4">
-        <div class="card-body">
-          <h4 class="text-brand mb-3"><i class="bi bi-bank"></i> Albert <span class="badge badge-neutral">DINUM</span></h4>
-          <div class="form-group">
-            <label class="form-label" for="albertKey">API Key</label>
-            <input type="text" class="form-input" id="albertKey" name="ALBERT_API_KEY" autocomplete="off" placeholder="Albert API Key">
-            <small class="text-secondary">Cle masquee par le serveur (4 derniers caracteres) : laisser le masque conserve la cle enregistree, vider le champ la supprime. Reservee aux agents publics eligibles ; une cle expire au plus tard un an apres sa creation.</small>
-          </div>
-          <div class="form-group mb-0">
-            <button type="button" class="btn btn-secondary" id="albertTestBtn" onclick="testAlbertConnection()">Tester la connexion</button>
-            <a href="https://albert.playground.etalab.gouv.fr/" target="_blank" rel="noopener noreferrer">Playground Albert (creation de cle)</a>
-            <div id="albertTestStatus" class="text-sm text-secondary mt-2"></div>
-            <small class="text-secondary">Le test utilise la cle enregistree : enregistrer d'abord une nouvelle cle.</small>
-          </div>
-          <script>
-            async function testAlbertConnection() {
-              const statusEl = document.getElementById('albertTestStatus');
-              statusEl.textContent = 'Test en cours...';
-              const token = localStorage.getItem('access_token');
-              const headers = token ? { 'Authorization': 'Bearer ' + token } : {};
-              try {
-                const res = await fetch('/api/albert/status', { headers: headers });
-                const json = await res.json().catch(() => ({}));
-                if (res.ok && json.success) {
-                  const account = json.account || {};
-                  let msg = 'Connexion Albert OK';
-                  if (typeof account.expires_in_days === 'number') {
-                    msg += ' (compte valable encore ' + account.expires_in_days + ' jour(s))';
-                  }
-                  statusEl.textContent = json.warning ? msg + ' - ' + json.warning : msg;
-                } else {
-                  statusEl.textContent = 'Erreur ' + res.status + ' : ' + (json.error || json.detail || 'connexion impossible');
-                }
-              } catch (err) {
-                statusEl.textContent = 'Echec de la requete : ' + err;
-              }
-            }
-          </script>
-        </div>
-      </div>{% endif %}
-
-      <!-- Pinecone -->
-      <div class="card mb-4">
-        <div class="card-body">
-          <h4 class="text-brand mb-3"><i class="bi bi-database"></i> Pinecone</h4>
-          <div class="form-group mb-0">
-            <label class="form-label" for="pineconeKey">API Key</label>
-            <input type="text" class="form-input" id="pineconeKey" name="PINECONE_API_KEY" autocomplete="off" placeholder="Pinecone API Key">
-            <small class="text-secondary">Only API key needed. Indexes are auto-discovered.</small>
-          </div>
-        </div>
-      </div>
-
-      <!-- Weaviate -->
-      <div class="card mb-4">
-        <div class="card-body">
-          <h4 class="text-brand mb-3"><i class="bi bi-hdd-network"></i> Weaviate</h4>
-          <div class="form-group">
-            <label class="form-label" for="weaviateKey">API Key</label>
-            <input type="text" class="form-input" id="weaviateKey" name="WEAVIATE_API_KEY" autocomplete="off" placeholder="Weaviate API Key">
-          </div>
-          <div class="form-group mb-0">
-            <label class="form-label" for="weaviateUrl">URL</label>
-            <input type="text" class="form-input" id="weaviateUrl" name="WEAVIATE_URL" autocomplete="off" placeholder="https://...">
-          </div>
-        </div>
-      </div>
-
-      <!-- Qdrant -->
-      <div class="card mb-4">
-        <div class="card-body">
-          <h4 class="text-brand mb-3"><i class="bi bi-grid-3x3"></i> Qdrant</h4>
-          <div class="form-group">
-            <label class="form-label" for="qdrantKey">API Key</label>
-            <input type="text" class="form-input" id="qdrantKey" name="QDRANT_API_KEY" autocomplete="off" placeholder="Qdrant API Key">
-          </div>
-          <div class="form-group mb-0">
-            <label class="form-label" for="qdrantUrl">URL</label>
-            <input type="text" class="form-input" id="qdrantUrl" name="QDRANT_URL" autocomplete="off" placeholder="http://...">
-          </div>
-        </div>
-      </div>
-
-      <!-- Zotero -->
-      <div class="card" style="border-color: #8B5CF6;">
-        <div class="card-body">
-          <h4 style="color: #8B5CF6;" class="mb-3"><i class="bi bi-journal-bookmark"></i> Zotero <span class="badge badge-neutral">Optional</span></h4>
-          <div class="form-group">
-            <label class="form-label" for="zoteroApiKey">API Key</label>
-            <input type="password" class="form-input" id="zoteroApiKey" name="ZOTERO_API_KEY" autocomplete="off" placeholder="Get from zotero.org/settings/keys/new">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="zoteroUserId">User ID <span class="form-label-optional">(auto-detected)</span></label>
-            <input type="text" class="form-input" id="zoteroUserId" name="ZOTERO_USER_ID" autocomplete="off" placeholder="Auto-detected from Zotero export">
-          </div>
-          <div class="form-group mb-0">
-            <label class="form-label" for="zoteroGroupId">Group ID <span class="form-label-optional">(optional)</span></label>
-            <input type="text" class="form-input" id="zoteroGroupId" name="ZOTERO_GROUP_ID" autocomplete="off" placeholder="For group libraries">
-          </div>
-        </div>
-      </div>
-    </form>
-  </div>
-  <div class="modal-footer">
-    <div id="settingsSaveStatus" class="text-sm text-secondary mr-4"></div>
-    <button type="button" class="btn btn-secondary" onclick="closeModal('settingsModal')">Cancel</button>
-    <button type="submit" form="settingsForm" class="btn btn-primary">Save Credentials</button>
-  </div>
-</div>
 
 <div class="pipeline-page">
   <!-- Project Banner -->
@@ -1128,7 +963,33 @@ do{% extends "base.html" %}
             <input type="file" name="file" accept=".csv" required>
             <button type="submit" class="btn btn-success">Upload CSV</button>
           </form>
-        </div>
+        </div>{% if albert_audio_enabled %}
+
+        <!-- Option C: audio recordings transcribed by Albert (DINUM) -->
+        <div class="upload-option option-audio">
+          <div class="upload-option-header">
+            <span class="upload-option-icon">🎙️</span>
+            <span class="upload-option-title">Enregistrements audio (Albert)</span>
+          </div>
+          <p class="upload-option-desc">
+            Entretiens, séminaires, réunions : transcription par Albert (whisper-large-v3, DINUM), horodatée par segment, puis découpage habituel (sans recodage). mp3 et wav directement ; les autres formats sont convertis par ffmpeg sur le serveur.
+          </p>
+          <form id="uploadAudioForm" enctype="multipart/form-data" class="upload-form">
+            <label for="audioFiles" class="form-label">Fichiers audio</label>
+            <input type="file" id="audioFiles" name="files" accept=".mp3,.wav,.m4a,.ogg,.oga,.opus,.flac,.aac,.webm,.mp4,.mkv" multiple required>
+            <label for="audioLanguage" class="form-label">Langue</label>
+            <select id="audioLanguage" name="language" class="form-select">
+              <option value="">Défaut du serveur</option>
+              <option value="fr">Français</option>
+              <option value="en">Anglais</option>
+              <option value="auto">Détection automatique</option>
+            </select>
+            <label for="audioPrompt" class="form-label">Vocabulaire (facultatif)</label>
+            <input type="text" id="audioPrompt" name="prompt" maxlength="500" class="form-input" placeholder="Noms propres, sigles, termes techniques…" autocomplete="off">
+            <button type="submit" class="btn btn-primary">Importer et transcrire</button>
+          </form>
+          <div id="audioStatus" class="text-sm text-secondary mt-2" role="status" aria-live="polite"></div>
+        </div>{% endif %}
       </div>
 
       <div id="uploadResult" class="result"></div>
@@ -1208,8 +1069,11 @@ do{% extends "base.html" %}
 
             <div class="model-input-group">
               <label for="recodingModelInput">Recoding Model (optional)</label>
-              <input type="text" id="recodingModelInput" placeholder="google/gemini-2.5-flash">
-              <p class="model-input-hint">Leave empty for default. Format: "provider/model" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>{% if albert_enabled %}
+              <input type="text" id="recodingModelInput" placeholder="google/gemini-2.5-flash">{% if unified_mode %}
+              <label for="recodingServerInput">Serveur (optionnel)</label>
+              <select id="recodingServerInput" class="form-select" data-choice-service="recode" data-choice-model="recodingModelInput"></select>
+              <p class="model-input-hint" data-choice-hint="recode">Vides : vos choix (Profil &gt; Mes choix de modèles), sinon la configuration du serveur. Le nom du modèle est envoyé tel quel au serveur retenu.</p>{% else %}
+              <p class="model-input-hint">Leave empty for default. Format: "provider/model" (OpenRouter) or "gpt-4o-mini" (OpenAI)</p>{% endif %}{% if albert_enabled %}
               <p class="model-input-hint">Albert (DINUM) : "albert/&lt;modèle&gt;", par ex. "albert/ministral-3-8b-instruct-2512". Suggestions issues de votre compte Albert (clé à enregistrer dans les paramètres).</p>
               <datalist id="albertModelOptions"></datalist>{% endif %}
             </div>
@@ -1252,7 +1116,14 @@ do{% extends "base.html" %}
             <form id="denseUploadForm" enctype="multipart/form-data" class="stage-upload-form">
               <input type="file" id="denseUploadInput" name="file" accept=".json">
               <button type="submit" class="btn btn-secondary btn-sm">Upload Chunks</button>
-            </form>{% if albert_enabled %}
+            </form>{% if unified_mode %}
+            <div class="model-input-group">
+              <label for="embeddingModelInput">Modèle d'embeddings (optionnel)</label>
+              <input type="text" id="embeddingModelInput" autocomplete="off">
+              <label for="embeddingServerInput">Serveur (optionnel)</label>
+              <select id="embeddingServerInput" class="form-select" data-choice-service="embedding" data-choice-model="embeddingModelInput"></select>
+              <p class="model-input-hint" data-choice-hint="embedding">Vides : EMBEDDING_SERVER et EMBEDDING_MODEL du serveur (sinon fournisseur historique). Un index n'accepte qu'un espace vectoriel (modèle et dimension) : les vecteurs d'un autre modèle sont refusés à l'envoi.</p>
+            </div>{% elif albert_enabled %}
             <div class="model-input-group">
               <label for="embeddingProviderSelect">Fournisseur d'embeddings</label>
               <select id="embeddingProviderSelect" name="embedding_provider" class="form-select">
@@ -1509,8 +1380,11 @@ do{% extends "base.html" %}
 
               <div class="model-input-group">
                 <label for="zoteroModelInput">LLM Model (optional)</label>
-                <input type="text" id="zoteroModelInput" placeholder="google/gemini-2.5-flash or gpt-4o-mini">
-                <p class="model-input-hint">Leave empty for default (gpt-4o-mini).</p>{% if albert_enabled %}
+                <input type="text" id="zoteroModelInput" placeholder="google/gemini-2.5-flash or gpt-4o-mini">{% if unified_mode %}
+                <label for="zoteroServerInput">Serveur (optionnel)</label>
+                <select id="zoteroServerInput" class="form-select" data-choice-service="notes" data-choice-model="zoteroModelInput"></select>
+                <p class="model-input-hint" data-choice-hint="notes">Vides : vos choix (Profil &gt; Mes choix de modèles), sinon la configuration du serveur. Fiches de lecture : service « Fiches de lecture ».</p>{% else %}
+                <p class="model-input-hint">Leave empty for default (gpt-4o-mini).</p>{% endif %}{% if albert_enabled %}
                 <p class="model-input-hint">Albert (DINUM) : "albert/&lt;modèle&gt;", par ex. "albert/gpt-oss-120b" (mêmes suggestions que pour le recodage).</p>{% endif %}
               </div>
             </div>
@@ -1690,85 +1564,6 @@ do{% extends "base.html" %}
     }
   });
 
-  // ========================================
-  // SETTINGS MODAL
-  // ========================================
-  const settingsForm = document.getElementById('settingsForm');
-  const settingsSaveStatus = document.getElementById('settingsSaveStatus');
-
-  async function loadCredentials() {
-    settingsSaveStatus.textContent = 'Loading credentials...';
-    try {
-      const res = await fetch('/get_credentials');
-      if (!res.ok) {
-        settingsSaveStatus.textContent = `Error ${res.status}`;
-        return;
-      }
-      const json = await res.json();
-      for (const key in json) {
-        const input = document.querySelector(`#settingsForm [name="${key}"]`);
-        if (input) {
-          const value = json[key] || '';
-          const isApiKey = key.includes('API_KEY') || key.includes('_KEY');
-          if (isApiKey && value.length > 20) {
-            input.value = value.substring(0, 20) + '##########';
-          } else {
-            input.value = value;
-          }
-          input.dataset.fullValue = value;
-        }
-      }
-      settingsSaveStatus.textContent = '';
-    } catch (err) {
-      settingsSaveStatus.textContent = "Error: " + err.message;
-    }
-  }
-
-  // Load credentials when modal opens
-  const settingsModal = document.getElementById('settingsModal');
-  const observer = new MutationObserver((mutations) => {
-    mutations.forEach((mutation) => {
-      if (mutation.attributeName === 'class' && settingsModal.classList.contains('active')) {
-        loadCredentials();
-      }
-    });
-  });
-  observer.observe(settingsModal, { attributes: true });
-
-  settingsForm.onsubmit = async (e) => {
-    e.preventDefault();
-    settingsSaveStatus.textContent = 'Saving...';
-    const data = {};
-    Array.from(settingsForm.elements).forEach(el => {
-      if (el.name) {
-        if (el.dataset && el.dataset.fullValue &&
-            el.value.endsWith('##########') &&
-            el.value.startsWith(el.dataset.fullValue.substring(0, 20))) {
-          data[el.name] = el.dataset.fullValue;
-        } else {
-          data[el.name] = el.value;
-        }
-      }
-    });
-    try {
-      const res = await fetch('/save_credentials', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-      });
-      const json = await res.json();
-      if (res.ok && json.status === "success") {
-        settingsSaveStatus.textContent = "Credentials saved!";
-        showToast('Credentials saved successfully!', 'success');
-        setTimeout(() => closeModal('settingsModal'), 1500);
-      } else {
-        settingsSaveStatus.textContent = "Error: " + (json.error || "Could not save.");
-      }
-    } catch (err) {
-      settingsSaveStatus.textContent = "Request failed: " + err;
-    }
-  };
-
   // Project and Session context
   const projectId = {{ project_id or 'null' }};
   const sessionFolder = '{{ session_folder or "" }}';
@@ -1936,7 +1731,96 @@ do{% extends "base.html" %}
     } catch (err) {
       uploadResult.textContent = 'Upload failed: ' + err;
     }
-  });
+  });{% if albert_audio_enabled %}
+
+  // Step 1C: audio recordings transcribed by Albert (DINUM) - rendered only when the audio capability is on.
+  /**
+   * Read a Server-Sent Events response and hand each decoded event to a callback.
+   * @param {Response} response - The fetch response (text/event-stream).
+   * @param {function(Object): void} onEvent - Called with each JSON event.
+   * @returns {Promise<void>}
+   */
+  async function readAudioSse(response, onEvent) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+      let cut;
+      while ((cut = buffer.indexOf('\n\n')) >= 0) {
+        const block = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + 2);
+        const data = block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('');
+        if (!data) continue;
+        try { onEvent(JSON.parse(data)); } catch (e) { /* bloc illisible ignoré */ }
+      }
+    }
+  }
+
+  document.getElementById('uploadAudioForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const status = document.getElementById('audioStatus');
+    const uploadResult = document.getElementById('uploadResult');
+    const form = e.target;
+    const submit = form.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    status.textContent = 'Envoi des enregistrements…';
+    try {
+      const upload = new FormData();
+      for (const file of form.querySelector('input[name="files"]').files) upload.append('files', file);
+      if (projectId) upload.append('project_id', projectId);
+      const res = await fetch('/upload_audio', { method: 'POST', body: upload });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        status.textContent = 'Erreur : ' + (json.error || json.detail || res.statusText);
+        return;
+      }
+      currentPath = json.path;
+      appState.currentPath = json.path;
+      appState.isZoteroExport = false;
+      status.textContent = 'Transcription par Albert en cours…';
+      const body = new FormData();
+      body.append('path', json.path);
+      body.append('language', form.querySelector('select[name="language"]').value);
+      body.append('prompt', form.querySelector('input[name="prompt"]').value);
+      const stream = await fetch('/process_audio_sse', { method: 'POST', body: body });
+      let failed = null;
+      let completed = false;
+      await readAudioSse(stream, (event) => {
+        if (event.type === 'progress' || event.type === 'log') {
+          status.textContent = event.message || 'Transcription en cours…';
+        } else if (event.type === 'error') {
+          failed = event;
+        } else if (event.type === 'complete') {
+          completed = true;
+        }
+      });
+      if (failed || !completed) {
+        status.textContent = 'Transcription interrompue : ' + ((failed && (failed.message || failed.error)) || 'erreur inconnue');
+        if (failed && failed.credential_required) {
+          const link = document.createElement('a');
+          link.href = '/profile#credentials';
+          link.textContent = ' Configurer la clé Albert';
+          status.appendChild(link);
+        }
+        return;
+      }
+      uploadResult.textContent = '✅ Transcription terminée : ' + currentPath;
+      status.textContent = 'Transcription terminée : passer au découpage.';
+      completeStep('upload', null);
+      completeStep('extraction', 'output.csv');
+      markSectionCompleted('upload-section');
+      lockSection('dataframe-section');
+      unlockDecisionTree();
+      showToast('Transcription Albert terminée', 'success');
+    } catch (err) {
+      status.textContent = 'Échec : ' + err;
+    } finally {
+      submit.disabled = false;
+    }
+  });{% endif %}
 
   // ========================================
   // MULTILEVEL PROGRESS HANDLER
@@ -2134,7 +2018,9 @@ do{% extends "base.html" %}
     const formData = new FormData();
     formData.append('path', currentPath);
     const model = document.getElementById('recodingModelInput').value.trim();
-    if (model) formData.append('model', model);
+    if (model) formData.append('model', model);{% if unified_mode %}
+    const recodeServer = document.getElementById('recodingServerInput').value;
+    if (recodeServer) formData.append('server', recodeServer);{% endif %}
 
     try {
       const response = await fetch('/initial_text_chunking_sse', { method: 'POST', body: formData });
@@ -2235,7 +2121,11 @@ do{% extends "base.html" %}
     });
 
     const formData = new FormData();
-    formData.append('path', currentPath);{% if albert_enabled %}
+    formData.append('path', currentPath);{% if unified_mode %}
+    const embeddingServer = document.getElementById('embeddingServerInput').value;
+    if (embeddingServer) formData.append('server', embeddingServer);
+    const embeddingModel = document.getElementById('embeddingModelInput').value.trim();
+    if (embeddingModel) formData.append('model', embeddingModel);{% elif albert_enabled %}
     const embeddingProviderSelect = document.getElementById('embeddingProviderSelect');
     if (embeddingProviderSelect && embeddingProviderSelect.value) formData.append('embedding_provider', embeddingProviderSelect.value);{% endif %}
 
@@ -2780,7 +2670,9 @@ do{% extends "base.html" %}
     const formData = new FormData();
     formData.append('session', currentPath);
     formData.append('model', model);
-    formData.append('note_mode', noteMode);
+    formData.append('note_mode', noteMode);{% if unified_mode %}
+    const notesServer = document.getElementById('zoteroServerInput').value;
+    if (notesServer) formData.append('server', notesServer);{% endif %}
 
     const processedItems = [];
     const itemElements = new Map(); // Track mini-bar elements by item name
@@ -3311,6 +3203,58 @@ do{% extends "base.html" %}
       resultDiv.appendChild(p);
     });
     fetchAlbertCollections(true);
-  }{% endif %}
+  }{% endif %}{% if unified_mode %}
+
+  // ---- Server + model of the steps (sprint « configuration unifiée », lot L9) ----
+  // Options = servers declared by the administrator; placeholders = the
+  // effective couple of the user (personal choices, else the server .env).
+  (function initStepChoices() {
+    let choices = null;
+    function refresh(select) {
+      const service = select.dataset.choiceService === 'notes'
+        && document.getElementById('noteModeSelect')
+        && document.getElementById('noteModeSelect').value === 'book' ? 'book' : select.dataset.choiceService;
+      const eff = (choices && choices.services[service]) || {};
+      const input = document.getElementById(select.dataset.choiceModel);
+      if (input) input.placeholder = eff.model || '';
+      const inherit = select.options[0];
+      if (inherit) inherit.textContent = 'Par défaut' + (eff.server_label ? ' (' + eff.server_label + ')' : '');
+      const hint = document.querySelector('[data-choice-hint="' + select.dataset.choiceService + '"]');
+      if (hint && eff.error) hint.textContent = 'Configuration incomplète : ' + eff.error;
+      else if (hint && service === 'embedding' && eff.legacy) hint.textContent = 'Aucun couple déclaré : fournisseur historique (EMBEDDING_PROVIDER). Saisir un serveur et un modèle pour l\'emporter.';
+    }
+    async function load() {
+      try {
+        const response = await fetch('/users/me/settings', {
+          headers: {'Authorization': 'Bearer ' + localStorage.getItem('access_token')}
+        });
+        if (!response.ok) return;
+        choices = await response.json();
+      } catch (error) {
+        console.error('Error loading model choices:', error);
+        return;
+      }
+      document.querySelectorAll('select[data-choice-service]').forEach(select => {
+        select.textContent = '';
+        const inherit = document.createElement('option');
+        inherit.value = '';
+        select.appendChild(inherit);
+        const family = select.dataset.choiceService === 'embedding' ? 'embedding' : 'chat';
+        (choices.servers || []).filter(srv => !srv.families || srv.families.includes(family)).forEach(srv => {
+          const opt = document.createElement('option');
+          opt.value = srv.url;
+          opt.textContent = srv.label + ' — ' + srv.url;
+          select.appendChild(opt);
+        });
+        refresh(select);
+      });
+    }
+    const noteMode = document.getElementById('noteModeSelect');
+    if (noteMode) noteMode.addEventListener('change', () => {
+      const select = document.getElementById('zoteroServerInput');
+      if (select) refresh(select);
+    });
+    load();
+  })();{% endif %}
 </script>
 {% endblock %}

@@ -728,9 +728,25 @@ def _exercise_client(client):
     client.get_document(did)
     client.add_chunks(did, [{"content": "texte du chunk", "metadata": {"content_id": "abc_0"}}])
     client.list_chunks(did)
-    client.search("texte", collection_ids=[cid], method="semantic")
     client.delete_document(did)
     client.delete_collection(cid)
+    # Sprint R2 : usage, transcription (recherche, rerank et chat streamé retirés le 2026-10-03).
+    client.usage(0, 86400)
+    client.transcribe(_tiny_wav(), "silence.wav")
+
+
+def _tiny_wav():
+    """WAV mono de 0,1 s de silence (exercice de la transcription)."""
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(b"\x00\x00" * 800)
+    return buf.getvalue()
 
 
 def test_key_only_in_authorization_header():
@@ -980,48 +996,6 @@ def test_create_collection_private_forced():
     fake.reset_calls()
     with pytest.raises(ValueError):
         client.create_collection("ragpy-public", visibility="public")
-    assert fake.calls == []
-
-
-def test_search_rejects_threshold_non_semantic():
-    fake = FakeAlbert()
-    client = _client(fake)
-    cid, did = _make_document(client)
-    client.add_chunks(did, [{"content": "le chat dort", "metadata": {"chunk_index": 0}}])
-    for method in ("hybrid", "lexical"):
-        fake.reset_calls()
-        with pytest.raises(ValueError):
-            client.search("chat", collection_ids=[cid], method=method, score_threshold=0.5)
-        assert fake.calls_to("POST", "/v1/search") == []
-
-    fake.reset_calls()
-    results = client.search("chat", collection_ids=[cid], method="semantic", score_threshold=0.1)
-    body = fake.calls_to("POST", "/v1/search")[-1].json
-    assert body["method"] == "semantic"
-    assert body["score_threshold"] == pytest.approx(0.1)
-    assert results and results[0]["chunk"]["content"] == "le chat dort"
-
-    fake.reset_calls()
-    client.search("chat", collection_ids=[cid], method="hybrid", rff_k=30)
-    body = fake.calls_to("POST", "/v1/search")[-1].json
-    assert body["method"] == "hybrid"
-    assert body["rff_k"] == 30
-    assert "rrf_k" not in body
-    assert "score_threshold" not in body
-
-    # La méthode est toujours explicite, même par défaut.
-    fake.reset_calls()
-    client.search("chat", collection_ids=[cid])
-    assert fake.calls_to("POST", "/v1/search")[-1].json["method"] == "semantic"
-
-
-def test_search_requires_query():
-    # D17 : query obligatoire ; une requête vide ou blanche est refusée avant tout envoi.
-    fake = FakeAlbert()
-    client = _client(fake)
-    for bad in ("", "   "):
-        with pytest.raises(ValueError):
-            client.search(bad, collection_ids=[1])
     assert fake.calls == []
 
 

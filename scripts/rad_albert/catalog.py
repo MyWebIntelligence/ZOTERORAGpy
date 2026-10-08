@@ -37,6 +37,7 @@ TYPE_VISION = "image-text-to-text"
 TYPE_OCR = "image-to-text"
 TYPE_EMBEDDINGS = "text-embeddings-inference"
 TYPE_RERANK = "text-classification"
+TYPE_ASR = "automatic-speech-recognition"
 
 ENDPOINT_TYPES: Mapping[str, Tuple[str, ...]] = MappingProxyType(
     {
@@ -44,6 +45,7 @@ ENDPOINT_TYPES: Mapping[str, Tuple[str, ...]] = MappingProxyType(
         "embeddings": (TYPE_EMBEDDINGS,),
         "ocr": (TYPE_OCR, TYPE_VISION),
         "rerank": (TYPE_RERANK,),
+        "audio": (TYPE_ASR,),
     }
 )
 """Types de modèle acceptés par chaque point d'accès (albertai.md §4.1)."""
@@ -63,6 +65,10 @@ _ENDPOINT_ALIASES = {
     "rerank": "rerank",
     "/v1/rerank": "rerank",
     "/rerank": "rerank",
+    "audio": "audio",
+    "audio/transcriptions": "audio",
+    "/v1/audio/transcriptions": "audio",
+    "/audio/transcriptions": "audio",
 }
 
 _ENDPOINT_PATHS = {
@@ -70,6 +76,7 @@ _ENDPOINT_PATHS = {
     "embeddings": "/v1/embeddings",
     "ocr": "/v1/ocr",
     "rerank": "/v1/rerank",
+    "audio": "/v1/audio/transcriptions",
 }
 
 
@@ -135,9 +142,10 @@ class RoleSpec:
 
     Attributes:
         name: nom du rôle.
-        endpoint: ``chat``, ``ocr`` ou ``embeddings``.
+        endpoint: ``chat``, ``ocr``, ``embeddings``, ``rerank`` ou ``audio``.
         chain: maillons dans l'ordre (primaire en tête).
-        bucket: budget du limiteur proactif (``recode``, ``notes``, ``ocr``, ``embed``).
+        bucket: budget du limiteur proactif (``recode``, ``notes``, ``ocr``,
+            ``embed``, ``rerank``, ``audio``).
         optional: rôle dont l'absence au catalogue du compte n'est pas une
             erreur (``ocr_doc`` : accès restreint, D3).
         description: sens du rôle, en français.
@@ -228,6 +236,21 @@ _MODELS: Tuple[ModelSpec, ...] = (
         dim=1024,
         batch_max=64,
         note="1024 dimensions, lots de 64 textes ; jamais de repli.",
+    ),
+    ModelSpec(
+        id="bge-reranker-v2-m3",
+        aliases=("BAAI/bge-reranker-v2-m3", "openweight-rerank"),
+        type=TYPE_RERANK,
+        context=8192,
+        batch_max=64,
+        note="Rerank (convention Cohere v2), 64 textes au plus (P22 : 65 → 413) ; scores non calibrés.",
+    ),
+    ModelSpec(
+        id="whisper-large-v3",
+        aliases=("openai/whisper-large-v3", "openweight-audio"),
+        type=TYPE_ASR,
+        context=None,
+        note="Transcription (mp3 ou wav, 20 Mo au plus par fichier) ; verbose_json donne les segments (P26).",
     ),
 )
 
@@ -323,12 +346,31 @@ ROLES: Mapping[str, RoleSpec] = MappingProxyType(
             "embed", "embeddings", (ChainEntry("bge-m3"),), "embed",
             description="Embeddings bge-m3 (1024 d) ; aucun repli, jamais.",
         ),
+        "answer": RoleSpec(
+            "answer", "chat",
+            (ChainEntry("gpt-oss-120b"), ChainEntry("ministral-3-8b-instruct-2512")),
+            "recode",
+            description="Réponses sourcées (RAG) ; le budget suit le modèle envoyé (gpt-oss → notes).",
+        ),
+        "vision": RoleSpec(
+            "vision", "chat", _SMALL_CHAIN, "recode",
+            description="Description d'images par un modèle vision (pièces jointes images).",
+        ),
+        "rerank": RoleSpec(
+            "rerank", "rerank", (ChainEntry("bge-reranker-v2-m3"),), "rerank",
+            description="Reclassement de passages (bge-reranker-v2-m3) ; aucun repli.",
+        ),
+        "audio": RoleSpec(
+            "audio", "audio", (ChainEntry("whisper-large-v3"),), "audio",
+            description="Transcription d'enregistrements (whisper-large-v3) ; aucun repli.",
+        ),
     }
 )
 """Rôles applicatifs et leurs chaînes (tableau « Modèles par rôle » du sprint)."""
 
-NO_FALLBACK_ROLES = frozenset({"embed", "ocr_chat"})
-"""Rôles sans repli Albert (embeddings : jamais d'espace mélangé)."""
+NO_FALLBACK_ROLES = frozenset({"embed", "ocr_chat", "rerank", "audio"})
+"""Rôles sans repli Albert (embeddings : jamais d'espace mélangé ; rerank et
+audio : un seul modèle par type)."""
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +484,8 @@ def role_spec(role: Any) -> RoleSpec:
 
     Args:
         role: nom du rôle (``recode``, ``citation``, ``notes``, ``book_structure``,
-            ``long_context``, ``ocr_doc``, ``ocr_chat``, ``embed``).
+            ``long_context``, ``ocr_doc``, ``ocr_chat``, ``embed``, ``answer``,
+            ``vision``, ``rerank``, ``audio``).
 
     Returns:
         La fiche du rôle.
@@ -517,7 +560,7 @@ def primary_model(role: Any, *, today: Any) -> Optional[str]:
 
 
 def normalise_endpoint(endpoint: Any) -> str:
-    """Nom canonique d'un point d'accès (``chat``, ``embeddings``, ``ocr``, ``rerank``).
+    """Nom canonique d'un point d'accès (``chat``, ``embeddings``, ``ocr``, ``rerank``, ``audio``).
 
     Raises:
         ValueError: point d'accès inconnu.

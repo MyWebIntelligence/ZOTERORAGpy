@@ -58,6 +58,13 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 # ---------------------------------------------------------------------------
 LIVE = os.environ.get("ALBERT_LIVE") == "1"
 
+# Tests hermétiques (sprint « configuration unifiée ») : hors mode live, aucun
+# .env du poste n'est chargé (app/config.py, scripts via load_dotenv_guarded) ;
+# la CI n'en a pas non plus. Posé à l'import, avant tout import de l'application.
+if not LIVE:
+    os.environ.setdefault("RAGPY_ENV_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                         "data", "no-such-env-file-for-tests"))
+
 
 def _env_files_declaring_live() -> List[str]:
     """Fichiers ``.env`` (racine du dépôt, répertoire courant) qui déclarent ``ALBERT_LIVE``.
@@ -383,6 +390,8 @@ def _live_allowed(item: Any) -> bool:
 # Hooks
 # ---------------------------------------------------------------------------
 _SAVED_ENV: Dict[str, Optional[str]] = {}
+STRICT_ENV = "RAGPY_SETTINGS_STRICT"
+"""Démarrage strict du lot L3 : désactivé pendant les tests."""
 
 
 def pytest_configure(config):
@@ -395,6 +404,10 @@ def pytest_configure(config):
         for name, value in OFF_ENV.items():
             _SAVED_ENV.setdefault(name, os.environ.get(name))
             os.environ[name] = value
+    # Démarrage strict (sprint « configuration unifiée », D3) : le .env du poste
+    # n'est pas une donnée de test ; les tests du contrôle le réactivent eux-mêmes.
+    _SAVED_ENV.setdefault(STRICT_ENV, os.environ.get(STRICT_ENV))
+    os.environ[STRICT_ENV] = "0"
     GUARD.install()
 
 

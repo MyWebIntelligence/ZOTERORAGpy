@@ -19,6 +19,7 @@ Example:
     ... )
 """
 
+import dataclasses
 import os
 import sys
 import json
@@ -29,6 +30,7 @@ import time
 import csv
 import random
 import subprocess
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
@@ -295,6 +297,21 @@ MISTRAL_OCR_RETRIES = _env_int("MISTRAL_OCR_RETRIES", 4)
 MISTRAL_OCR_RETRY_BACKOFF = _env_float("MISTRAL_OCR_RETRY_BACKOFF", 3.0)
 MISTRAL_OCR_RETRY_MAX_BACKOFF = _env_float("MISTRAL_OCR_RETRY_MAX_BACKOFF", 60.0)
 
+# HTTP 429 (rate limit) gets its own, longer ladder: the generic one
+# (3 + 6 + 12 + 24 s ≈ 45 s) stays inside a per-minute quota window, so every
+# retry hits the same limit. Default 10, 20, 40, 80 s (capped at 120 s). A 429
+# also opens a cooldown shared by every thread of the process (other workers
+# pause instead of keeping the window saturated). In the split path, a part
+# that exhausts its retries on a 429 is retried after the other parts
+# (MISTRAL_SPLIT_RETRY_PASSES extra passes, after MISTRAL_SPLIT_RETRY_DELAY s);
+# after MISTRAL_SPLIT_MAX_RATE_LIMITED_PARTS consecutive rate-limited parts the
+# pass stops calling Mistral (persistent limit, e.g. quota) and defers the rest.
+MISTRAL_OCR_RATE_LIMIT_BACKOFF = _env_float("MISTRAL_OCR_RATE_LIMIT_BACKOFF", 10.0)
+MISTRAL_OCR_RATE_LIMIT_MAX_BACKOFF = _env_float("MISTRAL_OCR_RATE_LIMIT_MAX_BACKOFF", 120.0)
+MISTRAL_SPLIT_RETRY_PASSES = _env_int("MISTRAL_SPLIT_RETRY_PASSES", 1)
+MISTRAL_SPLIT_RETRY_DELAY = _env_float("MISTRAL_SPLIT_RETRY_DELAY", 60.0)
+MISTRAL_SPLIT_MAX_RATE_LIMITED_PARTS = _env_int("MISTRAL_SPLIT_MAX_RATE_LIMITED_PARTS", 2)
+
 # Provider policy — the OpenAI Vision fallback is OFF by default (operational
 # requirement). Its page-by-page transcription is lower fidelity AND hard-capped
 # at OPENAI_OCR_MAX_PAGES, silently truncating books. The OCR chain is therefore
@@ -423,6 +440,79 @@ _ALBERT_OCR_LEDGER: Any = None
 _ALBERT_OCR_MODEL_IDS: Dict[str, str] = {}
 _ALBERT_STATE_LOCK = threading.Lock()
 _ALBERT_WARNED: Set[str] = set()
+# Sprint R2 — politique d'inférence (ALBERT_DATA_POLICY=albert_only : maillons
+# OCR Mistral et OpenAI jamais appelés ; Albert puis OCR local et legacy seulement).
+ALBERT_STRICT_POLICY = ALBERT_CONFIG.strict if not _ALBERT_CONFIG_ERROR else bool(
+    (os.getenv("ALBERT_DATA_POLICY") or "").strip()
+    and (os.getenv("ALBERT_DATA_POLICY") or "").strip().lower() != "compatible"
+)
+# Sprint R2 — dossier racine des points de reprise LightOnOCR (dossier de sortie) ;
+# None = pas de reprise (posé par le chargeur et le point d'entrée).
+_ALBERT_OCR_CHECKPOINT_ROOT: Optional[str] = None
+# Sprint R2 — pièces jointes images, transcrites seulement quand le maillon OCR
+# Albert est actif (sinon : extension non supportée, comme avant).
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp")
+BASE_ATTACHMENT_EXTENSIONS = (".pdf", ".epub", ".txt", ".md")
+
+
+def supported_attachment_extensions() -> Tuple[str, ...]:
+    """
+    Attachment extensions processed by this stage.
+
+    PDF, EPUB and plain text always; images (PNG, JPEG, TIFF, WebP) only when
+    the Albert OCR link is usable (`OCR_ENABLE_ALBERT` and an Albert key), so
+    the behaviour is unchanged while Albert is disabled and images are never
+    accepted for another provider only.
+
+    Returns:
+        The lower-case extensions, dot included.
+    """
+    if _OCR_EXPLICIT:
+        # OCR explicite : images acceptées si le moteur sait les lire (pas PyMuPDF).
+        reads_images = not (_OCR_CHOICE.server_url == "local" and _OCR_CHOICE.model == "pymupdf")
+        return BASE_ATTACHMENT_EXTENSIONS + (IMAGE_EXTENSIONS if reads_images else ())
+    if OCR_ENABLE_ALBERT and ALBERT_API_KEY:
+        return BASE_ATTACHMENT_EXTENSIONS + IMAGE_EXTENSIONS
+    return BASE_ATTACHMENT_EXTENSIONS
+
+
+def set_albert_checkpoint_root(output_csv: Optional[str]) -> None:
+    """
+    Set the folder of the LightOnOCR page checkpoints (the output folder).
+
+    Args:
+        output_csv: Output CSV path (its folder becomes the root), or None to disable.
+    """
+    global _ALBERT_OCR_CHECKPOINT_ROOT
+    _ALBERT_OCR_CHECKPOINT_ROOT = os.path.dirname(os.path.abspath(output_csv)) if output_csv else None
+
+
+def _extract_text_from_image(image_path: str, *, retry: bool = True) -> "OCRResult":
+    """
+    OCR of an image attachment through the regular chain (Albert OCR link active).
+
+    The image (multi-page TIFF included) is converted to a temporary PDF by
+    PyMuPDF, then sent through `extract_text_with_ocr` (Albert first, then the
+    links allowed by the policy); the temporary file is always removed.
+
+    Args:
+        image_path: Path of the image.
+        retry: Use the retrying wrapper of the incremental loader.
+
+    Returns:
+        `OCRResult` of the converted document.
+    """
+    with fitz.open(image_path) as image_doc:
+        pdf_bytes = image_doc.convert_to_pdf()
+    fd, tmp_pdf = tempfile.mkstemp(prefix="ragpy_img_", suffix=".pdf")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(pdf_bytes)
+        if retry:
+            return extract_text_with_ocr_retry(tmp_pdf, return_details=True)
+        return extract_text_with_ocr(tmp_pdf, return_details=True)
+    finally:
+        _safe_unlink(tmp_pdf)
 
 
 # ============================================================================
@@ -720,9 +810,40 @@ class _MistralTransientError(Exception):
 
     `retry_after` carries the server-directed wait (seconds) parsed from a 429
     `Retry-After` header when present; the retry loop honours it over its own
-    computed backoff.
+    computed backoff. `status` is the HTTP status when known (429 selects the
+    rate-limit ladder and the shared cooldown).
     """
     retry_after: Optional[float] = None
+    status: Optional[int] = None
+
+
+class _MistralRetriesExhausted(OCRExtractionError):
+    """A Mistral OCR call whose transient failures outlasted every retry.
+
+    `status` is the HTTP status of the last failure (None for a network
+    error). A split book retries parts exhausted on a 429 in a later pass,
+    since a rate limit is lifted by waiting; other causes are not retried.
+    """
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        """Store the message and the HTTP status of the last failure."""
+        super().__init__(message)
+        self.status = status
+
+
+def _is_rate_limited(exc: Optional[BaseException]) -> bool:
+    """True when `exc` is a Mistral failure caused by HTTP 429 (rate limit)."""
+    return getattr(exc, "status", None) == 429
+
+
+class _SplitPart(NamedTuple):
+    """One part of a split book: 1-based `idx`, temporary `path`, page count,
+    global page `offset` of its first page and the `max_pages` cap to send."""
+    idx: int
+    path: str
+    pages: int
+    offset: int
+    max_pages: Optional[int]
 
 
 class _MistralAuthError(OCRExtractionError):
@@ -784,16 +905,18 @@ class _MistralOcr(NamedTuple):
     error: Optional[str] = None
 
 
-def _extract_text_with_legacy_pdf(pdf_path: str, max_pages: Optional[int] = None) -> str:
+def _extract_text_with_legacy_pdf(pdf_path: str, max_pages: Optional[int] = None, *, allow_ocr: bool = True) -> str:
     """
     Extract text from a PDF using PyMuPDF (fitz) legacy extraction.
 
     Falls back to OCR if text extraction yields sparse results
-    (less than 50 words per page).
+    (less than 50 words per page), unless ``allow_ocr`` is false (explicit
+    ``local`` + ``pymupdf`` OCR: native text layer only, no hidden Tesseract).
 
     Args:
         pdf_path: Path to the PDF file
         max_pages: Optional maximum number of pages to process
+        allow_ocr: Run Tesseract on sparse pages (historical behaviour).
 
     Returns:
         Extracted text content, with pages separated by double newlines
@@ -809,7 +932,7 @@ def _extract_text_with_legacy_pdf(pdf_path: str, max_pages: Optional[int] = None
                 try:
                     page = doc.load_page(page_num)
                     text = page.get_text("text").strip()
-                    if len(text.split()) < 50:
+                    if allow_ocr and len(text.split()) < 50:
                         text = page.get_text("ocr").strip()
                     full_text.append(text)
                 except Exception as page_error:
@@ -982,7 +1105,10 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
     kept, the failed part leaves an explicit `<!-- … OCR ÉCHOUÉ … -->` marker
     (preserving global page numbering), and the result is flagged `partial`.
     Only an account-level 401 (`_MistralAuthError`) or an all-parts-failed run
-    raises — so the caller can fall back.
+    raises — so the caller can fall back. A part that exhausted its retries on
+    a 429 is first retried after the other parts (MISTRAL_SPLIT_RETRY_PASSES
+    passes, each after MISTRAL_SPLIT_RETRY_DELAY seconds); the gap marker and
+    the `error` summary name the rate limit when it persists.
 
     Args:
         pdf_path: Path to the PDF file to process.
@@ -1079,71 +1205,71 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
             MISTRAL_SPLIT_PART_PAGES,
         )
 
-        markdown_blocks: List[str] = []
+        # Page counts are read up-front so global numbering advances even for
+        # a failed part (the gap stays honest and book_note sees it).
+        specs: List[_SplitPart] = []
         remaining_pages = max_pages
         page_offset = 0  # Lot G — global page renumbering across parts.
-        succeeded_parts = 0
-        failed_parts: List[str] = []   # human-readable "i/N (pages A-B)"
-        pages_done = 0
         for idx, part_path in enumerate(parts, start=1):
             # Compute per-part max_pages so the global cap is honoured.
             part_max_pages = remaining_pages if remaining_pages is not None else None
             if part_max_pages is not None and part_max_pages <= 0:
                 logger.info("Cap max_pages atteint, parts restantes ignorées.")
                 break
-
-            # Page count is read up-front so global numbering advances even for
-            # a failed part (the gap stays honest and book_note sees it).
             with fitz.open(part_path) as part_doc:
                 part_page_count = len(part_doc)
-            part_range = f"{page_offset + 1}-{page_offset + part_page_count}"
+            specs.append(_SplitPart(idx, part_path, part_page_count, page_offset, part_max_pages))
+            page_offset += part_page_count
+            if remaining_pages is not None:
+                remaining_pages -= part_page_count
 
-            try:
-                part_text = _mistral_upload_and_ocr(part_path, max_pages=part_max_pages)
-            except _MistralAuthError:
-                # Account-level 401 (spend cap / bad key): the remaining parts
-                # would all fail too — abort the whole book so the caller can
-                # surface the actionable error rather than salvage a fragment.
-                logger.error(
-                    "Échec OCR Mistral 401 (compte) sur la part %d/%d — abandon du livre.",
-                    idx, len(parts),
-                )
-                raise
-            except Exception as part_err:
-                # Part-local failure (transient exhausted, oversize, empty …).
-                # Salvage: keep going, leave an explicit gap marker.
-                logger.error(
-                    "Échec OCR Mistral sur la part %d/%d (pages %s): %s — "
-                    "part ignorée, OCR partiel.",
-                    idx, len(parts), part_range, part_err,
-                )
-                failed_parts.append(f"{idx}/{len(parts)} (pages {part_range})")
+        results: Dict[int, str] = {}
+        failures: Dict[int, Exception] = {}
+        extra_passes = max(0, MISTRAL_SPLIT_RETRY_PASSES)
+        _ocr_split_parts_pass(specs, len(parts), results, failures, last_pass=extra_passes == 0)
+        for pass_no in range(1, extra_passes + 1):
+            # Only rate-limited parts are retried: waiting lifts a 429, whereas
+            # a 5xx that outlasted its retries or a permanent error would not.
+            pending = [s for s in specs if _is_rate_limited(failures.get(s.idx))]
+            if not pending:
+                break
+            logger.warning(
+                "OCR Mistral : nouvelle passe %d/%d sur %d part(s) limitée(s) par le "
+                "débit (429) — pause de %.0fs avant de reprendre.",
+                pass_no, extra_passes, len(pending), MISTRAL_SPLIT_RETRY_DELAY,
+            )
+            time.sleep(MISTRAL_SPLIT_RETRY_DELAY)
+            _ocr_split_parts_pass(
+                pending, len(parts), results, failures, last_pass=pass_no == extra_passes,
+            )
+
+        markdown_blocks: List[str] = []
+        failed_parts: List[str] = []   # human-readable "i/N (pages A-B)"
+        pages_done = 0
+        for spec in specs:
+            part_range = f"{spec.offset + 1}-{spec.offset + spec.pages}"
+            if spec.idx not in results:
+                part_err = failures[spec.idx]
+                cause = ", limite de débit 429" if _is_rate_limited(part_err) else ""
+                failed_parts.append(f"{spec.idx}/{len(parts)} (pages {part_range}{cause})")
                 markdown_blocks.append(
-                    f"<!-- Part {idx}/{len(parts)} (pages {part_range}) — "
+                    f"<!-- Part {spec.idx}/{len(parts)} (pages {part_range}) — "
                     f"OCR ÉCHOUÉ: {part_err} -->"
                 )
-                page_offset += part_page_count
-                if remaining_pages is not None:
-                    remaining_pages -= part_page_count
                 continue
-
             # Lot G — Mistral indexes page markers from 1 within each part.
             # When we concatenate N parts, raw output would have duplicate
             # `<!-- Page 1 -->`, `<!-- Page 2 -->`, ... per part, breaking
             # downstream chapter slicing (book_note_generator). Renumber by
             # adding a cumulative offset = sum of pages in previous parts.
-            if page_offset > 0:
-                part_text = _renumber_page_markers(part_text, page_offset)
-
+            part_text = results[spec.idx]
+            if spec.offset > 0:
+                part_text = _renumber_page_markers(part_text, spec.offset)
             markdown_blocks.append(
-                f"<!-- Part {idx}/{len(parts)} (pages {part_range}) -->\n{part_text}"
+                f"<!-- Part {spec.idx}/{len(parts)} (pages {part_range}) -->\n{part_text}"
             )
-            succeeded_parts += 1
-            pages_done += part_page_count
-            page_offset += part_page_count
-
-            if remaining_pages is not None:
-                remaining_pages -= part_page_count
+            pages_done += spec.pages
+        succeeded_parts = len(results)
 
         if succeeded_parts == 0:
             # Every part failed — let the caller fall back (legacy).
@@ -1171,6 +1297,81 @@ def _extract_text_with_mistral(pdf_path: str, max_pages: Optional[int] = None) -
         for p in parts:
             _safe_unlink(p)
         _safe_unlink(compressed_path)
+
+
+def _ocr_split_parts_pass(
+    specs: List[_SplitPart],
+    n_parts: int,
+    results: Dict[int, str],
+    failures: Dict[int, Exception],
+    last_pass: bool,
+) -> None:
+    """OCR one pass over the parts of a split book, recording each outcome.
+
+    A successful part goes to `results` (and leaves `failures`); a part-local
+    failure goes to `failures` and the pass continues (salvage). After
+    MISTRAL_SPLIT_MAX_RATE_LIMITED_PARTS consecutive parts exhausted on a 429,
+    the limit is deemed persistent (e.g. quota): the remaining parts of the
+    pass are not sent and are recorded as rate-limited, so a later pass can
+    retry them without first waiting out every retry ladder.
+
+    Args:
+        specs: Parts to OCR in this pass, in document order.
+        n_parts: Total number of parts of the book (for messages).
+        results: Raw markdown per part index, updated in place.
+        failures: Last failure per part index, updated in place.
+        last_pass: True when no later pass will retry rate-limited parts
+            (only changes the log wording).
+
+    Raises:
+        _MistralAuthError: On HTTP 401 (account-level — aborts the book).
+    """
+    rate_limited_streak = 0
+    for pos, spec in enumerate(specs):
+        if 0 < MISTRAL_SPLIT_MAX_RATE_LIMITED_PARTS <= rate_limited_streak:
+            skipped = specs[pos:]
+            logger.error(
+                "OCR Mistral : limite de débit (429) persistante sur %d parts "
+                "consécutives — %d part(s) non envoyée(s) dans cette passe (%s).",
+                rate_limited_streak, len(skipped),
+                ", ".join(f"{s.idx}/{n_parts}" for s in skipped),
+            )
+            for s in skipped:
+                failures[s.idx] = _MistralRetriesExhausted(
+                    f"OCR non tenté : limite de débit Mistral (429) persistante sur "
+                    f"{rate_limited_streak} parts consécutives",
+                    status=429,
+                )
+            return
+        part_range = f"{spec.offset + 1}-{spec.offset + spec.pages}"
+        try:
+            part_text = _mistral_upload_and_ocr(spec.path, max_pages=spec.max_pages)
+        except _MistralAuthError:
+            # Account-level 401 (spend cap / bad key): the remaining parts
+            # would all fail too — abort the whole book so the caller can
+            # surface the actionable error rather than salvage a fragment.
+            logger.error(
+                "Échec OCR Mistral 401 (compte) sur la part %d/%d — abandon du livre.",
+                spec.idx, n_parts,
+            )
+            raise
+        except Exception as part_err:
+            # Part-local failure (transient exhausted, oversize, empty …).
+            # Salvage: keep going, leave an explicit gap marker.
+            failures[spec.idx] = part_err
+            rate_limited = _is_rate_limited(part_err)
+            rate_limited_streak = rate_limited_streak + 1 if rate_limited else 0
+            logger.error(
+                "Échec OCR Mistral sur la part %d/%d (pages %s): %s — %s",
+                spec.idx, n_parts, part_range, part_err,
+                "part remise à une passe ultérieure (limite de débit)."
+                if rate_limited and not last_pass
+                else "part ignorée, OCR partiel.",
+            )
+            continue
+        rate_limited_streak = 0
+        failures.pop(spec.idx, None)
+        results[spec.idx] = part_text
 
 
 def _safe_unlink(path: Optional[str]) -> None:
@@ -1228,6 +1429,7 @@ def _classify_mistral_http_error(exc: requests.HTTPError, pdf_path: str) -> Exce
             else f"erreur transitoire {status}"
         )
         transient = _MistralTransientError(f"Mistral OCR {label} pour {name}: {snippet}")
+        transient.status = status
         if status == 429 and resp is not None:
             ra = _parse_retry_after(getattr(resp, "headers", {}).get("Retry-After"))
             if ra is not None:
@@ -1275,26 +1477,84 @@ def _parse_retry_after(value: Optional[str]) -> Optional[float]:
         return None
 
 
-def _mistral_retry_wait(attempt: int, retry_after: Optional[float] = None) -> float:
+def _mistral_retry_wait(
+    attempt: int,
+    retry_after: Optional[float] = None,
+    rate_limited: bool = False,
+) -> float:
     """Compute the backoff (seconds) before Mistral retry `attempt` (0-indexed).
 
     Honours a server-directed `Retry-After` when present (capped at
     MISTRAL_OCR_RETRY_MAX_BACKOFF); otherwise applies exponential backoff
-    (MISTRAL_OCR_RETRY_BACKOFF * 2**attempt) capped at the same ceiling. Jitter
-    is intentionally NOT added here — the caller adds it only on the
-    exponential path, so this helper stays deterministic and testable.
+    (MISTRAL_OCR_RETRY_BACKOFF * 2**attempt) capped at the same ceiling. A
+    rate-limited failure (HTTP 429) uses the longer MISTRAL_OCR_RATE_LIMIT_*
+    base and ceiling instead. Jitter is intentionally NOT added here — the
+    caller adds it only on the exponential path, so this helper stays
+    deterministic and testable.
 
     Args:
         attempt: 0-indexed attempt number that just failed.
         retry_after: Optional server-directed wait in seconds.
+        rate_limited: True when the failure is an HTTP 429.
 
     Returns:
-        Wait in seconds (>= 0), capped at MISTRAL_OCR_RETRY_MAX_BACKOFF.
+        Wait in seconds (>= 0), capped at the applicable ceiling.
     """
+    if rate_limited:
+        base_wait, ceiling = MISTRAL_OCR_RATE_LIMIT_BACKOFF, MISTRAL_OCR_RATE_LIMIT_MAX_BACKOFF
+    else:
+        base_wait, ceiling = MISTRAL_OCR_RETRY_BACKOFF, MISTRAL_OCR_RETRY_MAX_BACKOFF
     if retry_after is not None and retry_after > 0:
-        return min(float(retry_after), MISTRAL_OCR_RETRY_MAX_BACKOFF)
-    base = MISTRAL_OCR_RETRY_BACKOFF * (2 ** attempt)
-    return min(base, MISTRAL_OCR_RETRY_MAX_BACKOFF)
+        return min(float(retry_after), ceiling)
+    return min(base_wait * (2 ** attempt), ceiling)
+
+
+# Cooldown shared by every thread of the process after a Mistral 429: the
+# monotonic deadline before which no new attempt starts. Process-local (each
+# web subprocess or Celery task has its own).
+_MISTRAL_COOLDOWN_LOCK = threading.Lock()
+_mistral_cooldown: Dict[str, float] = {"until": 0.0}
+
+
+def _mistral_extend_cooldown(seconds: float) -> float:
+    """Push the shared Mistral cooldown to at least `seconds` from now.
+
+    Args:
+        seconds: Minimum pause requested by the failure that just occurred.
+
+    Returns:
+        The resulting monotonic deadline (never earlier than an existing one).
+    """
+    with _MISTRAL_COOLDOWN_LOCK:
+        deadline = max(_mistral_cooldown["until"], time.monotonic() + seconds)
+        _mistral_cooldown["until"] = deadline
+        return deadline
+
+
+def _mistral_cooldown_remaining(already_waited_until: float = 0.0) -> float:
+    """Seconds left in the shared cooldown, beyond a deadline already slept to.
+
+    Args:
+        already_waited_until: Monotonic deadline the caller already slept
+            towards (its own 429 backoff); a cooldown ending no later than it
+            requires no further wait.
+
+    Returns:
+        Remaining seconds (0.0 when no further wait is needed).
+    """
+    with _MISTRAL_COOLDOWN_LOCK:
+        until = _mistral_cooldown["until"]
+    if until <= already_waited_until:
+        return 0.0
+    return max(0.0, until - time.monotonic())
+
+
+def _mistral_clear_cooldown(deadline: float) -> None:
+    """Lift the shared cooldown after a success, unless another thread has
+    since pushed it beyond `deadline` (the caller's own 429 deadline)."""
+    with _MISTRAL_COOLDOWN_LOCK:
+        if _mistral_cooldown["until"] <= deadline:
+            _mistral_cooldown["until"] = 0.0
 
 
 def _mistral_upload_and_ocr(pdf_path: str, max_pages: Optional[int] = None) -> str:
@@ -1310,6 +1570,11 @@ def _mistral_upload_and_ocr(pdf_path: str, max_pages: Optional[int] = None) -> s
     failures (401 spend-cap, other 4xx, empty response) are raised immediately
     without retry.
 
+    A 429 follows the longer MISTRAL_OCR_RATE_LIMIT_* ladder and opens the
+    cooldown shared by the threads of the process (also after the last attempt,
+    so the next part or document waits too); every attempt starts by waiting
+    out that cooldown.
+
     Args:
         pdf_path: Path to the PDF file (already verified to fit upload limit).
         max_pages: Optional `pages` list end for the OCR request.
@@ -1318,22 +1583,37 @@ def _mistral_upload_and_ocr(pdf_path: str, max_pages: Optional[int] = None) -> s
         Extracted markdown text.
 
     Raises:
-        OCRExtractionError: On permanent failure or once retries are exhausted.
+        _MistralRetriesExhausted: Once retries are exhausted (carries the HTTP
+            status of the last failure).
+        OCRExtractionError: On permanent failure.
     """
     last_error: Optional[Exception] = None
     total_attempts = MISTRAL_OCR_RETRIES + 1
+    own_deadline = 0.0  # end of this call's own 429 backoff (monotonic)
     for attempt in range(total_attempts):
+        pause = _mistral_cooldown_remaining(own_deadline)
+        if pause > 0:
+            logger.info(
+                "OCR Mistral : pause commune de %.1fs (limite de débit 429) avant %s",
+                pause, pdf_path,
+            )
+            time.sleep(pause)
         try:
-            return _mistral_upload_and_ocr_once(pdf_path, max_pages=max_pages)
+            text = _mistral_upload_and_ocr_once(pdf_path, max_pages=max_pages)
         except (_MistralTransientError, requests.Timeout, requests.ConnectionError) as exc:
             last_error = exc
-            if attempt < MISTRAL_OCR_RETRIES:
+            rate_limited = _is_rate_limited(exc)
+            if attempt < MISTRAL_OCR_RETRIES or rate_limited:
                 retry_after = getattr(exc, "retry_after", None)
-                wait = _mistral_retry_wait(attempt, retry_after)
+                wait = _mistral_retry_wait(attempt, retry_after, rate_limited=rate_limited)
                 # Add jitter only on the exponential path; respect an explicit
                 # server Retry-After exactly (capped).
                 if retry_after is None:
-                    wait += random.uniform(0, min(wait * 0.25, 5.0))
+                    wait += random.uniform(0, wait * 0.25 if rate_limited else min(wait * 0.25, 5.0))
+                if rate_limited:
+                    own_deadline = _mistral_extend_cooldown(wait)
+                    wait = max(wait, own_deadline - time.monotonic())
+            if attempt < MISTRAL_OCR_RETRIES:
                 logger.warning(
                     "OCR Mistral transitoire (tentative %d/%d) pour %s: %s — "
                     "nouvel essai dans %.1fs%s",
@@ -1346,9 +1626,14 @@ def _mistral_upload_and_ocr(pdf_path: str, max_pages: Optional[int] = None) -> s
                     "OCR Mistral: échec après %d tentatives pour %s: %s",
                     total_attempts, pdf_path, exc,
                 )
-    raise OCRExtractionError(
+        else:
+            if own_deadline:
+                _mistral_clear_cooldown(own_deadline)
+            return text
+    raise _MistralRetriesExhausted(
         f"OCR Mistral échoué après {total_attempts} tentatives pour "
-        f"{os.path.basename(pdf_path)}: {last_error}"
+        f"{os.path.basename(pdf_path)}: {last_error}",
+        status=getattr(last_error, "status", None),
     )
 
 
@@ -1474,7 +1759,11 @@ def _mistral_upload_and_ocr_once(pdf_path: str, max_pages: Optional[int] = None)
             empty response).
         _MistralTransientError: Transient failure worth retrying (404/429/5xx).
     """
+    # Racine sans /v1 : MISTRAL_API_BASE_URL peut s'écrire avec /v1 (règle des serveurs,
+    # sprint « configuration unifiée ») ; les chemins ci-dessous ajoutent /v1 eux-mêmes.
     base_url = MISTRAL_API_BASE_URL.rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[: -len("/v1")]
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}"}
 
     # Acquire semaphore to limit concurrent API calls (rate limiting)
@@ -2153,6 +2442,9 @@ def _albert_fallback_message(ocr_payload: Any) -> Optional[str]:
     fallback_from = getattr(ocr_payload, "fallback_from", None)
     if not fallback_from:
         return None
+    if _OCR_EXPLICIT and _OCR_FALLBACK is not None:
+        return (f"OCR principal ({fallback_from}) en échec ou indisponible : texte fourni par le repli "
+                f"({_ocr_choice_label(_OCR_FALLBACK)}), repli tracé.")
     return (
         f"OCR Albert ({fallback_from}) en échec ou indisponible : "
         f"texte fourni par {getattr(ocr_payload, 'provider', None)} (repli tracé)."
@@ -2288,8 +2580,12 @@ def _try_albert_ocr(pdf_path: str, max_pages: Optional[int] = None) -> OCRResult
                 )
             stage = ocr_mod.PROVIDER_LIGHTONOCR
             ocr_mod.ensure_pinned_models(client, [cfg.ocr_chat_model], cache=_ALBERT_OCR_MODEL_IDS)
+            checkpoint = _albert_module("ocr_checkpoint").open_checkpoint(
+                _ALBERT_OCR_CHECKPOINT_ROOT, pdf_path, cfg, client.wire_model(cfg.ocr_chat_model)
+            )
             outcome = ocr_mod.ocr_pdf_lightonocr(
-                pdf_path, client, max_pages=requested, cfg=cfg, semaphore=ALBERT_OCR_SEMAPHORE
+                pdf_path, client, max_pages=requested, cfg=cfg, semaphore=ALBERT_OCR_SEMAPHORE,
+                checkpoint=checkpoint,
             )
     except _AlbertOcrLinkError:
         raise
@@ -2330,7 +2626,8 @@ def _try_albert_ocr(pdf_path: str, max_pages: Optional[int] = None) -> OCRResult
             "d'accepter le résultat partiel.",
             pdf_path, limit, scope, cap,
         )
-        legacy_text = _extract_text_with_legacy_pdf(pdf_path, max_pages=max_pages)
+        # OCR explicite : jamais de remplacement par un autre moteur (D5).
+        legacy_text = "" if _OCR_EXPLICIT else _extract_text_with_legacy_pdf(pdf_path, max_pages=max_pages)
         if legacy_text.strip() and len(legacy_text) > len(text):
             logger.info(
                 "Moteur legacy plus complet que l'OCR Albert plafonné pour %s "
@@ -2428,6 +2725,427 @@ def _flush_albert_ocr_usage(output_path: str) -> Optional[str]:
     return written
 
 
+# ============================================================================
+# OCR EXPLICITE (sprint « configuration unifiée », lot L5)
+# ============================================================================
+# OCR_SERVER + OCR_MODEL déclarés : un moteur principal, contrôlé avant le
+# premier document, sans repli implicite (décisions D5 à D7). Un repli n'existe
+# que s'il est déclaré (OCR_SERVER_FALLBACK + OCR_MODEL_FALLBACK, demande
+# d'Amar du 2026-10-03) : autre serveur, contrôlé lui aussi, repli tracé.
+# OCR_MODEL absent : la chaîne historique ci-dessous s'applique telle quelle
+# (jusqu'au lot L10).
+
+class OCRAccountError(OCRExtractionError):
+    """Erreur de compte du moteur OCR déclaré (clé refusée, plafond, quota) : arrête tout le lot."""
+
+
+class OCRPreflightError(RuntimeError):
+    """Moteur OCR déclaré inaccessible ou mal configuré : rien ne démarre."""
+
+
+_OCR_EXPLICIT = False
+_OCR_CHOICE: Any = None
+_OCR_FALLBACK: Any = None
+_OCR_PRIMARY_DOWN: Optional[str] = None
+"""Erreur de compte du moteur principal (avec un repli déclaré, la suite du lot passe par le repli)."""
+LOCAL_CHAT_OCR_PROVIDER = "local_chat"
+PYMUPDF_PROVIDER = "pymupdf"
+LOCAL_CHAT_OCR_INSTRUCTION = (
+    "Transcris fidèlement tout le texte de cette page, dans l'ordre de lecture, en Markdown. "
+    "N'ajoute aucun commentaire, ne traduis pas, ne corrige pas."
+)
+EXPLICIT_FAILURE_TYPES = ("OCR_FAILED", "EXTRACTION_FAILED", "PROCESSING_ERROR")
+
+
+def _settings_modules():
+    """Modules ``rad_settings.chat`` et ``rad_settings.models`` (import paresseux, deux chemins)."""
+    try:
+        from scripts.rad_settings import chat as chat_mod, models as models_mod
+    except ImportError:
+        from rad_settings import chat as chat_mod, models as models_mod
+    return chat_mod, models_mod
+
+
+def configure_explicit_ocr(env: Optional[Dict[str, str]] = None) -> Any:
+    """
+    Active l'OCR explicite si ``OCR_MODEL`` est déclaré, et configure le moteur choisi.
+
+    Le couple ``OCR_SERVER`` + ``OCR_MODEL`` est résolu par la règle des serveurs
+    (``scripts/rad_settings/models.py``) : Mistral (``MISTRAL_OCR_MODEL`` et
+    l'adresse déclarée remplacés pour ce processus), Albert (voie ``/v1/ocr``
+    pour un modèle de type ``image-to-text``, page par page sinon), moteurs
+    internes (``local`` + ``docling`` ou ``pymupdf``) ou serveur local
+    compatible OpenAI (page par page). Le repli déclaré
+    (``OCR_SERVER_FALLBACK`` + ``OCR_MODEL_FALLBACK``) suit la même règle ; il
+    doit désigner un autre serveur (ou, avec ``local``, un autre moteur interne).
+
+    Args:
+        env: Valeurs à lire (``os.environ`` par défaut).
+
+    Returns:
+        Le couple principal résolu (``ServiceChoice``), ou ``None`` (chaîne historique).
+
+    Raises:
+        ServiceConfigError: Couple incomplet, serveur incapable d'OCR, ou repli
+            sur le serveur du moteur principal.
+        OCRPreflightError: Albert choisi alors qu'``ALBERT_ENABLED=0``.
+    """
+    global _OCR_EXPLICIT, _OCR_CHOICE, _OCR_FALLBACK, _OCR_PRIMARY_DOWN
+    chat_mod, models_mod = _settings_modules()
+    values = chat_mod.server_values(os.environ if env is None else env)
+    if not (values.get("OCR_MODEL") or "").strip():
+        _OCR_EXPLICIT, _OCR_CHOICE, _OCR_FALLBACK = False, None, None
+        return None
+    choice = models_mod.resolve_service("ocr", values)
+    fallback = None
+    if any((values.get(name) or "").strip() for name in ("OCR_SERVER_FALLBACK", "OCR_MODEL_FALLBACK")):
+        fallback = models_mod.resolve_service("ocr_fallback", values)
+        same_server = fallback.server_url == choice.server_url
+        if same_server and (choice.server_url != models_mod.LOCAL_KEYWORD or fallback.model == choice.model):
+            raise models_mod.ServiceConfigError(
+                "ocr_fallback", "OCR de repli : déclarer un autre serveur que celui du moteur principal "
+                "(ou, avec local, un autre moteur interne).", ("OCR_SERVER_FALLBACK",))
+    for engine in (choice, fallback):
+        if engine is not None:
+            _configure_ocr_engine(engine)
+    _OCR_CHOICE, _OCR_FALLBACK, _OCR_EXPLICIT, _OCR_PRIMARY_DOWN = choice, fallback, True, None
+    return choice
+
+
+def _configure_ocr_engine(choice: Any) -> None:
+    """
+    Règle le moteur d'un couple OCR pour ce processus (Mistral : modèle et adresse ; Albert : voie et modèle).
+
+    Args:
+        choice: Couple résolu (moteur principal ou de repli).
+
+    Raises:
+        OCRPreflightError: Albert choisi alors qu'``ALBERT_ENABLED=0``.
+    """
+    global MISTRAL_OCR_MODEL, MISTRAL_API_BASE_URL, ALBERT_CONFIG, OCR_ENABLE_ALBERT
+    chat_mod, _models = _settings_modules()
+    key = choice.server.key
+    if key == "mistral":
+        MISTRAL_OCR_MODEL = choice.model
+        MISTRAL_API_BASE_URL = chat_mod.mistral_api_root(choice.server_url)
+    elif key == "albert":
+        if not ALBERT_CONFIG.enabled:
+            raise OCRPreflightError("OCR sur Albert : ALBERT_ENABLED=1 est requis (bloc 2.11 du .env).")
+        catalog_mod = _albert_module("catalog")
+        spec = catalog_mod.model_spec(choice.model)
+        mode = "ocr" if spec is not None and spec.type == catalog_mod.TYPE_OCR else "chat"
+        fields = {"ocr_enabled": True, "ocr_mode": mode}
+        fields["ocr_doc_model" if mode == "ocr" else "ocr_chat_model"] = choice.model
+        ALBERT_CONFIG = dataclasses.replace(ALBERT_CONFIG, **fields)
+        OCR_ENABLE_ALBERT = True
+
+
+def _ocr_choice_label(choice: Any = None) -> str:
+    """Libellé lisible d'un moteur déclaré (« Mistral — mistral-ocr-latest ») ; principal par défaut."""
+    choice = _OCR_CHOICE if choice is None else choice
+    if choice is None:
+        return "chaîne historique"
+    if choice.server_url == "local":
+        return f"moteur interne — {choice.model}"
+    return f"{choice.server.label} — {choice.model}"
+
+
+def _http_model_ids(url: str, headers: Dict[str, str]) -> Set[str]:
+    """Identifiants (et alias) du catalogue ``GET …/models`` d'un serveur compatible OpenAI."""
+    resp = requests.get(url, headers=headers, timeout=30)
+    if resp.status_code == 401:
+        raise OCRPreflightError(f"clé refusée (401) par {url}")
+    resp.raise_for_status()
+    payload = resp.json()
+    entries = payload.get("data", []) if isinstance(payload, dict) else payload
+    ids: Set[str] = set()
+    for entry in entries or []:
+        if isinstance(entry, dict):
+            ids.add(str(entry.get("id") or entry.get("name") or ""))
+            ids.update(str(alias) for alias in (entry.get("aliases") or []))
+    return ids
+
+
+def preflight_explicit_ocr() -> None:
+    """
+    Contrôle le moteur OCR déclaré avant le premier document (décision D5).
+
+    Mistral : clé présente et modèle listé par ``GET /v1/models`` (un 401 signale
+    une clé refusée OU le plafond de dépense mensuel). Albert : clé présente,
+    modèle résolu par ``/v1/models`` et, pour la voie ``/v1/ocr``, accès du
+    compte. Docling : moteur installé. PyMuPDF : rien. Serveur local : modèle
+    listé par ``GET {adresse}/models``.
+
+    Le moteur de repli déclaré est contrôlé de la même façon : un repli
+    inaccessible empêche aussi le démarrage.
+
+    Raises:
+        OCRPreflightError: Moteur inaccessible ou mal configuré (rien ne démarre).
+    """
+    for choice, prefix in ((_OCR_CHOICE, "OCR"), (_OCR_FALLBACK, "OCR de repli")):
+        if choice is not None:
+            _preflight_ocr_engine(choice, prefix)
+
+
+def _preflight_ocr_engine(choice: Any, prefix: str) -> None:
+    """
+    Contrôle un moteur OCR déclaré (voir ``preflight_explicit_ocr``).
+
+    Args:
+        choice: Couple résolu.
+        prefix: « OCR » ou « OCR de repli » (messages).
+
+    Raises:
+        OCRPreflightError: Moteur inaccessible ou mal configuré.
+    """
+    label = _ocr_choice_label(choice)
+    if choice.server_url == "local":
+        if choice.model == "docling" and not _local_ocr_available():
+            raise OCRPreflightError(
+                f"{prefix} local Docling non installé : image Docker construite avec INSTALL_LOCAL_OCR=true, "
+                "ou venv dédié désigné par LOCAL_OCR_PYTHON.")
+        return
+    key = choice.server.key
+    try:
+        if key == "mistral":
+            if not MISTRAL_API_KEY:
+                raise OCRPreflightError("clé Mistral absente (MISTRAL_API_KEY).")
+            ids = _http_model_ids(f"{MISTRAL_API_BASE_URL.rstrip('/')}/v1/models",
+                                  {"Authorization": f"Bearer {MISTRAL_API_KEY}"})
+            if choice.model not in ids:
+                raise OCRPreflightError(f"modèle « {choice.model} » absent du catalogue Mistral.")
+        elif key == "albert":
+            if not ALBERT_API_KEY:
+                raise OCRPreflightError("clé Albert absente (ALBERT_API_KEY).")
+            client = _albert_ocr_client()
+            client.resolve_model_id(choice.model)
+            if ALBERT_CONFIG.ocr_mode == "ocr" and _probe_albert_v1_ocr_access(client, ALBERT_CONFIG) is False:
+                raise OCRPreflightError(f"le compte Albert n'a pas accès à /v1/ocr ({choice.model}).")
+        elif key == "local":
+            chat_mod, _models = _settings_modules()
+            base = chat_mod.compat_base_url("local")
+            local_key = os.getenv("LOCAL_API_KEY") or ""
+            ids = _http_model_ids(f"{base}/models",
+                                  {"Authorization": f"Bearer {local_key}"} if local_key else {})
+            if choice.model not in ids:
+                raise OCRPreflightError(f"modèle « {choice.model} » absent du serveur local ({base}).")
+        else:
+            raise OCRPreflightError(f"{choice.server.label} ne fait pas d'OCR.")
+    except OCRPreflightError as exc:
+        raise OCRPreflightError(f"{prefix} ({label}) : {exc}") from exc
+    except Exception as exc:  # réseau, compte, modèle : jamais de démarrage à l'aveugle
+        raise OCRPreflightError(
+            f"{prefix} ({label}) : serveur inaccessible ou refus ({type(exc).__name__} : {exc})") from exc
+
+
+def _extract_text_with_chat_ocr(pdf_path: str, max_pages: Optional[int], return_details: bool, engine: Any = None):
+    """
+    OCR page par page sur le serveur local compatible OpenAI (``OCR_SERVER`` = ``LOCAL_API_BASE_URL``).
+
+    Chaque page est rastérisée (réglages ``ALBERT_OCR_DPI``, ``ALBERT_OCR_MAX_SIDE``,
+    ``ALBERT_OCR_MAX_TOKENS``, ``ALBERT_OCR_TEMPERATURE``, ``ALBERT_OCR_TOP_P``
+    du bloc 3.3, communs à l'OCR page par page) et envoyée seule avec une
+    consigne de transcription ; une page en échec laisse un marqueur et rend le
+    résultat partiel ; au-delà de ``ALBERT_OCR_MAX_FAILED_RATIO``, le document échoue.
+
+    Args:
+        pdf_path: PDF à transcrire.
+        max_pages: Pages au plus (``None`` : toutes).
+        return_details: Renvoyer un ``OCRResult`` (sinon le texte).
+        engine: Couple du serveur local (principal par défaut).
+
+    Raises:
+        OCRAccountError: Clé refusée par le serveur.
+        OCRExtractionError: Trop de pages en échec.
+    """
+    from openai import AuthenticationError, OpenAI
+
+    engine = _OCR_CHOICE if engine is None else engine
+    label = _ocr_choice_label(engine)
+
+    chat_mod, _models = _settings_modules()
+    client = OpenAI(api_key=os.getenv("LOCAL_API_KEY") or "local", base_url=chat_mod.compat_base_url("local"))
+    cfg = ALBERT_CONFIG
+    parts: List[str] = []
+    failed = truncated = 0
+    with fitz.open(pdf_path) as doc:
+        total = len(doc)
+        count = min(total, max_pages) if (max_pages and max_pages > 0) else total
+        for index in range(count):
+            page = doc.load_page(index)
+            zoom = min(cfg.ocr_dpi / 72.0, cfg.ocr_max_side / max(page.rect.width, page.rect.height))
+            png = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom)).tobytes("png")
+            uri = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+            content = [{"type": "text", "text": LOCAL_CHAT_OCR_INSTRUCTION},
+                       {"type": "image_url", "image_url": {"url": uri}}]
+            try:
+                resp = client.chat.completions.create(
+                    model=engine.model, messages=[{"role": "user", "content": content}],
+                    max_tokens=cfg.ocr_max_tokens, temperature=cfg.ocr_temperature, top_p=cfg.ocr_top_p)
+                choice = resp.choices[0]
+                if getattr(choice, "finish_reason", None) == "length":
+                    truncated += 1
+                parts.append(f"<!-- Page {index + 1} -->\n{(choice.message.content or '').strip()}")
+            except AuthenticationError as exc:
+                raise OCRAccountError(f"OCR ({label}) : clé refusée par le serveur local ({exc}).") from exc
+            except Exception as exc:
+                failed += 1
+                logger.warning("OCR serveur local : page %d de %s en échec (%s)", index + 1, pdf_path, exc)
+                parts.append(f"<!-- Page {index + 1} -->\n<!-- OCR ÉCHOUÉ ({LOCAL_CHAT_OCR_PROVIDER}) : "
+                             f"{type(exc).__name__} -->")
+    if count and failed / count > cfg.ocr_max_failed_ratio:
+        raise OCRExtractionError(
+            f"OCR ({label}) : {failed}/{count} pages en échec pour {os.path.basename(pdf_path)}.")
+    text = "\n\n".join(parts)
+    errors = []
+    if failed:
+        errors.append(f"{failed} page(s) en échec")
+    if truncated:
+        errors.append(f"{truncated} page(s) tronquée(s) (max_tokens)")
+    if count < total:
+        errors.append(f"{count}/{total} pages demandées")
+    density_error = _ocr_density_warning(text, count, pdf_path, LOCAL_CHAT_OCR_PROVIDER) if not errors else None
+    if density_error:
+        errors.append(density_error)
+    return _finalize_ocr_result(
+        text, LOCAL_CHAT_OCR_PROVIDER, return_details,
+        partial=bool(errors), pages_done=count - failed, pages_total=total,
+        error="; ".join(errors) or None,
+    )
+
+
+def _extract_text_explicit(pdf_path: str, max_pages: Optional[int], return_details: bool):
+    """
+    OCR d'un document par le moteur déclaré, puis par le repli s'il est déclaré.
+
+    Sans repli déclaré (D5) : un échec du moteur fait échouer le document
+    (``OCR_FAILED``), une erreur de compte arrête le lot. Avec un repli
+    (``OCR_SERVER_FALLBACK`` + ``OCR_MODEL_FALLBACK``) : un document en échec
+    est repris par le repli ; après une erreur de compte du moteur principal
+    (clé, plafond, quota), la suite du lot passe directement par le repli. Le
+    résultat du repli porte ``fallback_from`` (entrée ``OCR_PROVIDER_FALLBACK``
+    dans errors.json) ; un échec des deux fait échouer le document, une erreur
+    de compte du repli arrête le lot.
+
+    Raises:
+        OCRAccountError: Erreur de compte du moteur (principal sans repli, ou repli).
+        OCRExtractionError: Échec du moteur (et du repli) pour ce document.
+    """
+    global _OCR_PRIMARY_DOWN
+    fallback = _OCR_FALLBACK
+    primary_error = _OCR_PRIMARY_DOWN if fallback is not None else None
+    if primary_error is None:
+        try:
+            return _extract_with_ocr_engine(_OCR_CHOICE, pdf_path, max_pages, return_details)
+        except OCRAccountError as exc:
+            if fallback is None:
+                raise
+            primary_error = str(exc)
+            if _OCR_PRIMARY_DOWN is None:
+                _OCR_PRIMARY_DOWN = primary_error
+                logger.warning("OCR principal (%s) inutilisable (erreur de compte) : la suite du lot passe "
+                               "par le repli (%s).", _ocr_choice_label(), _ocr_choice_label(fallback))
+        except OCRExtractionError as exc:
+            if fallback is None:
+                raise
+            primary_error = str(exc)
+    logger.warning("OCR principal en échec pour %s : repli %s (%s)", os.path.basename(pdf_path),
+                   _ocr_choice_label(fallback), primary_error)
+    try:
+        result = _extract_with_ocr_engine(fallback, pdf_path, max_pages, return_details)
+    except OCRAccountError:
+        raise
+    except OCRExtractionError as exc:
+        raise OCRExtractionError(f"{primary_error} ; repli ({_ocr_choice_label(fallback)}) : {exc}") from exc
+    if isinstance(result, OCRResult):
+        result = result._replace(fallback_from=_ocr_choice_label())
+    return result
+
+
+def _extract_with_ocr_engine(choice: Any, pdf_path: str, max_pages: Optional[int], return_details: bool):
+    """
+    OCR d'un document par un moteur déclaré (principal ou repli), sans autre moteur.
+
+    Les réessais, le découpage, le salvage partiel et les points de reprise
+    propres au moteur restent actifs.
+
+    Args:
+        choice: Couple résolu du moteur.
+        pdf_path: PDF à transcrire.
+        max_pages: Pages au plus (``None`` : toutes).
+        return_details: Renvoyer un ``OCRResult`` (sinon le texte).
+
+    Raises:
+        OCRAccountError: Clé refusée, plafond de dépense ou quota du compte.
+        OCRExtractionError: Échec du moteur pour ce document.
+    """
+    label = _ocr_choice_label(choice)
+    if choice.server_url == "local" and choice.model == "pymupdf":
+        text = _extract_text_with_legacy_pdf(pdf_path, max_pages=max_pages, allow_ocr=False)
+        if not text.strip():
+            raise OCRExtractionError(
+                f"OCR ({label}) : aucune couche texte dans {os.path.basename(pdf_path)} "
+                "(PDF scanné : choisir un moteur d'OCR).")
+        pages = _pdf_page_count(pdf_path)
+        density_error = _ocr_density_warning(text, pages, pdf_path, PYMUPDF_PROVIDER)
+        return _finalize_ocr_result(text, PYMUPDF_PROVIDER, return_details, partial=bool(density_error),
+                                    pages_done=pages, pages_total=pages, error=density_error)
+    if choice.server_url == "local":
+        try:
+            text = _extract_text_with_local(pdf_path, max_pages=max_pages)
+        except Exception as exc:
+            raise OCRExtractionError(f"OCR ({label}) : {exc}") from exc
+        pages = _pdf_page_count(pdf_path)
+        density_error = _ocr_density_warning(text, pages, pdf_path, LOCAL_OCR_ENGINE)
+        return _finalize_ocr_result(text, LOCAL_OCR_ENGINE, return_details, partial=bool(density_error),
+                                    pages_done=pages, pages_total=pages, error=density_error)
+    key = choice.server.key
+    if key == "mistral":
+        try:
+            outcome = _extract_text_with_mistral(pdf_path, max_pages=max_pages)
+        except _MistralAuthError as exc:
+            raise OCRAccountError(str(exc)) from exc
+        except OCRExtractionError as exc:
+            raise OCRExtractionError(f"OCR ({label}) : {exc}") from exc
+        except Exception as exc:
+            raise OCRExtractionError(f"OCR ({label}) : {type(exc).__name__} : {exc}") from exc
+        return _finalize_ocr_result(outcome.text, "mistral", return_details, partial=outcome.partial,
+                                    pages_done=outcome.pages_done, pages_total=outcome.pages_total,
+                                    error=outcome.error)
+    if key == "albert":
+        try:
+            result = _try_albert_ocr(pdf_path, max_pages=max_pages)
+        except Exception as exc:
+            if _ALBERT_ACCOUNT_DISABLED:
+                raise OCRAccountError(f"OCR ({label}) : {_ALBERT_ACCOUNT_DISABLED}") from exc
+            raise OCRExtractionError(f"OCR ({label}) : {exc}") from exc
+        return _finalize_ocr_result(result.text, result.provider, return_details, partial=result.partial,
+                                    pages_done=result.pages_done, pages_total=result.pages_total,
+                                    error=result.error)
+    if key == "local":
+        return _extract_text_with_chat_ocr(pdf_path, max_pages, return_details, choice)
+    raise OCRExtractionError(f"OCR ({label}) : moteur non pris en charge.")
+
+
+def _explicit_columns(ocr_payload: Any = None) -> Dict[str, str]:
+    """Colonnes ``texteocr_server`` et ``texteocr_model`` du moteur qui a servi (OCR explicite seulement).
+
+    Args:
+        ocr_payload: Résultat du document ; ``fallback_from`` renseigné = texte du repli.
+    """
+    if not _OCR_EXPLICIT or _OCR_CHOICE is None:
+        return {}
+    engine = _OCR_CHOICE
+    if _OCR_FALLBACK is not None and getattr(ocr_payload, "fallback_from", None):
+        engine = _OCR_FALLBACK
+    return {"texteocr_server": engine.server_url, "texteocr_model": engine.model}
+
+
+def _explicit_item_failed(result: "ItemProcessingResult") -> bool:
+    """OCR explicite : vrai si un fichier du document a échoué (document ni écrit ni marqué traité)."""
+    return _OCR_EXPLICIT and any(err.get("error_type") in EXPLICIT_FAILURE_TYPES for err in result.errors)
+
+
 def extract_text_with_ocr(
     pdf_path: str,
     max_pages: Optional[int] = None,
@@ -2463,6 +3181,10 @@ def extract_text_with_ocr(
     Raises:
         OCRExtractionError: If all extraction methods fail
     """
+    # OCR explicite (OCR_SERVER + OCR_MODEL déclarés) : un seul moteur, aucun repli.
+    if _OCR_EXPLICIT:
+        return _extract_text_explicit(pdf_path, max_pages, return_details)
+
     # Track extraction time for metrics
     start_time = time.time()
     provider_used = "unknown"
@@ -2499,7 +3221,12 @@ def extract_text_with_ocr(
         elif OCR_ENABLE_ALBERT:
             albert_fallback_from = _albert_skipped_label(pdf_path)
 
-        if MISTRAL_API_KEY:
+        if ALBERT_STRICT_POLICY and (MISTRAL_API_KEY or os.getenv("OPENAI_API_KEY")):
+            _albert_warn_once(
+                "strict_policy_ocr",
+                "Politique albert_only : maillons OCR Mistral et OpenAI sautés (Albert, OCR local, legacy).",
+            )
+        if MISTRAL_API_KEY and not ALBERT_STRICT_POLICY:
             try:
                 logger.debug("Tentative d'OCR Mistral pour %s", pdf_path)
                 mistral_outcome = _extract_text_with_mistral(pdf_path, max_pages=max_pages)
@@ -2528,7 +3255,7 @@ def extract_text_with_ocr(
         else:
             logger.debug("MISTRAL_API_KEY absente, OCR Mistral ignoré pour %s", pdf_path)
 
-        openai_key = os.getenv("OPENAI_API_KEY")
+        openai_key = None if ALBERT_STRICT_POLICY else os.getenv("OPENAI_API_KEY")
         if openai_key and not OCR_ENABLE_OPENAI_FALLBACK:
             # Default policy — OpenAI Vision OCR is disabled (truncates books).
             logger.info(
@@ -2893,7 +3620,7 @@ def _process_single_zotero_item(
                 continue
 
             ext = os.path.splitext(path_from_json)[1].lower()
-            if ext not in (".pdf", ".epub", ".txt", ".md"):
+            if ext not in supported_attachment_extensions():
                 logger.warning(f"[{item_index}] Unsupported extension {ext or '(none)'} for {path_from_json}")
                 errors.append({
                     "itemKey": item_key,
@@ -2950,6 +3677,8 @@ def _process_single_zotero_item(
                     ocr_payload = extract_text_with_ocr_retry(actual_path, return_details=True)
                 elif ext == ".epub":
                     ocr_payload = _extract_text_from_epub(actual_path)
+                elif ext in IMAGE_EXTENSIONS:
+                    ocr_payload = _extract_text_from_image(actual_path)
                 else:  # .txt, .md
                     ocr_payload = _extract_text_from_plain(actual_path)
 
@@ -2967,6 +3696,7 @@ def _process_single_zotero_item(
                     "texteocr_partial": ocr_partial,
                     "texteocr_pages_done": ocr_pages_done,
                     "texteocr_pages_total": ocr_pages_total,
+                    **_explicit_columns(ocr_payload),
                 }
                 records.append(record)
 
@@ -3013,6 +3743,8 @@ def _process_single_zotero_item(
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                     })
 
+            except OCRAccountError:
+                raise
             except OCRExtractionError as ocr_error:
                 logger.error(f"[{item_index}] OCR failed for {actual_path}: {ocr_error}")
                 errors.append({
@@ -3041,6 +3773,8 @@ def _process_single_zotero_item(
             success=True
         )
 
+    except OCRAccountError:
+        raise
     except Exception as e:
         logger.error(f"[{item_index}] Error processing item {item_key}: {e}")
         errors.append({
@@ -3059,6 +3793,31 @@ def _process_single_zotero_item(
 
 
 def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, output_csv: str) -> pd.DataFrame:
+    """
+    Incremental loader (see `_load_zotero_to_dataframe_incremental_impl`), with LightOnOCR page checkpoints.
+
+    The checkpoint root (sprint R2) is the folder of `output_csv` for the
+    duration of the call only; the previous value is restored afterwards, so
+    no later caller of the OCR chain inherits it.
+
+    Args:
+        json_path: Zotero JSON export.
+        pdf_base_dir: Base folder of the attachments.
+        output_csv: Output CSV path.
+
+    Returns:
+        The DataFrame of the processed records.
+    """
+    global _ALBERT_OCR_CHECKPOINT_ROOT
+    previous = _ALBERT_OCR_CHECKPOINT_ROOT
+    set_albert_checkpoint_root(output_csv)
+    try:
+        return _load_zotero_to_dataframe_incremental_impl(json_path, pdf_base_dir, output_csv)
+    finally:
+        _ALBERT_OCR_CHECKPOINT_ROOT = previous
+
+
+def _load_zotero_to_dataframe_incremental_impl(json_path: str, pdf_base_dir: str, output_csv: str) -> pd.DataFrame:
     """
     Charge les métadonnées Zotero depuis un JSON vers un DataFrame
     avec extraction OCR du texte complet pour chaque PDF.
@@ -3087,11 +3846,12 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
         "itemKey", "type", "title", "abstract", "date", "url", "doi",
         "authors", "filename", "path", "attachment_title", "texteocr", "texteocr_provider",
         "texteocr_partial", "texteocr_pages_done", "texteocr_pages_total"
-    ]
+    ] + (["texteocr_server", "texteocr_model"] if _OCR_EXPLICIT else [])
 
     # Load progress (items already processed)
     progress_file = get_progress_file_path(output_csv)
     processed_keys = load_progress(output_csv)
+    fatal_ocr_error: Optional[OCRAccountError] = None
 
     # CRITICAL FIX: If no progress file but CSV exists, we have stale data
     # This happens when user runs new extraction without cleaning up old files
@@ -3177,9 +3937,10 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
 
                 # Process item
                 result = _process_single_zotero_item(item, pdf_base_dir, idx)
+                item_failed = _explicit_item_failed(result)
 
-                # Save records (thread-safe)
-                for record in result.records:
+                # Save records (thread-safe) ; OCR explicite : tout ou rien par document
+                for record in ([] if item_failed else result.records):
                     append_record_to_csv(output_csv, record, CSV_FIELDNAMES)
                     with records_count_lock:
                         records_count[0] += 1
@@ -3194,8 +3955,9 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
                 _record_ocr_fallback_trace(output_csv, result.item_key, result.errors)
                 _flush_albert_ocr_usage(output_csv)
 
-                # Mark as processed (thread-safe)
-                if result.item_key:
+                # Mark as processed (thread-safe) ; OCR explicite : un document en
+                # échec n'est pas marqué traité, la reprise le refait.
+                if result.item_key and not item_failed:
                     with processed_keys_lock:
                         processed_keys.add(result.item_key)
                         keys_done_now.add(result.item_key)
@@ -3224,6 +3986,10 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
                 ):
                     try:
                         future.result()  # Raise any exceptions
+                    except OCRAccountError:
+                        # Erreur de compte du moteur déclaré : plus aucun envoi.
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise
                     except Exception as e:
                         idx = futures[future]
                         logger.error(f"[{idx}] Unexpected error in thread: {e}")
@@ -3243,9 +4009,10 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
 
                 # Process using the shared function
                 result = _process_single_zotero_item(item, pdf_base_dir, idx)
+                item_failed = _explicit_item_failed(result)
 
-                # Save records
-                for record in result.records:
+                # Save records ; OCR explicite : tout ou rien par document
+                for record in ([] if item_failed else result.records):
                     append_record_to_csv(output_csv, record, CSV_FIELDNAMES)
                     records_count[0] += 1
                     logger.info(f"✓ Item {item_key} saved ({records_count[0]} total)")
@@ -3258,8 +4025,9 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
                 _record_ocr_fallback_trace(output_csv, result.item_key, result.errors)
                 _flush_albert_ocr_usage(output_csv)
 
-                # Mark as processed
-                if result.item_key:
+                # Mark as processed ; OCR explicite : un document en échec n'est pas
+                # marqué traité, la reprise le refait.
+                if result.item_key and not item_failed:
                     processed_keys.add(result.item_key)
                     keys_done_now.add(result.item_key)
                     save_progress(output_csv, processed_keys)
@@ -3268,6 +4036,15 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
                 title_short = item.get("title", f"Item {item_key}")[:50]
                 print(f"PROGRESS|row|{item_count}/{total_items}|{title_short}", flush=True)
 
+    except OCRAccountError as account_error:
+        # OCR explicite : erreur de compte du moteur déclaré, le lot s'arrête.
+        fatal_ocr_error = account_error
+        logger.error(f"OCR account error, run stopped: {account_error}")
+        all_errors.append({
+            "error_type": "OCR_ACCOUNT_ERROR",
+            "error_message": str(account_error),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
     except Exception as e:
         logger.error(f"Failed to load Zotero JSON: {e}")
 
@@ -3277,6 +4054,8 @@ def load_zotero_to_dataframe_incremental(json_path: str, pdf_base_dir: str, outp
 
     # Save errors to file
     save_errors(output_csv, all_errors)
+    if fatal_ocr_error is not None:
+        raise fatal_ocr_error
 
     # Return DataFrame from CSV (for compatibility)
     if os.path.exists(output_csv):
@@ -3467,7 +4246,7 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
                         continue
 
                     ext = os.path.splitext(path_from_json)[1].lower()
-                    if ext not in (".pdf", ".epub", ".txt", ".md"):
+                    if ext not in supported_attachment_extensions():
                         logger.warning(f"Extension non supportée: {ext or '(none)'} pour {path_from_json}")
                         continue
 
@@ -3494,6 +4273,8 @@ def load_zotero_to_dataframe(json_path: str, pdf_base_dir: str) -> pd.DataFrame:
                             ocr_payload = extract_text_with_ocr(actual_path, return_details=True)
                         elif ext == ".epub":
                             ocr_payload = _extract_text_from_epub(actual_path)
+                        elif ext in IMAGE_EXTENSIONS:
+                            ocr_payload = _extract_text_from_image(actual_path, retry=False)
                         else:  # .txt, .md
                             ocr_payload = _extract_text_from_plain(actual_path)
                     except OCRExtractionError as ocr_error:
@@ -3638,6 +4419,23 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     ALLOW_ATTACHMENTS_OUTSIDE_DIR = bool(args.allow_outside_dir)
+    if ALBERT_STRICT_POLICY and not ALBERT_CONFIG.enabled:
+        # albert_only sans Albert : refus explicite, jamais de retour vers Mistral ou OpenAI.
+        print("Erreur critique : ALBERT_DATA_POLICY=albert_only exige Albert (ALBERT_ENABLED=1). Arrêt.")
+        print("Albert abort: kind=config reason=policy_requires_albert")
+        sys.exit(2)
+    set_albert_checkpoint_root(args.output)
+
+    # OCR explicite (sprint « configuration unifiée », lot L5) : OCR_SERVER +
+    # OCR_MODEL déclarés → un seul moteur, contrôlé avant le premier document.
+    try:
+        ocr_choice = configure_explicit_ocr()
+        if ocr_choice is not None:
+            preflight_explicit_ocr()
+            print(f"OCR : {_ocr_choice_label()} (aucun repli)", flush=True)
+    except (OCRPreflightError, ValueError) as preflight_error:
+        print(f"Erreur critique : {preflight_error} Arrêt.", flush=True)
+        sys.exit(2)
 
     logger.info(f"Starting Zotero data processing for JSON: {args.json} with PDF base directory: {args.dir}")
 
@@ -3672,7 +4470,13 @@ if __name__ == "__main__":
     else:
         # Use new incremental mode (default)
         logger.info("Using incremental mode with checkpoint support")
-        df_zotero = load_zotero_to_dataframe_incremental(args.json, args.dir, args.output)
+        try:
+            df_zotero = load_zotero_to_dataframe_incremental(args.json, args.dir, args.output)
+        except OCRAccountError as account_error:
+            print(f"Erreur critique OCR (compte) : {account_error} Arrêt du lot ; les documents non traités "
+                  "seront repris à la relance.", flush=True)
+            _write_albert_ocr_usage(args.output)
+            sys.exit(1)
 
         if os.path.exists(args.output):
             logger.info(f"Processing complete. Output CSV: {args.output}")

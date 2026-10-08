@@ -31,8 +31,12 @@ from typing import Any, Iterable, Mapping, NamedTuple, Optional
 
 try:
     from scripts.rad_albert.errors import AlbertDisabledError
+    from scripts.rad_settings.capabilities import declared_choice
+    from scripts.rad_settings.chat import OFFICIAL_BASE_URLS, compat_base_url, compat_key_var, parse_compat
 except ImportError:
     from rad_albert.errors import AlbertDisabledError
+    from rad_settings.capabilities import declared_choice
+    from rad_settings.chat import OFFICIAL_BASE_URLS, compat_base_url, compat_key_var, parse_compat
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +47,9 @@ ALBERT_PREFIX = "albert/"
 PROVIDER_OPENAI = "openai"
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_ALBERT = "albert"
+PROVIDER_COMPAT_PREFIX = "compat:"
+"""Fournisseur ``compat:<serveur>`` : client compatible OpenAI sur l'adresse déclarée
+du serveur (forme interne ``@<serveur>:<modèle>``, ``scripts/rad_settings/chat.py``)."""
 
 # Identifiant de credential (``app/core/credentials.py``) propre à chaque fournisseur.
 CREDENTIAL_KEYS = {
@@ -66,6 +73,59 @@ class ProviderResolution(NamedTuple):
     credential_key: Optional[str]
 
 
+def is_compat(provider: Optional[str]) -> bool:
+    """Vrai pour un fournisseur ``compat:<serveur>``."""
+    return bool(provider) and str(provider).startswith(PROVIDER_COMPAT_PREFIX)
+
+
+def compat_server(provider: str) -> str:
+    """Serveur d'un fournisseur ``compat:<serveur>`` (``mistral``…)."""
+    return str(provider)[len(PROVIDER_COMPAT_PREFIX):]
+
+
+def credential_key_for(provider: str) -> Optional[str]:
+    """Identifiant de credential d'un fournisseur (``mistral_api_key`` pour ``compat:mistral``)."""
+    if is_compat(provider):
+        return f"{compat_server(provider)}_api_key"
+    return CREDENTIAL_KEYS.get(provider)
+
+
+def make_compat_client(provider: str, api_key: Optional[str], env: Optional[Mapping[str, str]] = None):
+    """Client compatible OpenAI pour ``compat:<serveur>``, sur l'adresse déclarée.
+
+    Args:
+        provider: ``compat:<serveur>``.
+        api_key: Clé du serveur (personnelle, ou ``.env`` pour un administrateur).
+        env: Valeurs où lire l'adresse (``os.environ`` par défaut).
+
+    Returns:
+        Un client ``openai.OpenAI`` dont ``base_url`` est l'adresse du serveur.
+
+    Raises:
+        ValueError: Clé absente ou adresse non déclarée.
+    """
+    from openai import OpenAI
+
+    server = compat_server(provider)
+    if not api_key:
+        raise ValueError(
+            f"Clé du serveur {server} absente ({compat_key_var(server)}) : la déclarer au bloc 1 du .env "
+            "ou dans Paramètres > Mes Identifiants.")
+    return OpenAI(api_key=api_key, base_url=compat_base_url(server, env))
+
+
+def make_async_compat_client(provider: str, api_key: Optional[str], env: Optional[Mapping[str, str]] = None):
+    """Version asynchrone de ``make_compat_client`` (``openai.AsyncOpenAI``)."""
+    from openai import AsyncOpenAI
+
+    server = compat_server(provider)
+    if not api_key:
+        raise ValueError(
+            f"Clé du serveur {server} absente ({compat_key_var(server)}) : la déclarer au bloc 1 du .env "
+            "ou dans Paramètres > Mes Identifiants.")
+    return AsyncOpenAI(api_key=api_key, base_url=compat_base_url(server, env))
+
+
 def legacy_provider(model: Optional[str]) -> str:
     """Réplique exacte du routage historique ``use_openrouter = "/" in model``.
 
@@ -77,8 +137,12 @@ def legacy_provider(model: Optional[str]) -> str:
         model: nom de modèle tel que saisi.
 
     Returns:
-        ``'openrouter'`` si le nom contient ``/``, sinon ``'openai'``.
+        ``'openrouter'`` si le nom contient ``/``, sinon ``'openai'`` ; pour la
+        forme interne ``@<serveur>:<modèle>``, ``compat:<serveur>``.
     """
+    compat = parse_compat(model) if (model and str(model).startswith("@")) else None
+    if compat:
+        return PROVIDER_COMPAT_PREFIX + compat[0]
     return PROVIDER_OPENROUTER if (model and "/" in model) else PROVIDER_OPENAI
 
 
@@ -95,6 +159,8 @@ def legacy_cache_provider_label(model: Optional[str], *, prefer_openai: bool) ->
     Returns:
         ``'openrouter'`` ou ``'openai'``.
     """
+    if model and str(model).startswith("@"):
+        return legacy_provider(model)
     if (model and "/" in model) and not prefer_openai:
         return PROVIDER_OPENROUTER
     return PROVIDER_OPENAI
@@ -133,6 +199,10 @@ def resolve_llm_provider(model: Optional[str], *, albert_enabled: bool) -> Provi
                 "Modèle Albert vide : préciser un identifiant après « albert/ » (ex. albert/gpt-oss-120b)."
             )
         return ProviderResolution(PROVIDER_ALBERT, wire, CREDENTIAL_KEYS[PROVIDER_ALBERT])
+    compat = parse_compat(text) if text.startswith("@") else None
+    if compat:
+        provider = PROVIDER_COMPAT_PREFIX + compat[0]
+        return ProviderResolution(provider, compat[1], credential_key_for(provider))
     provider = legacy_provider(text)
     return ProviderResolution(provider, text, CREDENTIAL_KEYS[provider])
 
@@ -220,6 +290,10 @@ _KNOWN_SPACES = {
     (space.provider, space.model, space.dim): space for space in (OPENAI_DEFAULT, ALBERT_BGE_M3)
 }
 
+# Modèles d'embedding OpenAI (adresse officielle) pris en charge par le couple
+# EMBEDDING_SERVER + EMBEDDING_MODEL (lot L6) : id → dimension.
+_OPENAI_EMBED_DIMS = {"text-embedding-3-large": 3072, "text-embedding-3-small": 1536, "text-embedding-ada-002": 1536}
+
 
 def _load_albert_config(env: Optional[Mapping[str, str]]) -> Any:
     """Construit ``AlbertConfig.from_env(env)`` (import paresseux, motif double)."""
@@ -228,6 +302,15 @@ def _load_albert_config(env: Optional[Mapping[str, str]]) -> Any:
     except ImportError:
         from rad_albert.config import AlbertConfig
     return AlbertConfig.from_env(env)
+
+
+def _load_policy_module() -> Any:
+    """Module ``rad_albert.policy`` (import paresseux, motif double)."""
+    try:
+        from scripts.rad_albert import policy
+    except ImportError:
+        from rad_albert import policy
+    return policy
 
 
 def _albert_space(cfg: Any) -> EmbeddingSpace:
@@ -253,28 +336,42 @@ def _albert_space(cfg: Any) -> EmbeddingSpace:
 
 @dataclass(frozen=True)
 class EmbeddingConfig:
-    """Choix du fournisseur d'embeddings denses (``EMBEDDING_PROVIDER``).
+    """Choix du fournisseur d'embeddings denses (couple ``EMBEDDING_*`` ou ``EMBEDDING_PROVIDER``).
 
     Attributes:
-        provider: ``'openai'`` (défaut, vide ou absent) ou ``'albert'``.
-        space: espace vectoriel correspondant.
+        provider: ``'openai'`` (défaut, vide ou absent), ``'albert'``, ou la clé
+            d'un serveur compatible OpenAI déclaré (``'mistral'``, ``'local'``…).
+        space: espace vectoriel correspondant ; ``dim`` vaut 0 pour un serveur
+            compatible tant que la dimension n'a pas été mesurée (premier appel).
+        compat_server: clé du serveur compatible OpenAI (vide pour OpenAI à son
+            adresse officielle et pour Albert).
+        key_var: variable de la clé de ce serveur (``MISTRAL_API_KEY``…).
     """
 
     provider: str
     space: EmbeddingSpace
+    compat_server: str = ""
+    key_var: str = ""
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "EmbeddingConfig":
-        """Lit ``EMBEDDING_PROVIDER`` dans ``env`` (``os.environ`` par défaut).
+        """Lit le couple ``EMBEDDING_SERVER`` + ``EMBEDDING_MODEL``, sinon ``EMBEDDING_PROVIDER``.
 
-        ``''`` ou absent → OpenAI (espace historique, aucune autre variable lue).
-        ``albert`` → espace bge-m3, décrit par ``AlbertConfig.from_env(env)``.
+        Mode unifié avec un couple déclaré (lot L6) : voir ``_from_choice``.
+        Sinon, ``EMBEDDING_PROVIDER`` : ``''`` ou absent → OpenAI (espace
+        historique, aucune autre variable lue) ; ``albert`` → espace bge-m3,
+        décrit par ``AlbertConfig.from_env(env)``.
 
         Raises:
-            AlbertDisabledError: ``albert`` demandé alors qu'``ALBERT_ENABLED`` ≠ 1.
-            ValueError: valeur inconnue, ou modèle Albert non pris en charge.
+            AlbertDisabledError: Albert demandé alors qu'``ALBERT_ENABLED`` ≠ 1.
+            ValueError: valeur inconnue, modèle non pris en charge, couple
+                invalide (``ServiceConfigError``) ou refusé par la politique
+                ``albert_only`` (``AlbertPolicyError``).
         """
         env = os.environ if env is None else env
+        choice = declared_choice("embedding", env)
+        if choice is not None:
+            return cls._from_choice(choice, env)
         raw = env.get("EMBEDDING_PROVIDER")
         name = (raw or "").strip().lower()
         if name in ("", PROVIDER_OPENAI):
@@ -290,6 +387,47 @@ class EmbeddingConfig:
         raise ValueError(
             f"EMBEDDING_PROVIDER={raw!r} inconnu : valeurs admises « openai » ou « albert »."
         )
+
+    @classmethod
+    def _from_choice(cls, choice: Any, env: Mapping[str, str]) -> "EmbeddingConfig":
+        """Configuration d'un couple déclaré (``rad_settings.models.ServiceChoice``).
+
+        * Albert : espace décrit par ``AlbertConfig.from_env(env)``, dont
+          ``ALBERT_EMBED_MODEL`` vaut le modèle du couple (superposition) ;
+        * OpenAI à son adresse officielle : modèle de ``_OPENAI_EMBED_DIMS`` ;
+          ``text-embedding-3-large`` redonne l'espace historique à l'identique ;
+        * autre serveur : client compatible OpenAI sur l'adresse déclarée,
+          espace ``<serveur>`` + modèle, dimension mesurée au premier appel.
+
+        Raises:
+            AlbertDisabledError: Albert désactivé.
+            ValueError: modèle OpenAI inconnu, ou politique ``albert_only`` et
+                serveur autre qu'Albert.
+        """
+        server = choice.server.key
+        cfg = _load_albert_config(env)
+        _load_policy_module().check_embedding_provider(
+            PROVIDER_ALBERT if server == PROVIDER_ALBERT else PROVIDER_OPENAI, cfg)
+        if server == PROVIDER_ALBERT:
+            if not getattr(cfg, "enabled", False):
+                raise AlbertDisabledError(
+                    "EMBEDDING_SERVER désigne Albert, désactivé sur ce serveur (ALBERT_ENABLED=1 requis).",
+                    model="EMBEDDING_SERVER=albert",
+                )
+            return cls(provider=PROVIDER_ALBERT, space=_albert_space(cfg))
+        if server == PROVIDER_OPENAI and choice.server_url == OFFICIAL_BASE_URLS[PROVIDER_OPENAI]:
+            dim = _OPENAI_EMBED_DIMS.get(choice.model)
+            if dim is None:
+                raise ValueError(
+                    f"EMBEDDING_MODEL={choice.model!r} : modèle OpenAI non pris en charge "
+                    f"(admis : {', '.join(sorted(_OPENAI_EMBED_DIMS))})."
+                )
+            if choice.model == OPENAI_DEFAULT.model:
+                return cls(provider=PROVIDER_OPENAI, space=OPENAI_DEFAULT)
+            space = replace(OPENAI_DEFAULT, model=choice.model, dim=dim, is_default=False)
+            return cls(provider=PROVIDER_OPENAI, space=space)
+        space = EmbeddingSpace(provider=server, model=choice.model, dim=0, batch_max=0, is_default=False, norm="none")
+        return cls(provider=server, space=space, compat_server=server, key_var=choice.server.key_var)
 
     def embed_params_json(self) -> str:
         """Paramètres d'espace de la clé du cache d'embeddings.

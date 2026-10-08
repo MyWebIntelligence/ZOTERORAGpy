@@ -12,13 +12,16 @@
   64 textes, 400 sur chaîne vide), ``/v1/ocr`` en 404 par défaut
   (``mistral-ocr-2512`` sans accès, D3), collections / documents (multipart) /
   chunks en mémoire avec pagination, recherche avec ``metadata_filters``,
-  ``/health`` à la racine. Des statuts, en-têtes ``Retry-After``, exceptions
+  ``/health`` à la racine ; sprint R2 : rerank (convention Cohere v2), chat
+  streamé (SSE, ``[DONE]``, usage final), ``/v1/usage`` (seaux journaliers) et
+  transcription audio (multipart, ``verbose_json``). Des statuts, en-têtes ``Retry-After``, exceptions
   réseau ou réponses arbitraires s'injectent par route (``inject``). Chaque
   requête est journalisée dans ``calls``.
 * ``FakeRedis`` : sous-ensemble de redis-py (``get``, ``set``, ``incr``,
   ``expire``, ``ttl``…) avec expirations et horloge injectable.
 
-Fichier gelé après la vague W1 : toute évolution passe par le gardien.
+Fichier gelé après la vague W1 : toute évolution passe par le gardien (extension R2 du
+2026-10-02 : rerank, streaming, usage, audio, seulement additive).
 """
 
 from __future__ import annotations
@@ -73,6 +76,11 @@ EMBED_MODEL_TYPE = "text-embeddings-inference"
 OCR_MODEL_TYPES = ("image-to-text", "image-text-to-text")
 SEARCH_METHODS = ("hybrid", "semantic", "lexical")
 FILTER_TYPES = ("eq", "sw", "ew", "co")
+RERANK_MODEL_TYPE = "text-classification"
+AUDIO_MODEL_TYPE = "automatic-speech-recognition"
+MAX_RERANK_DOCUMENTS = 64
+MAX_AUDIO_BYTES = 20 * 1024 * 1024
+AUDIO_FORMATS = ("json", "text", "verbose_json", "diarized_json", "srt", "vtt")
 
 # Points d'accès servis (méthode, gabarit de chemin). ``/health*`` est à la racine.
 ROUTES: Tuple[Tuple[str, str], ...] = (
@@ -98,6 +106,9 @@ ROUTES: Tuple[Tuple[str, str], ...] = (
     ("GET", "/v1/documents/{document_id}/chunks/{chunk_id}"),
     ("DELETE", "/v1/documents/{document_id}/chunks/{chunk_id}"),
     ("POST", "/v1/search"),
+    ("POST", "/v1/rerank"),
+    ("GET", "/v1/usage"),
+    ("POST", "/v1/audio/transcriptions"),
 )
 PUBLIC_ROUTES = frozenset({("GET", "/health")})
 # Routes à état (collections, documents, chunks, recherche) : traitées sous verrou.
@@ -304,7 +315,9 @@ class FakeAlbert:
 
     Réglages publics (modifiables après construction) : ``chat_reply``,
     ``ocr_chat_reply``, ``ocr_doc_reply``, ``ocr_access``, ``reasoning_models``,
-    ``reasoning_tokens``, ``embed_shuffle``, ``me``, ``models``, ``health_models``.
+    ``reasoning_tokens``, ``embed_shuffle``, ``me``, ``models``, ``health_models`` ;
+    sprint R2 : ``rerank_scorer``, ``stream_usage``, ``stream_fragments``,
+    ``usage_buckets``, ``audio_reply``, ``audio_segments``.
     """
 
     def __init__(
@@ -353,6 +366,13 @@ class FakeAlbert:
         self.ocr_chat_reply: Union[None, str, Callable[[str, int], str]] = None
         self.ocr_doc_reply: Union[None, str, Callable[[int], str]] = None
         self.embed_shuffle = False
+        # Sprint R2 : rerank, streaming, usage, audio.
+        self.rerank_scorer: Optional[Callable[[str, str], float]] = None
+        self.stream_usage = True
+        self.stream_fragments = 3
+        self.usage_buckets: Optional[List[Dict[str, Any]]] = None
+        self.audio_reply: Union[None, str, Callable[[str, bytes], str]] = None
+        self.audio_segments = 2
 
         self.models: List[Dict[str, Any]] = (
             [dict(m) for m in models] if models is not None else load_fixture("P2_models.json", self.fixtures_dir)["body"]["data"]
@@ -734,7 +754,44 @@ class FakeAlbert:
             }],
             "usage": self._usage(self._estimate_tokens(prompt_text), self._estimate_tokens(content or "")),
         })
+        if body.get("stream") is True:
+            return self._stream_response(response, body)
         return _json_response(200, response, RATELIMIT_HEADERS)
+
+    def _stream_response(self, response: Dict[str, Any], body: Dict[str, Any]) -> httpx.Response:
+        """Réponse SSE d'un chat streamé : raisonnement, fragments, usage final facultatif, ``[DONE]``.
+
+        Le texte est découpé en ``stream_fragments`` morceaux (``delta.content``) ;
+        un modèle à raisonnement émet d'abord ``delta.reasoning_content``. Avec
+        ``stream_options.include_usage`` et ``stream_usage``, un dernier bloc
+        sans ``choices`` porte l'usage. Les lignes sont séparées par des
+        retours à la ligne CRLF, comme un serveur SSE réel.
+        """
+        choice = response["choices"][0]
+        message = choice["message"]
+        content = message.get("content") or ""
+        reasoning = message.get("reasoning")
+        base = {"id": response["id"], "object": "chat.completion.chunk", "created": response["created"],
+                "model": response["model"]}
+        events: List[Dict[str, Any]] = [dict(base, choices=[{"index": 0, "delta": {"role": "assistant", "content": ""},
+                                                             "finish_reason": None}])]
+        if reasoning:
+            events.append(dict(base, choices=[{"index": 0, "delta": {"reasoning_content": str(reasoning)},
+                                               "finish_reason": None}]))
+        parts = max(1, int(self.stream_fragments))
+        size = max(1, math.ceil(len(content) / parts)) if content else 1
+        pieces = [content[i:i + size] for i in range(0, len(content), size)] if content else []
+        for piece in pieces:
+            events.append(dict(base, choices=[{"index": 0, "delta": {"content": piece}, "finish_reason": None}]))
+        events.append(dict(base, choices=[{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]))
+        options = body.get("stream_options") if isinstance(body.get("stream_options"), dict) else {}
+        if options.get("include_usage") and self.stream_usage:
+            events.append(dict(base, choices=[], usage=response["usage"]))
+        text = "".join("data: " + json.dumps(event, ensure_ascii=False) + "\r\n\r\n" for event in events)
+        text += "data: [DONE]\r\n\r\n"
+        headers = dict(RATELIMIT_HEADERS)
+        headers["content-type"] = "text/event-stream; charset=utf-8"
+        return httpx.Response(200, content=text.encode("utf-8"), headers=headers)
 
     @staticmethod
     def _message_parts(messages: List[Any]) -> Tuple[str, List[str]]:
@@ -1362,6 +1419,129 @@ class FakeAlbert:
             ranked = [(fused[id(c)], c) for c in chunks]
         ranked.sort(key=lambda item: (-item[0], item[1]["document_id"], item[1]["id"]))
         return ranked
+
+
+    # ------------------------------------------------------------------ rerank (R2)
+    def _rerank_score(self, query: str, document: str) -> float:
+        """Score de pertinence dans [0, 1] : ``rerank_scorer`` ou recouvrement lexical lissé."""
+        if callable(self.rerank_scorer):
+            return float(self.rerank_scorer(query, document))
+        terms = set(re.findall(r"\w+", query.lower()))
+        words = re.findall(r"\w+", document.lower())
+        hits = sum(1 for w in words if w in terms)
+        return round(hits / (hits + 3.0), 6)
+
+    def _route_post_v1_rerank(self, call: FakeCall) -> httpx.Response:
+        """``POST /v1/rerank`` (Cohere v2) : 1 à 64 textes non vides, ``top_n`` facultatif, tri décroissant."""
+        body = call.json if isinstance(call.json, dict) else {}
+        model = self.find_model(body.get("model"))
+        if model is None:
+            return _json_response(404, {"detail": "Model not found."})
+        if model.get("type") != RERANK_MODEL_TYPE:
+            return self._wrong_type(RERANK_MODEL_TYPE, str(model.get("type")))
+        query = body.get("query")
+        if not isinstance(query, str) or not query:
+            return _unprocessable([_validation_error(["body", "query"], "String should have at least 1 character",
+                                                     query, "string_too_short")])
+        documents = body.get("documents")
+        if not isinstance(documents, list) or not documents:
+            return _unprocessable([_validation_error(["body", "documents"], "Field required", documents, "missing")])
+        if len(documents) > MAX_RERANK_DOCUMENTS:
+            return _json_response(413, {"detail": f"batch size {len(documents)} > maximum allowed batch size 64"})
+        for index, doc in enumerate(documents):
+            if not isinstance(doc, str) or not doc:
+                return _unprocessable([_validation_error(["body", "documents", index],
+                                                         "String should have at least 1 character", doc,
+                                                         "string_too_short")])
+        top_n = body.get("top_n")
+        scored = [{"index": i, "relevance_score": self._rerank_score(query, d)} for i, d in enumerate(documents)]
+        scored.sort(key=lambda r: (-r["relevance_score"], r["index"]))
+        if isinstance(top_n, int) and not isinstance(top_n, bool) and top_n >= 1:
+            scored = scored[:top_n]
+        tokens = self._estimate_tokens(query) + sum(self._estimate_tokens(d) for d in documents)
+        return _json_response(200, {
+            "object": "list", "id": self._next_id("rerank"), "model": body.get("model"), "results": scored,
+            "usage": self._usage(tokens, 0, carbon=False),
+        }, RATELIMIT_HEADERS)
+
+    # ------------------------------------------------------------------ usage (R2)
+    def _route_get_v1_usage(self, call: FakeCall) -> httpx.Response:
+        """``GET /v1/usage`` : ``start_time`` et ``end_time`` requis ; un seau par jour (``usage_buckets``)."""
+        missing = [name for name in ("start_time", "end_time") if name not in call.params]
+        if missing:
+            return _unprocessable([_validation_error(["query", name], "Field required", None, "missing")
+                                   for name in missing])
+        try:
+            start = int(call.params["start_time"])
+            end = int(call.params["end_time"])
+        except ValueError:
+            return _unprocessable([_validation_error(["query", "start_time"], "Input should be a valid integer",
+                                                     call.params["start_time"], "int_parsing")])
+        error, offset, limit = self._page_params(call)
+        if error is not None:
+            return error
+        if self.usage_buckets is not None:
+            buckets = [dict(b) for b in self.usage_buckets]
+        else:
+            with self._lock:
+                counted = [c for c in self.calls if c.path in ("/v1/chat/completions", "/v1/embeddings", "/v1/rerank",
+                                                               "/v1/ocr", "/v1/audio/transcriptions")]
+            day = start - start % 86400
+            buckets = [{"object": "usage.bucket", "start_time": day, "end_time": day + 86400,
+                        "prompt_tokens": 10 * len(counted), "completion_tokens": 5 * len(counted),
+                        "total_tokens": 15 * len(counted), "cost": 0.0, "requests": len(counted),
+                        "impacts": {"kWh": 0.0, "kgCO2eq": 0.0}}] if counted else []
+        endpoint = call.params.get("endpoint")
+        if endpoint:
+            buckets = [b for b in buckets if b.get("endpoint") in (None, endpoint)]
+        buckets = [b for b in buckets if start <= int(b.get("start_time", start)) <= end]
+        return _json_response(200, {"object": "list", "data": buckets[offset:offset + limit]})
+
+    # ------------------------------------------------------------------ audio (R2)
+    def _route_post_v1_audio_transcriptions(self, call: FakeCall) -> httpx.Response:
+        """``POST /v1/audio/transcriptions`` (multipart) : 20 Mo au plus, formats json/text/verbose_json…"""
+        model = self.find_model(call.form.get("model"))
+        if model is None:
+            return _json_response(404, {"detail": "Model not found."})
+        if model.get("type") != AUDIO_MODEL_TYPE:
+            return self._wrong_type(AUDIO_MODEL_TYPE, str(model.get("type")))
+        upload = call.files.get("file")
+        if upload is None:
+            return _unprocessable([_validation_error(["body", "file"], "Field required", None, "missing")])
+        filename, data = upload
+        if len(data) > MAX_AUDIO_BYTES:
+            return _json_response(413, {"detail": "File size limit exceeded (20MB)."})
+        fmt = call.form.get("response_format") or "json"
+        if fmt not in AUDIO_FORMATS:
+            return _unprocessable([_validation_error(["body", "response_format"], "Input should be a valid format",
+                                                     fmt, "enum")])
+        if callable(self.audio_reply):
+            text = str(self.audio_reply(filename, data))
+        elif self.audio_reply is not None:
+            text = str(self.audio_reply)
+        else:
+            text = "Transcription simulée de " + filename + "."
+        usage = self._usage(0, self._estimate_tokens(text), carbon=False)
+        if fmt == "text":
+            return _json_response(200, text)
+        if fmt in ("srt", "vtt"):
+            return _json_response(200, "1\n00:00:00,000 --> 00:00:01,000\n" + text + "\n")
+        payload: Dict[str, Any] = {"id": self._next_id("transcription"), "text": text,
+                                   "model": call.form.get("model"), "usage": usage}
+        if fmt in ("verbose_json", "diarized_json"):
+            count = max(1, int(self.audio_segments))
+            words = text.split()
+            size = max(1, math.ceil(len(words) / count)) if words else 1
+            pieces = [" ".join(words[i:i + size]) for i in range(0, len(words), size)] or [""]
+            segments = []
+            for index, piece in enumerate(pieces):
+                segment = {"id": index, "start": float(index * 5), "end": float(index * 5 + 4.5), "text": piece}
+                if fmt == "diarized_json":
+                    segment["speaker"] = "SPEAKER_%02d" % (index % 2)
+                segments.append(segment)
+            payload.update({"language": call.form.get("language") or "fr",
+                            "duration": float(len(pieces) * 5), "segments": segments})
+        return _json_response(200, payload)
 
 
 # ---------------------------------------------------------------------------

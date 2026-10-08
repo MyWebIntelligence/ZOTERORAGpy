@@ -267,11 +267,20 @@
 
                 <div class="form-group">
                     <label for="llmModel" class="form-label">Modèle LLM (optionnel)</label>
-                    <input type="text" class="form-input" id="llmModel" placeholder="{{ default_llm_model }}" value="">
+{% if unified_mode %}                    <input type="text" class="form-input" id="llmModel" placeholder="{{ citations_choice.model }}" value="">
+                    <label for="llmServer" class="form-label">Serveur (optionnel)</label>
+                    <select class="form-select" id="llmServer">
+                        <option value="">Par défaut{% if citations_choice.server_label %} ({{ citations_choice.server_label }}){% endif %}</option>{% for srv in declared_servers if "chat" in srv.families %}
+                        <option value="{{ srv.url }}">{{ srv.label }} — {{ srv.url }}</option>{% endfor %}
+                    </select>
+                    <small class="form-help">
+                        Vides : vos choix (Profil &gt; Mes choix de modèles), sinon la configuration du serveur.
+                        Le nom du modèle est envoyé tel quel au serveur retenu.{% if citations_choice.error %} Configuration incomplète : {{ citations_choice.error }}{% endif %}
+                    </small>{% else %}                    <input type="text" class="form-input" id="llmModel" placeholder="{{ default_llm_model }}" value="">
                     <small class="form-help">
                         Laissez vide pour le défaut (<code>{{ default_llm_model }}</code>).
                         Format: <code>provider/model</code> → OpenRouter, <code>model</code> → OpenAI{% if albert_enabled %}, <code>albert/&lt;modèle&gt;</code> → Albert (DINUM){% endif %}
-                    </small>
+                    </small>{% endif %}
                 </div>
 
                 <div class="alert alert-info">
@@ -1191,7 +1200,11 @@
         // N'envoyer le modèle que s'il est spécifié (sinon le backend utilise le défaut .env)
         if (model.trim()) {
             formData.append('model', model.trim());
-        }
+        }{% if unified_mode %}
+        const llmServer = document.getElementById('llmServer').value;
+        if (llmServer) {
+            formData.append('server', llmServer);
+        }{% endif %}
 
         try {
             const response = await fetch(`/api/projects/${projectId}/upload_pop_json`, {

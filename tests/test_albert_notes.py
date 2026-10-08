@@ -330,6 +330,7 @@ def _g11_entries(monkeypatch, extra_kwargs):
 
 
 @pytest.mark.parametrize("variant", ["off_env_key", "off_kwarg_key", "on_kwarg_key"])
+
 def test_off_generate_kwargs_unchanged(variant, monkeypatch):
     fake = FakeAlbert()
     route_albert_to_fake(monkeypatch, fake, SleepRecorder())
@@ -343,12 +344,7 @@ def test_off_generate_kwargs_unchanged(variant, monkeypatch):
 def test_albert_api_key_is_last_kwarg_default_none():
     for func in (lng.build_note_html, lng.build_abstract_text, lng.build_note_html_async,
                  lng.build_abstract_text_async):
-        params = list(inspect.signature(func).parameters.values())
-        assert params[-2].name == "albert_api_key", func.__name__
-        assert params[-2].default is None, func.__name__
-        assert params[-1].name == "albert_usage_ledger", func.__name__
-        assert params[-1].kind is inspect.Parameter.KEYWORD_ONLY, func.__name__
-        assert params[-1].default is None, func.__name__
+        _assert_trailing_keyword_params(func)
     params = inspect.signature(lng._generate_with_llm).parameters
     assert params["albert_api_key"].default is None
 
@@ -674,3 +670,16 @@ def test_long_prompt_uses_long_context_model(albert_on):
     lng._generate_with_llm("Invite courte.", model="albert/" + REASONING_MODEL, mode="extended",
                            albert_api_key=FAKE_ALBERT_KEY)
     assert _chat_calls(fake)[-1].json["model"] == REASONING_MODEL
+
+
+def _assert_trailing_keyword_params(func):
+    """``albert_api_key`` (défaut None) puis seulement des paramètres nommés à défaut None :
+    le journal Albert et la clé du serveur déclaré (sprint « configuration unifiée »)."""
+    params = list(inspect.signature(func).parameters.values())
+    names = [p.name for p in params]
+    index = names.index("albert_api_key")
+    assert params[index].default is None, func.__name__
+    trailing = params[index + 1:]
+    assert {p.name for p in trailing} == {"albert_usage_ledger", "server_api_key"}, func.__name__
+    for param in trailing:
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is None, (func.__name__, param.name)

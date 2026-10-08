@@ -56,16 +56,22 @@ except ImportError:
     from rad_env import load_dotenv_guarded
 try:
     from scripts.rad_providers import (
-        ALBERT_PREFIX, PROVIDER_ALBERT, PROVIDER_OPENROUTER,
-        EmbeddingConfig, legacy_cache_provider_label, legacy_provider, resolve_llm_provider,
-        valid_dense_vector,
+        ALBERT_PREFIX, PROVIDER_ALBERT, PROVIDER_COMPAT_PREFIX, PROVIDER_OPENAI, PROVIDER_OPENROUTER,
+        EmbeddingConfig, compat_server, is_compat, legacy_cache_provider_label, legacy_provider,
+        make_compat_client, resolve_llm_provider, valid_dense_vector,
     )
+    from scripts.rad_settings.chat import compat_key_var, legacy_mode, routed_model_for
+    from scripts.rad_settings.models import ServiceConfigError
+    from scripts.rad_json_stream import count_json_array, iter_json_array, load_json, write_json_array_atomic
 except ImportError:
     from rad_providers import (
-        ALBERT_PREFIX, PROVIDER_ALBERT, PROVIDER_OPENROUTER,
-        EmbeddingConfig, legacy_cache_provider_label, legacy_provider, resolve_llm_provider,
-        valid_dense_vector,
+        ALBERT_PREFIX, PROVIDER_ALBERT, PROVIDER_COMPAT_PREFIX, PROVIDER_OPENAI, PROVIDER_OPENROUTER,
+        EmbeddingConfig, compat_server, is_compat, legacy_cache_provider_label, legacy_provider,
+        make_compat_client, resolve_llm_provider, valid_dense_vector,
     )
+    from rad_settings.chat import compat_key_var, legacy_mode, routed_model_for
+    from rad_settings.models import ServiceConfigError
+    from rad_json_stream import count_json_array, iter_json_array, load_json, write_json_array_atomic
 
 # Encodage sparse stable et versionné (audit A06), partagé avec les consommateurs.
 try:
@@ -231,13 +237,18 @@ _ALBERT_EMBED_ABORT_LOCK = threading.Lock()
 # et plafond d'un lot Albert (D12 : 65 textes donnent un 413).
 EMBEDDING_SPACE_FIELDS = ("embedding_provider", "embedding_model", "embedding_dim")
 ALBERT_EMBED_BATCH_MAX = 64
+# Serveur compatible OpenAI déclaré pour les embeddings (lot L6) : lots prudents
+# (Mistral plafonne les jetons par requête), dimension mesurée au premier appel.
+COMPAT_EMBED_BATCH_MAX = 16
 
 
 def recode_skip_providers(skip_lightonocr):
     """Fournisseurs d'OCR dont le texte n'est pas recodé.
 
     Mistral, CSV et les OCR locaux (markdown déjà propre), plus
-    ``albert_mistral_ocr`` (même moteur Mistral OCR servi par Albert).
+    ``albert_mistral_ocr`` (même moteur Mistral OCR servi par Albert) et
+    ``albert_whisper`` (transcription audio Albert, sprint R2 : texte déjà propre,
+    jamais envoyé à un autre modèle par défaut).
     ``albert_lightonocr`` n'y figure que si ``ALBERT_OCR_SKIP_RECODE=1`` (D21 :
     qualité non évaluée, recodage par défaut).
 
@@ -247,7 +258,7 @@ def recode_skip_providers(skip_lightonocr):
     Returns:
         Tuple des valeurs de ``texteocr_provider`` exclues du recodage.
     """
-    providers = ("mistral", "csv", "docling", "mineru", "marker", "albert_mistral_ocr")
+    providers = ("mistral", "csv", "docling", "mineru", "marker", "albert_mistral_ocr", "albert_whisper")
     if skip_lightonocr:
         providers += ("albert_lightonocr",)
     return providers
@@ -302,9 +313,37 @@ def effective_recode_model(cli_model, cfg):
     """
     if _selects_albert(cli_model):
         return cli_model
-    if cfg is not None and cfg.harden_enabled:
+    # Sprint « configuration unifiée » (D4) : hors mode historique, le modèle
+    # déclaré du service n'est jamais remplacé par RECODE_MODEL (le durcissement
+    # garde ses paramètres de décodage).
+    if cfg is not None and cfg.harden_enabled and legacy_mode():
         return cfg.model
     return cli_model
+
+
+_COMPAT_CLIENTS = {}
+_COMPAT_LOCK = threading.Lock()
+
+
+def _compat_route(model):
+    """Résolution d'un modèle routé ``@<serveur>:<modèle>``, ou ``None``."""
+    if not str(model or "").startswith("@"):
+        return None
+    return resolve_llm_provider(model, albert_enabled=False)
+
+
+def _compat_client(provider):
+    """Client compatible OpenAI du serveur déclaré ``compat:<serveur>`` (mis en cache).
+
+    La clé est celle du sous-bloc du serveur dans l'environnement du processus
+    (clé personnelle réinjectée par ``build_subprocess_env``, ou ``.env`` pour
+    un administrateur) ; l'adresse est celle déclarée au bloc 1.
+    """
+    with _COMPAT_LOCK:
+        if provider not in _COMPAT_CLIENTS:
+            key = os.getenv(compat_key_var(compat_server(provider)))
+            _COMPAT_CLIENTS[provider] = make_compat_client(provider, key)
+        return _COMPAT_CLIENTS[provider]
 
 
 def _albert_module(name):
@@ -782,6 +821,8 @@ def albert_abort_marker(exc):
         kind, reason = "service", exc.message_key
     elif isinstance(exc, _rad_albert.AlbertDisabledError):
         kind, reason = "config", "disabled"
+    elif type(exc).__name__ == "AlbertPolicyError":
+        kind, reason = "config", getattr(exc, "reason", "policy_violation")
     elif isinstance(exc, ValueError):
         kind, reason = "config", "invalid_config"
     else:
@@ -916,7 +957,7 @@ def recode_uses_openrouter(model, recode_cfg=None):
     garde de la CLI (``missing_llm_client_for_phase``) pour qu'elles ne puissent
     pas diverger :
 
-    * durcissement actif (``recode_cfg.harden_enabled``) : OpenAI direct (seed
+    * durcissement actif (``recode_cfg.harden_enabled``) en mode historique : OpenAI direct (seed
       honoré) sauf si OpenRouter est explicitement préféré
       (``prefer_openai`` faux) ET le fournisseur épinglé
       (``openrouter_provider``) ; il faut alors aussi que le modèle effectif
@@ -935,7 +976,9 @@ def recode_uses_openrouter(model, recode_cfg=None):
         ``True`` si l'appel utilise OpenRouter, ``False`` s'il utilise le client
         OpenAI.
     """
-    if recode_cfg is not None and recode_cfg.harden_enabled:
+    # Mode unifié (sprint « configuration unifiée ») : le serveur déclaré décide
+    # seul, RECODE_PREFER_OPENAI n'a plus d'effet (forme routée : slug = OpenRouter).
+    if recode_cfg is not None and recode_cfg.harden_enabled and legacy_mode():
         if recode_cfg.prefer_openai or not recode_cfg.openrouter_provider:
             return False
         eff_model = effective_recode_model(model, recode_cfg)  # == recode_cfg.model
@@ -985,25 +1028,34 @@ def gpt_recode_batch(chunks, instructions, model="gpt-4o-mini", temperature=0.3,
         max_tokens = recode_cfg.max_tokens
         top_p = recode_cfg.top_p
         seed = recode_cfg.seed
-    # Règle unique du routage OpenAI vs OpenRouter (partagée avec la garde de la CLI).
-    use_openrouter = recode_uses_openrouter(model, recode_cfg)
-
-    active_client = openrouter_client if (use_openrouter and openrouter_client) else client
-
-    if use_openrouter and not openrouter_client:
-        print(f"Warning: OpenRouter model '{model}' requested but OpenRouter client not initialized.")
-        print("Falling back to OpenAI gpt-4o-mini")
-        model = "gpt-4o-mini"
-        active_client = client
+    compat = _compat_route(model)
+    if compat is not None:
+        # Serveur déclaré (sprint « configuration unifiée ») : client compatible
+        # OpenAI sur l'adresse du serveur, sans repli vers un autre fournisseur.
         use_openrouter = False
+        active_client = _compat_client(compat.provider)
+        model = compat.wire_model
+        print(f"Using declared server {compat_server(compat.provider)} with model: {model}")
+    else:
+        # Règle unique du routage OpenAI vs OpenRouter (partagée avec la garde de la CLI).
+        use_openrouter = recode_uses_openrouter(model, recode_cfg)
 
-    print(f"Using {'OpenRouter' if (use_openrouter and openrouter_client) else 'OpenAI'} with model: {model}")
+        active_client = openrouter_client if (use_openrouter and openrouter_client) else client
+
+        if use_openrouter and not openrouter_client:
+            print(f"Warning: OpenRouter model '{model}' requested but OpenRouter client not initialized.")
+            print("Falling back to OpenAI gpt-4o-mini")
+            model = "gpt-4o-mini"
+            active_client = client
+            use_openrouter = False
+
+        print(f"Using {'OpenRouter' if (use_openrouter and openrouter_client) else 'OpenAI'} with model: {model}")
 
     def _create(msgs, mdl=model):
         kwargs = {"model": mdl, "messages": msgs, "temperature": temperature, "max_tokens": max_tokens}
         if top_p is not None:
             kwargs["top_p"] = top_p
-        if seed is not None and not use_openrouter:  # seed honoré côté OpenAI seul
+        if seed is not None and not use_openrouter and compat is None:  # seed honoré côté OpenAI seul
             kwargs["seed"] = seed
         if use_openrouter and recode_cfg is not None and recode_cfg.openrouter_provider:
             kwargs["extra_body"] = {"provider": {"order": [recode_cfg.openrouter_provider], "allow_fallbacks": False}}
@@ -1087,7 +1139,7 @@ def recode_batch_cached(raw_batch, instructions, model, models_out=None):
         # Cache off : recode direct (durcissement éventuel si harden_enabled).
         return gpt_recode_batch(raw_batch, instructions, model=model, recode_cfg=cfg)
 
-    provider = legacy_cache_provider_label(eff_model, prefer_openai=cfg.prefer_openai)
+    provider = legacy_cache_provider_label(eff_model, prefer_openai=cfg.prefer_openai and legacy_mode())
     pv = rad_recode_cache.prompt_fingerprint(_RECODE_SYSTEM, _RECODE_TEMPLATE, instructions)
     dp = cfg.decode_params_json()
 
@@ -1231,8 +1283,7 @@ def _load_existing_chunks(json_file):
     if not os.path.exists(json_file):
         return []
     try:
-        with open(json_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        data = load_json(json_file)  # lecture en flux (fichiers de plusieurs Go)
         if isinstance(data, list):
             return data
         reason = "le contenu n'est pas une liste"
@@ -1386,7 +1437,11 @@ def process_document_chunks(row_data, json_file=DEFAULT_JSON_FILE_CHUNKS, model=
                 )
         else:
             if start_index == 0:
-                print("  OCR Mistral détecté → recodage GPT sauté (chunks utilisés tels quels).")
+                if provider == "albert_whisper":
+                    # Transcription audio Albert (sprint R2) : message propre, les autres inchangés.
+                    print("  Transcription audio Albert détectée → recodage sauté (chunks utilisés tels quels).")
+                else:
+                    print("  OCR Mistral détecté → recodage GPT sauté (chunks utilisés tels quels).")
             cleaned_batch = batch_to_recode
             recode_statuses = ["skipped"] * len(batch_to_recode)
 
@@ -1580,9 +1635,10 @@ def resolve_embedding_config(env=None):
 def albert_embed_startup_exception():
     """Erreur qui empêche la phase dense de démarrer avec l'espace demandé, sinon ``None``.
 
-    Contrôles locaux, sans appel réseau : ``EMBEDDING_PROVIDER`` connu, Albert
-    activé pour ``albert``, URL de base admise et clé présente. ``None`` pour
-    l'espace OpenAI (le socle Albert n'est alors pas chargé).
+    Contrôles locaux, sans appel réseau : ``EMBEDDING_PROVIDER`` connu (ou
+    couple ``EMBEDDING_*`` valide), Albert activé pour ``albert``, URL de base
+    admise et clé présente ; serveur compatible déclaré (lot L6) : sa clé.
+    ``None`` pour l'espace OpenAI (le socle Albert n'est alors pas chargé).
 
     Returns:
         ``AlbertDisabledError`` ou ``ValueError`` (configuration refusée),
@@ -1592,6 +1648,10 @@ def albert_embed_startup_exception():
         cfg = resolve_embedding_config()
     except ValueError as exc:
         return exc
+    if cfg.compat_server:
+        if not _compat_embed_key(cfg):
+            return ValueError(f"Embeddings sur le serveur {cfg.compat_server} : clé {cfg.key_var} absente.")
+        return None
     if cfg.space.provider != PROVIDER_ALBERT:
         return None
     try:
@@ -1810,6 +1870,62 @@ def _openai_vectors(response, count):
     return out
 
 
+# Client compatible OpenAI des embeddings du run (couple EMBEDDING_SERVER +
+# EMBEDDING_MODEL sur un autre serveur qu'OpenAI ou Albert, lot L6) ; None :
+# client OpenAI historique.
+_EMBED_COMPAT_CLIENT = None
+
+
+def _embed_client():
+    """Client des embeddings du run : serveur compatible déclaré, sinon OpenAI."""
+    return _EMBED_COMPAT_CLIENT if _EMBED_COMPAT_CLIENT is not None else client
+
+
+def _clear_compat_embeddings():
+    """Oublie le client compatible d'un run précédent (début de chaque phase dense)."""
+    global _EMBED_COMPAT_CLIENT
+    _EMBED_COMPAT_CLIENT = None
+
+
+def _compat_embed_key(embed_cfg, env=None):
+    """Clé du serveur compatible des embeddings (``local`` : facultative)."""
+    source = os.environ if env is None else env
+    key = (source.get(embed_cfg.key_var) or "").strip() if embed_cfg.key_var else ""
+    if not key and embed_cfg.compat_server == "local":
+        return "local"
+    return key
+
+
+def _start_compat_embeddings(embed_cfg):
+    """Prépare les embeddings sur un serveur compatible OpenAI déclaré.
+
+    Crée le client sur l'adresse déclarée (clé du serveur) puis, si la
+    dimension est inconnue, la mesure sur un texte d'essai. Aucun repli.
+
+    Args:
+        embed_cfg: ``EmbeddingConfig`` dont ``compat_server`` est renseigné.
+
+    Returns:
+        L'espace du run, dimension mesurée.
+
+    Raises:
+        ValueError: clé absente, adresse non déclarée ou aucun vecteur valide.
+        Exception: erreur du serveur au premier appel.
+    """
+    global _EMBED_COMPAT_CLIENT
+    server = embed_cfg.compat_server
+    _EMBED_COMPAT_CLIENT = make_compat_client(f"{PROVIDER_COMPAT_PREFIX}{server}", _compat_embed_key(embed_cfg))
+    space = embed_cfg.space
+    if not space.dim:
+        response = _EMBED_COMPAT_CLIENT.embeddings.create(input=["dimension"], model=space.model, timeout=60.0)
+        vec = _openai_vectors(response, 1)[0]
+        if vec is None:
+            raise ValueError(f"{server} : aucun vecteur valide pour le modèle {space.model} (mesure de la dimension).")
+        space = dataclasses.replace(space, dim=len(vec))
+    print(f"Embeddings : modèle {space.model} sur le serveur {server} ({space.dim} dimensions).")
+    return space
+
+
 def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, max_retries=3, space=None):
     """
     Generate embeddings avec retry exponentiel et adaptive batching.
@@ -1847,9 +1963,10 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
     batch_size = len(texts)
     if _OPENAI_EMBED_ABORT is not None:
         return [None] * batch_size
+    embed_client = _embed_client()
 
     try:
-        response = client.embeddings.create(
+        response = embed_client.embeddings.create(
             input=texts,
             model=model,
             timeout=60.0  # Timeout explicite
@@ -1872,11 +1989,11 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
             mid = batch_size // 2
             logging.info(f"Splitting batch {batch_size} → {mid} + {batch_size - mid}")
 
-            emb1 = get_embeddings_batch(texts[:mid], model, retry_count + 1, max_retries)
-            emb2 = get_embeddings_batch(texts[mid:], model, retry_count + 1, max_retries)
+            emb1 = get_embeddings_batch(texts[:mid], model, retry_count + 1, max_retries, space=space)
+            emb2 = get_embeddings_batch(texts[mid:], model, retry_count + 1, max_retries, space=space)
             return emb1 + emb2
         else:
-            return get_embeddings_batch(texts, model, retry_count + 1, max_retries)
+            return get_embeddings_batch(texts, model, retry_count + 1, max_retries, space=space)
 
     except _OPENAI_PERMANENT_ERRORS as e:
         logging.error(f"Embedding error (batch {batch_size}), permanent: {type(e).__name__}: {e}")
@@ -1892,7 +2009,7 @@ def get_embeddings_batch(texts, model="text-embedding-3-large", retry_count=0, m
                 embeddings.append(None)
                 continue
             try:
-                resp = client.embeddings.create(input=[text], model=model)
+                resp = embed_client.embeddings.create(input=[text], model=model)
                 embeddings.append(_openai_vectors(resp, 1)[0])
             except _OPENAI_PERMANENT_ERRORS as e2:
                 logging.error(f"Failed individual embedding, permanent: {type(e2).__name__}: {e2}")
@@ -2014,26 +2131,33 @@ def process_chunks_for_embedding(chunks_batch, space=None):
     """
     texts_to_embed = [chunk.get("text", "") for chunk in chunks_batch]
     recode_cfg = rad_recode_cache.RecodeConfig.from_env()
-    if space is not None and not space.is_default:
+    if space is not None and space.provider == PROVIDER_ALBERT:
         if recode_cfg.embed_cache_enabled:
             embeddings = _embed_with_cache(texts_to_embed, recode_cfg, model=space.model, space=space)
         else:
             embeddings = get_embeddings_batch(texts_to_embed, model=space.model, space=space)
     else:
-        # OpenAI : un texte vide ou blanc n'est jamais envoyé (refus 400 de l'API),
-        # son chunk reste sans vecteur, comme sur le chemin Albert.
+        # OpenAI (ou serveur compatible, lot L6) : un texte vide ou blanc n'est
+        # jamais envoyé (refus 400 de l'API), son chunk reste sans vecteur,
+        # comme sur le chemin Albert.
         positions = [i for i, text in enumerate(texts_to_embed) if isinstance(text, str) and text.strip()]
         sent = [texts_to_embed[i] for i in positions]
+        default_space = space is None or space.is_default
         if not sent:
             results = []
-        elif recode_cfg.embed_cache_enabled:
+        elif default_space and recode_cfg.embed_cache_enabled:
             results = _embed_with_cache(sent, recode_cfg)
-        else:
+        elif default_space:
             results = get_embeddings_batch(sent)
+        elif recode_cfg.embed_cache_enabled:
+            results = _embed_with_cache(sent, recode_cfg, model=space.model, space=space)
+        else:
+            results = get_embeddings_batch(sent, model=space.model, space=space)
         embeddings = [None] * len(texts_to_embed)
         for j, i in enumerate(positions):
             vec = results[j] if j < len(results) else None
-            embeddings[i] = vec if valid_dense_vector(vec) else None
+            valid = valid_dense_vector(vec) if default_space else _valid_space_vector(vec, space)
+            embeddings[i] = vec if valid else None
 
     for i, embedding in enumerate(embeddings):
         if embedding is not None:
@@ -2107,9 +2231,14 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
 
     albert_cfg = _start_albert_embeddings(space) if use_albert else None
     reset_openai_embed_state()
+    _clear_compat_embeddings()
+    if embed_cfg.compat_server:
+        try:
+            space = _start_compat_embeddings(embed_cfg)
+        except Exception as exc:
+            abort_embeddings(exc, code=2)
 
-    with open(input_json_file, 'r', encoding='utf-8') as f:
-        all_chunks_from_file = json.load(f)
+    all_chunks_from_file = load_json(input_json_file)  # lecture en flux
 
     total_chunks = len(all_chunks_from_file)
     print(f"Chargement de {total_chunks} chunks depuis '{input_json_file}' pour génération d'embeddings.")
@@ -2122,6 +2251,8 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
     if use_albert:
         batch_size = min(DEFAULT_EMBEDDING_BATCH_SIZE, space.batch_max or ALBERT_EMBED_BATCH_MAX,
                          ALBERT_EMBED_BATCH_MAX)
+    elif embed_cfg.compat_server:
+        batch_size = min(DEFAULT_EMBEDDING_BATCH_SIZE, COMPAT_EMBED_BATCH_MAX)
 
     # Créer tous les batches à traiter (flat list, pas groupés par doc)
     all_batches = []
@@ -2152,7 +2283,7 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
 
     def _valid_for_run(vec):
         """Vecteur exploitable dans l'espace du run (dimension contrôlée hors défaut)."""
-        return _valid_space_vector(vec, space) if use_albert else valid_dense_vector(vec)
+        return valid_dense_vector(vec) if space.is_default else _valid_space_vector(vec, space)
 
     # Fenêtre bornée de lots en vol (audit A10) : les futures ne sont plus
     # soumises d'un coup pour tout le corpus.
@@ -2167,7 +2298,7 @@ def generate_and_save_embeddings(input_json_file, output_json_file=None):
                 next_idx, next_batch = next(pending_batches)
             except StopIteration:
                 return False
-            if use_albert:
+            if not space.is_default:
                 futures[executor.submit(process_chunks_for_embedding, next_batch, space)] = next_idx
             else:
                 futures[executor.submit(process_chunks_for_embedding, next_batch)] = next_idx
@@ -2439,40 +2570,46 @@ def generate_sparse_embeddings(input_json_file=DEFAULT_INPUT_JSON_WITH_EMBEDDING
     """
     Charge les chunks (qui incluent déjà les embeddings denses) depuis `input_json_file`,
     génère les embeddings sparses pour chaque chunk, et sauvegarde le tout dans `output_json_file`.
+
+    Lecture et écriture en flux (``scripts/rad_json_stream.py``) : un chunk à la
+    fois en mémoire, fichier écrit de façon atomique avec les octets de
+    ``write_json_atomic`` (un fichier de 1,8 Go faisait tuer le processus, code -9,
+    dans un conteneur limité à 8 Go).
     """
     if not os.path.exists(input_json_file):
         print(f"Le fichier d'entrée '{input_json_file}' pour les embeddings sparses n'existe pas.")
         return None
-    
-    with open(input_json_file, 'r', encoding='utf-8') as f:
-        all_chunks = json.load(f)
-    
-    total_chunks = len(all_chunks)
+
+    total_chunks = count_json_array(input_json_file)
     print(f"Chargement de {total_chunks} chunks depuis '{input_json_file}' pour génération d'embeddings sparses.")
     # Emit init event for SSE progress tracking
     print(f"PROGRESS|init|{total_chunks}|Loading {total_chunks} chunks for sparse embedding", flush=True)
 
-    for i, chunk in enumerate(tqdm(all_chunks, desc="Génération Embeddings Sparses")):
-        chunk_text = chunk.get("text", "")
-        if not chunk_text:
-            print(f"Chunk ID {chunk.get('id', i)} a un texte vide, embedding sparse sera vide.")
-            sparse_embedding = {"indices": [], "values": []}
-        else:
-            try:
-                sparse_embedding = extract_sparse_features(chunk_text)
-            except Exception as e:
-                print(f"Erreur lors de la génération de l'embedding sparse pour le chunk ID {chunk.get('id', i)}: {e}")
-                sparse_embedding = {"indices": [], "values": []}  # Fallback
+    def with_sparse():
+        """Chunks du fichier d'entrée, un par un, complétés de leur embedding sparse."""
+        stream = iter_json_array(input_json_file)
+        for i, chunk in enumerate(tqdm(stream, total=total_chunks, desc="Génération Embeddings Sparses")):
+            chunk_text = chunk.get("text", "")
+            if not chunk_text:
+                print(f"Chunk ID {chunk.get('id', i)} a un texte vide, embedding sparse sera vide.")
+                sparse_embedding = {"indices": [], "values": []}
+            else:
+                try:
+                    sparse_embedding = extract_sparse_features(chunk_text)
+                except Exception as e:
+                    print(f"Erreur lors de la génération de l'embedding sparse pour le chunk ID {chunk.get('id', i)}: {e}")
+                    sparse_embedding = {"indices": [], "values": []}  # Fallback
 
-        all_chunks[i]["sparse_embedding"] = sparse_embedding  # Ajoute/met à jour la clé "sparse_embedding"
+            chunk["sparse_embedding"] = sparse_embedding  # Ajoute/met à jour la clé "sparse_embedding"
 
-        # Emit chunk-level progress every 50 chunks to avoid overwhelming SSE
-        if (i + 1) % 50 == 0 or (i + 1) == total_chunks:
-            print(f"PROGRESS|chunk|{i + 1}/{total_chunks}|SpaCy processing chunk {i + 1}", flush=True)
+            # Emit chunk-level progress every 50 chunks to avoid overwhelming SSE
+            if (i + 1) % 50 == 0 or (i + 1) == total_chunks:
+                print(f"PROGRESS|chunk|{i + 1}/{total_chunks}|SpaCy processing chunk {i + 1}", flush=True)
+            yield chunk
 
-    # Sauvegarde finale des chunks (maintenant avec embeddings denses et sparses)
-    # Utilise la même fonction de sauvegarde que pour les embeddings denses (overwrite)
-    save_processed_chunks_to_json_overwrite(all_chunks, output_json_file)
+    # Sauvegarde en flux (octets identiques à save_processed_chunks_to_json_overwrite)
+    written = write_json_array_atomic(with_sparse(), output_json_file)
+    print(f"Tous les chunks ({written}) ont été sauvegardés dans {output_json_file}")
     
     print(f"Traitement des embeddings sparses terminé. Fichier sauvegardé: {output_json_file}")
     return output_json_file
@@ -2485,9 +2622,10 @@ def _dense_requires_openai():
     rapportée par ``albert_embed_startup_exception`` (sortie en 2).
     """
     try:
-        return resolve_embedding_config().space.provider != PROVIDER_ALBERT
+        cfg = resolve_embedding_config()
     except ValueError:
         return False
+    return cfg.space.provider == PROVIDER_OPENAI and not cfg.compat_server
 
 
 def missing_llm_client_for_phase(phase, model):
@@ -2527,6 +2665,9 @@ def missing_llm_client_for_phase(phase, model):
         recode_cfg = rad_recode_cache.RecodeConfig.from_env()
         if _selects_albert(effective_recode_model(model, recode_cfg)):
             return not ALBERT_API_KEY
+        compat = _compat_route(effective_recode_model(model, recode_cfg))
+        if compat is not None:
+            return not os.getenv(compat_key_var(compat_server(compat.provider)))
         if recode_cfg.harden_enabled:
             # OpenRouter seulement si le routage durci l'emprunte (son client existe
             # alors) ; sinon le client OpenAI, sans repli possible.
@@ -2537,17 +2678,66 @@ def missing_llm_client_for_phase(phase, model):
     return False
 
 
+DEFAULT_RECODE_MODEL = "gpt-4o-mini"
+"""Modèle de recodage par défaut de la CLI (politique ``compatible``)."""
+
+
+def apply_inference_policy(phase, model, model_given, env=None):
+    """Applique ``ALBERT_DATA_POLICY`` à la CLI (défense en profondeur, sprint R2).
+
+    Politique ``compatible`` (défaut) : rien ne change (modèle par défaut
+    ``gpt-4o-mini`` si ``--model`` est absent). Politique ``albert_only`` :
+    Albert doit être activé ; sans ``--model``, le recodage prend le défaut
+    Albert du rôle ``recode`` ; un ``--model`` sans préfixe ``albert/`` est
+    refusé ; pour la phase dense, ``EMBEDDING_PROVIDER`` vide devient
+    ``albert`` et ``openai`` est refusé.
+
+    Args:
+        phase: phase demandée (``initial``, ``dense``, ``sparse``, ``all``).
+        model: valeur de ``--model`` (``None`` si absente).
+        model_given: vrai si ``--model`` figure sur la ligne de commande.
+        env: environnement à lire et compléter (défaut ``os.environ``).
+
+    Returns:
+        ``(modèle à utiliser, erreur)`` : l'erreur (``AlbertPolicyError``) est
+        ``None`` quand la politique est respectée.
+    """
+    source = os.environ if env is None else env
+    policy_mod = _albert_module("policy")
+    cfg = _rad_albert.AlbertConfig.from_env(
+        {name: source[name] for name in ("ALBERT_ENABLED", "ALBERT_DATA_POLICY") if name in source}
+    )
+    if not policy_mod.is_strict(cfg):
+        return (model if model_given and model else DEFAULT_RECODE_MODEL), None
+    try:
+        policy_mod.check_configuration(cfg)
+        chosen = model if model_given and model else None
+        if phase in ("initial", "all"):
+            chosen = policy_mod.check_chat_model(chosen, cfg, role="recode")
+        if phase in ("dense", "all"):
+            provider = policy_mod.check_embedding_provider(source.get("EMBEDDING_PROVIDER"), cfg)
+            source["EMBEDDING_PROVIDER"] = provider
+        return (chosen or policy_mod.default_albert_model("recode", cfg)), None
+    except ValueError as exc:
+        return model or DEFAULT_RECODE_MODEL, exc
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Process text data through chunking and embedding phases.")
     parser.add_argument("--input", required=True, help="Path to the input file (CSV for 'initial' phase, JSON for 'dense' and 'sparse' phases).")
     parser.add_argument("--output", required=True, help="Directory to save the output JSON files.")
     parser.add_argument("--phase", choices=['initial', 'dense', 'sparse', 'all'], default='all',
                         help="Specify processing phase: 'initial' (chunking), 'dense' (dense embeddings), 'sparse' (sparse embeddings), or 'all'.")
-    parser.add_argument("--model", type=str, default="gpt-4o-mini",
+    parser.add_argument("--model", type=str, default=None,
                         help="LLM model for text recoding. Use 'gpt-4o-mini' (OpenAI), 'google/gemini-2.5-flash' "
                              "(OpenRouter) or 'albert/<id>' (Albert, DINUM: e.g. 'albert/ministral-3-8b-instruct-2512'; "
                              "requires ALBERT_ENABLED=1 and ALBERT_API_KEY, never falls back to OpenAI/OpenRouter). "
                              "Default: gpt-4o-mini")
+    parser.add_argument("--server", type=str, default=None,
+                        help="Adresse du serveur du recodage pour cette exécution (sprint « configuration unifiée ») : "
+                             "remplace LLM_RECODE_SERVER puis LLM_DEFAULT_SERVER ; l'adresse doit être déclarée au "
+                             "bloc 1 du .env. Sans --model, le modèle vient de LLM_RECODE_MODEL puis "
+                             "LLM_DEFAULT_MODEL. Ignorée en mode historique (pas de LLM_DEFAULT_SERVER).")
     parser.add_argument("--embedding-provider", choices=["openai", "albert"], default=None,
                         help="Dense embedding provider for the 'dense' phase: 'openai' (text-embedding-3-large, "
                              "3072 dimensions) or 'albert' (bge-m3 served by Albert, DINUM: separate 1024-dimension "
@@ -2557,6 +2747,24 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.embedding_provider:
         os.environ["EMBEDDING_PROVIDER"] = args.embedding_provider
+    # Serveur + modèle du recodage (sprint « configuration unifiée ») : traduits en
+    # modèle routé ; rien ne change en mode historique.
+    if args.phase in ("initial", "all"):
+        try:
+            routed = routed_model_for("recode", args.model, args.server)
+        except ServiceConfigError as exc:
+            print(f"Erreur critique : {exc} Arrêt.")
+            exit(2)
+        if routed is not None:
+            args.model = routed.routed_model
+            print(f"Recodage : {routed.description}")
+    # Politique d'inférence (ALBERT_DATA_POLICY) : modèle par défaut gpt-4o-mini
+    # en mode compatible ; albert_only refuse tout fournisseur autre qu'Albert.
+    args.model, policy_exc = apply_inference_policy(args.phase, args.model, args.model is not None)
+    if policy_exc is not None:
+        print(f"Erreur critique : {policy_exc} Arrêt.")
+        print(albert_abort_marker(policy_exc))
+        exit(2)
 
     # Setup logging for chunking phase
     chunking_log_path = os.path.join(args.output, "chunking.log")

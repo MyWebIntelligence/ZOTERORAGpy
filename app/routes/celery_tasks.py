@@ -374,7 +374,8 @@ async def submit_extraction_task(
 async def submit_chunking_task(
     path: str = Form(...),
     session_id: int = Form(...),
-    model: str = Form("gpt-4o-mini"),
+    model: str = Form(None),
+    server: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -384,7 +385,10 @@ async def submit_chunking_task(
     Args:
         path: Relative path to session directory
         session_id: Database session ID
-        model: LLM model for GPT recoding (default: gpt-4o-mini)
+        model: LLM model for GPT recoding (empty: the recoding service of the
+            .env, or gpt-4o-mini in historical mode)
+        server: API address for this run (sprint « configuration unifiée »);
+            empty: LLM_RECODE_SERVER, then LLM_DEFAULT_SERVER
         db: Database session
         current_user: Authenticated user (owner of the task)
 
@@ -403,6 +407,21 @@ async def submit_chunking_task(
         )
 
     runner = _runner()
+    from scripts.rad_settings.chat import routed_model_for
+    from scripts.rad_settings.models import ServiceConfigError
+    try:
+        from app.services.user_settings import get_user_settings
+
+        routed = routed_model_for("recode", model, server, user_values=get_user_settings(db, current_user))
+    except ServiceConfigError as exc:
+        return JSONResponse(status_code=400, content={
+            "error": str(exc), "model_not_configured": True, "variables": list(exc.variables)})
+    if routed is not None:
+        model = routed.routed_model
+    try:
+        model = runner.policy_chat_model(model)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc), "reason": getattr(exc, "reason", "bad_request")})
     model = model or runner.DEFAULT_CHUNKING_MODEL
 
     denied = _check_credentials(current_user, runner.STAGE_CHUNKING, model=model)
@@ -434,6 +453,8 @@ async def submit_dense_embedding_task(
     path: str = Form(...),
     session_id: int = Form(...),
     embedding_provider: Optional[str] = Form(None),
+    server: Optional[str] = Form(None),
+    model: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -465,12 +486,22 @@ async def submit_dense_embedding_task(
         )
 
     runner = _runner()
-    try:
-        provider = runner.resolve_embedding_provider(embedding_provider)
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+    # Couple EMBEDDING_SERVER + EMBEDDING_MODEL (lot L6) : il remplace embedding_provider.
+    from app.services.embedding_target import explicit_embedding_target
 
-    params = {} if provider is None else {"embedding_provider": provider}
+    try:
+        choice = explicit_embedding_target(server, model)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e), "model_not_configured": True})
+    if choice is not None:
+        provider = runner.ALBERT_DB_CHOICE if choice.server.key == runner.ALBERT_DB_CHOICE else None
+        params = {"embedding_server": choice.server_url, "embedding_model": choice.model}
+    else:
+        try:
+            provider = runner.resolve_embedding_provider(embedding_provider)
+        except ValueError as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+        params = {} if provider is None else {"embedding_provider": provider}
     denied = _check_credentials(current_user, runner.STAGE_DENSE, **params)
     if denied is not None:
         return denied

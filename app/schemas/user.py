@@ -171,6 +171,13 @@ class UserCredentialsResponse(BaseModel):
     # Albert (DINUM) : absent de la reponse (None, exclu) quand Albert est desactive ;
     # hors du schema OpenAPI (SkipJsonSchema), identique au schema historique.
     albert_api_key: SkipJsonSchema[Optional[CredentialValue]] = None
+    # Serveurs du sprint « configuration unifiée » (lot L9) : absents de la reponse
+    # tant que l'adresse du serveur n'est pas declaree ; hors du schema OpenAPI.
+    anthropic_api_key: SkipJsonSchema[Optional[CredentialValue]] = None
+    google_api_key: SkipJsonSchema[Optional[CredentialValue]] = None
+    deepseek_api_key: SkipJsonSchema[Optional[CredentialValue]] = None
+    qwen_api_key: SkipJsonSchema[Optional[CredentialValue]] = None
+    glm_api_key: SkipJsonSchema[Optional[CredentialValue]] = None
     # Vector Databases
     pinecone_api_key: CredentialValue
     pinecone_env: CredentialValue
@@ -206,6 +213,13 @@ class UserCredentialsUpdate(BaseModel):
     # Albert (DINUM) : ignore par PUT /users/me/credentials quand Albert est desactive ;
     # hors du schema OpenAPI (SkipJsonSchema), identique au schema historique.
     albert_api_key: SkipJsonSchema[Optional[str]] = Field(None, description="Albert (DINUM) API Key")
+    # Serveurs du sprint « configuration unifiee » (lot L9) : ignores par PUT
+    # /users/me/credentials tant que l'adresse du serveur n'est pas declaree.
+    anthropic_api_key: SkipJsonSchema[Optional[str]] = Field(None, description="Anthropic API Key")
+    google_api_key: SkipJsonSchema[Optional[str]] = Field(None, description="Google Gemini API Key")
+    deepseek_api_key: SkipJsonSchema[Optional[str]] = Field(None, description="DeepSeek API Key")
+    qwen_api_key: SkipJsonSchema[Optional[str]] = Field(None, description="Qwen API Key")
+    glm_api_key: SkipJsonSchema[Optional[str]] = Field(None, description="GLM API Key")
     # Vector Databases
     pinecone_api_key: Optional[str] = Field(None, description="Pinecone API Key")
     pinecone_env: Optional[str] = Field(None, description="Pinecone environment")
